@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — Config</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
+.card h3{color:var(--accent);margin-bottom:12px;font-size:15px;border-bottom:1px solid var(--border);padding-bottom:6px}
+.field{display:grid;grid-template-columns:200px 1fr;gap:8px;align-items:center;margin-bottom:8px}
+.field label{color:var(--dim);font-size:13px;text-align:right}
+.field input,.field select,.field textarea{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);outline:none}
+.field input[type=checkbox]{width:18px;height:18px;justify-self:start}
+.field textarea{font-family:'Cascadia Code','Fira Code',monospace;resize:vertical}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:0;z-index:10}
+td{padding:6px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--hover)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.ok{background:#003322;color:var(--ok)}
+.badge.warn{background:#332200;color:var(--warn)}
+.badge.err{background:#330000;color:var(--danger)}
+.badge.info{background:#002244;color:var(--link)}
+.btn{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+.btn-primary{background:var(--accent);color:#000}.btn-primary:hover{filter:brightness(1.2)}
+.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{filter:brightness(1.2)}
+.toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+.section-toggle{cursor:pointer;user-select:none}
+.section-toggle::before{content:'▶ ';font-size:11px}
+.section-toggle.open::before{content:'▼ '}
+@media(max-width:768px){.field{grid-template-columns:1fr}.field label{text-align:left}}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs">
+<a class="active" href="/">⚙️ Config</a>
+<a href="/status.html">📡 Status</a>
+<a href="/connections.html">🔌 Connections</a>
+<a href="/logs.html">📋 Logs</a>
+<a href="/messages.html">📨 Messages</a>
+<a href="/aircraft.html">✈️ Aircraft</a>
+<a href="/devices.html">📻 Devices</a>
+</div>
+</nav>
+
+<div class="main">
+<div class="toolbar">
+<button class="btn btn-primary" onclick="saveConfig()">💾 Save</button>
+<span id="save-status" style="color:var(--dim)"></span>
+</div>
+<div id="config-form"></div>
+</div>
+
+<script>
+let cfg={};
+
+const configSchema=[
+{title:'📍 Station',id:'station',fields:[
+    {k:'station.name',l:'Station name',t:'text',h:'Station identifier — used as MLAT username, and for OGN if not specified otherwise'},
+    {k:'station.lat',l:'Latitude',t:'number',s:'0.000001'},
+    {k:'station.lon',l:'Longitude',t:'number',s:'0.000001'},
+    {k:'station.max_range',l:'Max Range (NM)',t:'number',s:'1'},
+    {k:'mlat.alt',l:'Altitude (m)',t:'number',s:'1',h:'Station altitude — also used for MLAT'},
+]},
+{title:'🌐 OGN',id:'ogn',fields:[
+    {k:'ogn.station',l:'Station name',t:'text',h:'Station name for APRS-IS / Open Glider Network'},
+    {k:'ogn.server',l:'Server',t:'text'},
+    {k:'ogn.port',l:'Port',t:'number',s:'1'},
+]},
+{title:'🔑 Encryption Keys',id:'keys',fields:[
+    {k:'keys.flarm_key_table',l:'FLARM key_table (12×hex)',t:'text',h:'12 hex values separated by comma for the XXTEA table. E.g.: a1b2c3d4,5e6f7a8b,...'},
+    {k:'keys.flarm_key2',l:'FLARM key2',t:'text',h:'FLARM V6 key (hex 32bit)'},
+    {k:'keys.flarm_key3',l:'FLARM key3',t:'text',h:'FLARM V6 key (hex 32bit)'},
+    {k:'keys.flarm_key4',l:'FLARM key4',t:'text',h:'FLARM V7 key (hex 32bit)'},
+    {k:'keys.flarm_key5',l:'FLARM key5 (4×hex)',t:'text',h:'4 hex values separated by comma for V7'},
+]},
+{title:'📊 Network',id:'network',fields:[
+    {k:'network.raw_out',l:'Raw output ports',t:'text',h:'Ports for raw output (default: 30002)'},
+    {k:'network.raw_in',l:'Raw input ports',t:'text',h:'Ports for raw input (default: 30001)'},
+    {k:'network.sbs_out',l:'SBS output ports',t:'text',h:'Ports for SBS/BaseStation output (default: 30003)'},
+    {k:'network.beast_in',l:'Beast input ports',t:'text',h:'Ports for Beast input (default: 30004,30104)'},
+    {k:'network.beast_out',l:'Beast output ports',t:'text',h:'Ports for Beast output (default: 30005)'},
+    {k:'network.json_dir',l:'JSON directory',t:'text',h:'Directory for periodic JSON output (aircraft.json, stats.json)'},
+]},
+{title:'🔐 Panel',id:'panel',fields:[
+    {k:'panel.port',l:'Panel port',t:'number',s:'1'},
+    {k:'panel.password',l:'New password',t:'password'},
+]},
+];
+
+function getNestedVal(obj,path){
+    return path.split('.').reduce((o,k)=>o&&o[k],obj);
+}
+
+function renderConfigForm(){
+    let html='';
+    for(const sec of configSchema){
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${sec.title}</h3><div>`;
+        for(const f of sec.fields){
+            const val=getNestedVal(cfg,f.k);
+            const help=f.h?`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">${f.h}</div>`:'';
+            if(f.t==='checkbox'){
+                html+=`<div class="field"><label>${f.l}</label><input type="checkbox" data-key="${f.k}" ${val?'checked':''}></div>${help}`;
+            }else if(f.t==='textarea'){
+                html+=`<div class="field"><label>${f.l}</label><textarea data-key="${f.k}" rows="3">${val||''}</textarea></div>${help}`;
+            }else{
+                html+=`<div class="field"><label>${f.l}</label><input type="${f.t}" data-key="${f.k}" value="${val!=null?val:''}" ${f.s?'step="'+f.s+'"':''} ${f.t==='text'&&f.k.startsWith('keys.')?'style="font-family:monospace;letter-spacing:1px"':''}></div>${help}`;
+            }
+        }
+        html+=`</div></div>`;
+    }
+
+    // ---- Feeder section ----
+    html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 Feeder</h3><div>`;
+
+    // OpenSky Network
+    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <input type="checkbox" data-key="opensky.enabled" ${cfg.opensky&&cfg.opensky.enabled?'checked':''} style="width:20px;height:20px">
+        <div style="flex:1"><strong style="color:var(--accent)">OpenSky Network</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to opensky-network.org — academic open data project</span></div>
+        <a href="https://opensky-network.org/my-opensky" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
+    </div>`;
+    html+=`<div style="padding:8px 0 8px 32px">
+        <div class="field"><label>Username</label><input type="text" data-key="opensky.username" value="${cfg.opensky&&cfg.opensky.username||''}"></div>
+        <div class="field"><label>Host</label><input type="text" data-key="opensky.host" value="${cfg.opensky&&cfg.opensky.host||''}"></div>
+        <div class="field"><label>Port</label><input type="number" data-key="opensky.port" value="${cfg.opensky&&cfg.opensky.port||10004}" step="1"></div>
+    </div>`;
+
+    // PiAware / FlightAware
+    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <input type="checkbox" data-key="piaware.enabled" ${cfg.piaware&&cfg.piaware.enabled?'checked':''} style="width:20px;height:20px">
+        <div style="flex:1"><strong style="color:var(--accent)">PiAware / FlightAware</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to FlightAware for statistics and tracking</span></div>
+        <a href="https://flightaware.com/adsb/stats" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
+    </div>`;
+    html+=`<div style="padding:8px 0 8px 32px">
+        <div class="field"><label>Feeder ID</label><input type="text" data-key="piaware.feeder_id" value="${cfg.piaware&&cfg.piaware.feeder_id||''}" style="font-family:monospace"></div>
+    </div>`;
+
+    // FLARM / OGN
+    {const flarmOn=cfg.sdr_flarm&&cfg.sdr_flarm.enabled;
+    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:20px;width:20px;text-align:center">${flarmOn?'🟢':'🔴'}</span>
+        <div style="flex:1"><strong style="color:var(--accent)">FLARM / Open Glider Network</strong><br><span style="color:var(--dim);font-size:12px">${flarmOn?'Active — managed from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page':'Inactive — assign a dongle from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
+        <a href="http://live.glidernet.org" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
+    </div>`;}
+    html+=`<div style="padding:8px 0 8px 32px">
+        <div class="field"><label>Solo OGN</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${cfg.sdr_flarm&&cfg.sdr_flarm.ogn_only?'checked':''}></div>
+    </div>`;
+
+    // Beast feeds
+    const feedInfo={
+        'ADSBx':{desc:'ADS-B Exchange — community-driven aggregator, no restrictions',url:'https://adsbexchange.com'},
+        'adsb.fi':{desc:'adsb.fi — open and free Finnish tracker',url:'https://adsb.fi'},
+        'FlyItaly':{desc:'Fly Italy ADSB — Italian ADS-B tracking network',url:'https://flyitalyadsb.com'},
+        'PlaneWatch':{desc:'plane.watch — open source Australian tracker',url:'https://plane.watch'},
+        'adsb.one':{desc:'adsb.one — global open data aggregator',url:'https://adsb.one'},
+        'adsb.lol':{desc:'adsb.lol — non-profit open data aggregator',url:'https://adsb.lol'},
+        'airplanes.live':{desc:'airplanes.live — live tracker with 3D map',url:'https://airplanes.live'},
+        'Planespotters':{desc:'Planespotters — aircraft database and photos',url:'https://planespotters.net'},
+        'TheAirTraffic':{desc:'TheAirTraffic — air traffic aggregator',url:'https://theairtraffic.com'},
+        'AVDelphi':{desc:'AVDelphi — air traffic analysis platform',url:'https://avdelphi.com'},
+        'ADSBHub':{desc:'ADSBHub — aggregator with free sharing',url:'https://adsbhub.org'},
+    };
+
+    html+=`<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+        <strong style="color:var(--accent);font-size:14px">📡 Beast Feeds — Aggregatori Open Data</strong>
+        <div style="color:var(--dim);font-size:12px;margin:4px 0 12px 0">Enable/disable data feeding to each aggregator. Feeds use the Beast (or RAW) protocol on the indicated port.</div>
+    </div>`;
+
+    if(cfg.beast_feeds&&cfg.beast_feeds.length){
+        for(let i=0;i<cfg.beast_feeds.length;i++){
+            const bf=cfg.beast_feeds[i];
+            const info=feedInfo[bf.name]||{desc:'Custom feed',url:''};
+            const isRaw=bf.format==='raw';
+            const isSbs=bf.format==='sbs';
+            html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+                <input type="checkbox" data-key="beast_feeds.${i}.enabled" ${bf.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0">
+                <div style="flex:1;min-width:0">
+                    <strong style="color:${bf.enabled?'var(--accent)':'var(--dim)'}">${bf.name}</strong>
+                    ${isRaw?'<span class="badge warn" style="margin-left:6px">RAW</span>':''}
+                    ${isSbs?'<span class="badge info" style="margin-left:6px">SBS</span>':''}
+                    <br><span style="color:var(--dim);font-size:11px">${info.desc}</span>
+                </div>
+                <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+                    <span style="color:var(--dim);font-size:11px">${bf.host}:${bf.port}</span>
+                </div>
+                ${info.url?`<a href="${info.url}" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0">↗</a>`:''}
+            </div>`;
+            // ADSBHub: show ckey field
+            if(bf.name==='ADSBHub'){
+                const ckeyVal=cfg.adsbhub&&cfg.adsbhub.ckey||'';
+                html+=`<div style="padding:6px 0 6px 32px">
+                    <div class="field"><label>Station ckey</label><input type="text" data-key="adsbhub.ckey" id="adsbhub-ckey-input" style="font-family:monospace;font-size:11px;letter-spacing:0.5px"></div>
+                    <div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Dynamic IP update key — from the Settings page on adsbhub.org</div>
+                </div>`;
+                // Set value via JS to avoid HTML attribute escaping issues
+                setTimeout(()=>{const el=document.getElementById('adsbhub-ckey-input');if(el)el.value=ckeyVal;},0);
+            }
+        }
+    } else {
+        html+=`<div style="color:var(--dim);font-size:12px;margin-top:6px;padding:8px;background:var(--input-bg);border-radius:4px">No beast feeds available.</div>`;
+    }
+
+    html+=`</div></div>`;
+
+    // MLAT section
+    if(cfg.mlat&&cfg.mlat.servers){
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 MLAT (${cfg.mlat.servers.length} server)</h3><div>`;
+        html+=`<div class="field"><label>Username</label><span style="color:var(--accent);font-size:13px">${cfg.station&&cfg.station.name||cfg.mlat&&cfg.mlat.user||'(not set)'}</span></div>`;
+        html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Set in the Station → Station name section</div>`;
+        html+=`<div class="field"><label>Return results</label><input type="checkbox" data-key="mlat.return_results" ${cfg.mlat.return_results?'checked':''}></div>`;
+        if(cfg.mlat.servers.length){
+            html+=`<table><tr><th>Host</th><th>Port</th><th>State</th></tr>`;
+            const mstates=['disconnected','connecting','handshake','ready'];
+            for(const ms of cfg.mlat.servers){
+                const st=mstates[ms.state]||'?';
+                const cls=ms.state===3?'ok':ms.state===0?'err':'warn';
+                html+=`<tr><td>${ms.host}</td><td>${ms.port}</td><td><span class="badge ${cls}">${st}</span></td></tr>`;
+            }
+            html+=`</table>`;
+        }
+        html+=`</div></div>`;
+    }
+
+    // Dynamic SDR Receivers section
+    html+=`<div id="sdr-receivers-config"></div>`;
+    document.getElementById('config-form').innerHTML=html;
+    loadSdrReceiverConfig();
+}
+
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)'};
+const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈'};
+
+async function loadSdrReceiverConfig(){
+    try{
+        const [devRes,rxRes]=await Promise.all([fetch('/api/devices').then(r=>r.json()),fetch('/api/receivers').then(r=>r.json())]);
+        let html='';
+        const assigned=devRes.sdr_devices.filter(d=>d.role&&d.role!=='none');
+        if(assigned.length===0&&rxRes.count===0){
+            html+=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--dim)">No SDR dongles assigned. Use the <a href="/devices.html" style="color:var(--accent)">Devices</a> page to assign roles to dongles.</p></div>`;
+        }else{
+            for(const dev of assigned){
+                const rx=rxRes.receivers.find(r=>r.serial===dev.serial||r.serial_actual===dev.serial);
+                const role=rx?rx.role:dev.role;
+                const gain=rx?rx.gain:40.0;
+                const ppm=rx?rx.ppm:0;
+                const state=rx?rx.state:'legacy';
+                const stCls=state==='running'?'ok':state==='error'?'err':'info';
+                const icon=roleIcons[role]||'📡';
+                const label=roleLabels[role]||role.toUpperCase();
+                html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${icon} ${label} — SN: ${dev.serial}</h3><div>`;
+                html+=`<div class="field"><label>Tuner</label><span style="color:var(--accent)">${dev.tuner} (${dev.freq_range})</span></div>`;
+                html+=`<div class="field"><label>State</label><span class="badge ${stCls}">${state.toUpperCase()}</span></div>`;
+                html+=`<div class="field"><label>Gain (dB)</label><input type="number" step="0.1" value="${gain.toFixed(1)}" id="rx_gain_${dev.serial}" min="-10" max="50"></div>`;
+                html+=`<div class="field"><label>PPM Correction</label><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}"></div>`;
+                if(role==='adsb'){
+                    const ac=cfg.sdr_adsb||{};
+                    html+=`<div class="field"><label>Adaptive Range</label><input type="checkbox" data-key="sdr_adsb.adaptive_range" ${ac.adaptive_range?'checked':''}></div>`;
+                    html+=`<div class="field"><label>Adaptive Burst</label><input type="checkbox" data-key="sdr_adsb.adaptive_burst" ${ac.adaptive_burst?'checked':''}></div>`;
+                    html+=`<div class="field"><label>Min Gain (dB)</label><input type="number" step="0.1" data-key="sdr_adsb.adaptive_min_gain" value="${ac.adaptive_min_gain||0}"></div>`;
+                    html+=`<div class="field"><label>Max Gain (dB)</label><input type="number" step="0.1" data-key="sdr_adsb.adaptive_max_gain" value="${ac.adaptive_max_gain||99999}"></div>`;
+                    html+=`<div class="field"><label>CRC Rescue</label><input type="checkbox" data-key="sdr_adsb.crc_rescue" ${ac.crc_rescue?'checked':''}></div>`;
+                    html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Attempts to recover messages with corrupted preamble but valid CRC</div>`;
+                    html+=`<div class="field"><label>Error Correction</label><input type="number" step="1" data-key="sdr_adsb.fix_crc" value="${ac.fix_crc!=null?ac.fix_crc:1}" min="0" max="2"></div>`;
+                    html+=`<div class="field"><label>Mode A/C</label><input type="checkbox" data-key="sdr_adsb.mode_ac" ${ac.mode_ac?'checked':''}></div>`;
+                }
+                if(role==='flarm'){
+                    const fc=cfg.sdr_flarm||{};
+                    html+=`<div class="field"><label>Solo OGN</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${fc.ogn_only?'checked':''}></div>`;
+                    html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">If enabled, FLARM data is sent only to OGN</div>`;
+                }
+                html+=`</div></div>`;
+            }
+        }
+        document.getElementById('sdr-receivers-config').innerHTML=html;
+    }catch(e){
+        document.getElementById('sdr-receivers-config').innerHTML=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--danger)">Error: ${e}</p></div>`;
+    }
+}
+
+async function loadConfig(){
+    try{
+        const r=await fetch('/api/config');
+        cfg=await r.json();
+        renderConfigForm();
+    }catch(e){document.getElementById('config-form').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
+}
+
+// ---- Security: Input sanitization ----
+const DANGEROUS_CHARS=/[`$!|;&()<>'"]/;
+const DANGEROUS_PATTERNS=/(\.\.|\/\/|\\\\|%2e|%00|<script|javascript:|onerror|onload)/i;
+
+async function saveConfig(){
+    let hasError=false;
+    document.querySelectorAll('[data-key]').forEach(el=>{
+        const keys=el.dataset.key.split('.');
+        let obj=cfg;
+        for(let i=0;i<keys.length-1;i++){if(!obj[keys[i]])obj[keys[i]]={};obj=obj[keys[i]];}
+        if(el.type==='checkbox'){obj[keys[keys.length-1]]=el.checked;}
+        else if(el.type==='number'){obj[keys[keys.length-1]]=parseFloat(el.value)||0;}
+        else{
+            const raw=el.value;
+            const skipSanitize=el.dataset.key==='adsbhub.ckey';
+            if(!skipSanitize&&(DANGEROUS_CHARS.test(raw)||DANGEROUS_PATTERNS.test(raw))){
+                el.style.borderColor='var(--danger)';
+                hasError=true;
+            }else{
+                el.style.borderColor='';
+                obj[keys[keys.length-1]]=raw;
+            }
+        }
+    });
+    if(hasError){
+        document.getElementById('save-status').textContent='❌ Forbidden characters in highlighted fields';
+        document.getElementById('save-status').style.color='var(--danger)';
+        return;
+    }
+    document.getElementById('save-status').textContent='Saving...';
+    document.getElementById('save-status').style.color='var(--dim)';
+    try{
+        const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+        const j=await r.json();
+        if(j.error){document.getElementById('save-status').textContent='❌ '+j.error;document.getElementById('save-status').style.color='var(--danger)';return;}
+        document.getElementById('save-status').textContent='✅ Configuration saved and applied';document.getElementById('save-status').style.color='var(--ok)';
+        setTimeout(()=>{document.getElementById('save-status').textContent='';loadConfig();},3000);
+    }catch(e){document.getElementById('save-status').textContent='❌ Error: '+e;}
+}
+
+loadConfig();
+</script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — Logs</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.btn{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{filter:brightness(1.2)}
+.toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+#logbox{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:calc(100vh - 140px);overflow-y:auto;color:var(--text)}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs">
+<a href="/">⚙️ Config</a>
+<a href="/status.html">📡 Status</a>
+<a href="/connections.html">🔌 Connections</a>
+<a class="active" href="/logs.html">📋 Logs</a>
+<a href="/messages.html">📨 Messages</a>
+<a href="/aircraft.html">✈️ Aircraft</a>
+<a href="/devices.html">📻 Devices</a>
+</div>
+</nav>
+
+<div class="main">
+<div class="toolbar">
+<label style="color:var(--dim)"><input type="checkbox" id="log-scroll" checked> Auto-scroll</label>
+<button class="btn btn-danger" onclick="clearLogs()" style="padding:4px 12px">Clear</button>
+</div>
+<div id="logbox"></div>
+</div>
+
+<script>
+async function loadLogs(){
+    try{
+        const r=await fetch('/api/logs');
+        const d=await r.json();
+        const box=document.getElementById('logbox');
+        box.textContent=d.lines.join('\n');
+        if(document.getElementById('log-scroll').checked)box.scrollTop=box.scrollHeight;
+    }catch(e){}
+}
+function clearLogs(){document.getElementById('logbox').textContent='';}
+
+loadLogs();
+setInterval(loadLogs,1500);
+</script>
+</body>
+</html>

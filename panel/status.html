@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — Status</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.ok{background:#003322;color:var(--ok)}
+.badge.warn{background:#332200;color:var(--warn)}
+.badge.err{background:#330000;color:var(--danger)}
+.badge.info{background:#002244;color:var(--link)}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.status-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;display:flex;flex-direction:column;min-height:120px}
+.status-card h4{color:var(--accent);margin-bottom:8px;font-size:14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.status-card .detail{color:var(--dim);font-size:12px;margin-bottom:3px}
+.status-card .detail strong{color:var(--text)}
+.status-card a{color:var(--link);font-size:11px;text-decoration:none;margin-top:auto;padding-top:6px}
+.status-card a:hover{text-decoration:underline}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.dot.green{background:var(--ok)}.dot.red{background:var(--danger)}.dot.yellow{background:var(--warn)}.dot.gray{background:#666}
+.section-title{color:var(--accent);font-size:13px;text-transform:uppercase;letter-spacing:1px;margin:18px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.section-title:first-child{margin-top:0}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs">
+<a href="/">⚙️ Config</a>
+<a class="active" href="/status.html">📡 Status</a>
+<a href="/connections.html">🔌 Connections</a>
+<a href="/logs.html">📋 Logs</a>
+<a href="/messages.html">📨 Messages</a>
+<a href="/aircraft.html">✈️ Aircraft</a>
+<a href="/devices.html">📻 Devices</a>
+</div>
+</nav>
+
+<div class="main">
+<div id="status-content"></div>
+</div>
+
+<script>
+function cardHtml(f){
+    const isOff=f.enabled===false;
+    const st=isOff?'disabled':(f.state||'enabled');
+    const ok=!isOff&&['ready','logged_in','running','enabled'].includes(st);
+    const dot=isOff?'gray':ok?'green':['disconnected','failed'].includes(st)?'red':'yellow';
+    return `<div class="status-card" style="${isOff?'opacity:0.5':''}">
+        <h4><span class="dot ${dot}"></span> ${f.name} <span class="badge info">${f.type}</span>${isOff?' <span class="badge warn">OFF</span>':''}</h4>
+        ${f.host?`<div class="detail">Server: <strong>${f.host}${f.port?':'+f.port:''}</strong></div>`:''}
+        <div class="detail">State: <strong>${st}</strong></div>
+        ${f.station?`<div class="detail">Station: <strong>${f.station}</strong></div>`:''}
+        ${f.user?`<div class="detail">User: <strong>${f.user}</strong></div>`:''}
+        ${f.feeder_id?`<div class="detail">Feeder ID: <strong>${f.feeder_id}</strong></div>`:''}
+        ${f.packets?`<div class="detail">Packets: <strong>${f.packets}</strong></div>`:''}
+        ${f.frames?`<div class="detail">Frames: <strong>${f.frames}</strong></div>`:''}
+        ${f.msgs?`<div class="detail">Messages: <strong>${f.msgs}</strong></div>`:''}
+        ${f.aircraft?`<div class="detail">Aircraft: <strong>${f.aircraft}</strong></div>`:''}
+        ${f.uploads_ok?`<div class="detail">Upload OK: <strong>${f.uploads_ok}</strong> Fail: <strong>${f.uploads_fail||0}</strong></div>`:''}
+        ${f.link?`<a href="${f.link}" target="_blank">🔗 Check online</a>`:''}
+    </div>`;
+}
+
+async function loadStatus(){
+    try{
+        const r=await fetch('/api/status');
+        const d=await r.json();
+        const groups={beast:[],native:[],mlat:[],flarm:[]};
+        for(const f of d.feeders){
+            const t=f.type||'other';
+            if(groups[t]) groups[t].push(f); else{if(!groups.other)groups.other=[];groups.other.push(f);}
+        }
+        const labels={beast:'Beast Feeds',native:'Native Feeders',mlat:'MLAT Servers',flarm:'FLARM / OGN',other:'Other'};
+        let html='';
+        for(const[k,arr] of Object.entries(groups)){
+            if(!arr.length) continue;
+            html+=`<div class="section-title">${labels[k]||k} (${arr.length})</div><div class="grid">`;
+            for(const f of arr) html+=cardHtml(f);
+            html+='</div>';
+        }
+        document.getElementById('status-content').innerHTML=html||'<p style="color:var(--dim)">No feeders configured</p>';
+    }catch(e){document.getElementById('status-content').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
+}
+
+loadStatus();
+setInterval(loadStatus,5000);
+</script>
+</body>
+</html>

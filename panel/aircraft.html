@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — Aircraft</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.ok{background:#003322;color:var(--ok)}
+.badge.warn{background:#332200;color:var(--warn)}
+.badge.err{background:#330000;color:var(--danger)}
+.badge.info{background:#002244;color:var(--link)}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--head);color:var(--accent);padding:8px;text-align:left;cursor:pointer;position:sticky;top:0;z-index:10;user-select:none}
+th:hover{background:var(--hover)}
+td{padding:6px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--hover)}
+.icao-link{cursor:pointer;text-decoration:underline}
+.icao-link:hover{color:#fff}
+.ac-row-selected td{background:rgba(79,195,247,0.1)!important}
+#icao-side-panel{position:fixed;top:50px;right:0;width:340px;height:calc(100vh - 50px);background:var(--card);border-left:2px solid var(--accent);z-index:200;overflow-y:auto;padding:16px;transform:translateX(100%);transition:transform .3s}
+#icao-side-panel.show{transform:translateX(0)}
+#icao-side-panel h3{color:var(--accent);margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
+.close-btn{background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer}
+.close-btn:hover{color:var(--danger)}
+.info-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}
+.info-row .lbl{color:var(--dim)}
+.info-row .val{color:var(--text);text-align:right;max-width:200px;word-break:break-word}
+.photo{margin-top:12px;text-align:center}
+.photo img{max-width:100%;border-radius:6px;border:1px solid var(--border)}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs">
+<a href="/">⚙️ Config</a>
+<a href="/status.html">📡 Status</a>
+<a href="/connections.html">🔌 Connections</a>
+<a href="/logs.html">📋 Logs</a>
+<a href="/messages.html">📨 Messages</a>
+<a class="active" href="/aircraft.html">✈️ Aircraft</a>
+<a href="/devices.html">📻 Devices</a>
+</div>
+</nav>
+
+<div class="main">
+<div style="padding:8px 0 12px 0;border-bottom:1px solid var(--border);margin-bottom:8px">
+<span id="ac-count" style="font-size:16px;font-weight:600;color:var(--accent)"></span>
+<span id="ac-msgs" style="color:var(--dim);margin-left:16px"></span>
+<span id="ac-update" style="color:var(--dim);margin-left:16px;font-size:12px"></span>
+</div>
+<div style="display:flex;gap:0;align-items:flex-start">
+<div style="overflow-y:auto;max-height:calc(100vh - 120px);flex:1;min-width:0">
+<table id="ac-table">
+<thead><tr>
+<th onclick="sortAC('hex')">ICAO</th>
+<th onclick="sortAC('flight')">Callsign</th>
+<th onclick="sortAC('squawk')">Squawk</th>
+<th onclick="sortAC('alt_baro')">Alt(ft)</th>
+<th onclick="sortAC('gs')">GS(kt)</th>
+<th onclick="sortAC('track')">Hdg</th>
+<th onclick="sortAC('lat')">Lat</th>
+<th onclick="sortAC('lon')">Lon</th>
+<th onclick="sortAC('baro_rate')">VS</th>
+<th onclick="sortAC('category')">Cat</th>
+<th onclick="sortAC('rssi')">RSSI</th>
+<th onclick="sortAC('messages')">Msgs</th>
+<th onclick="sortAC('seen')">Seen</th>
+<th>Flags</th>
+</tr></thead>
+<tbody id="ac-body"></tbody>
+</table>
+</div>
+<div id="icao-side-panel">
+<h3><span id="icao-panel-title">Aircraft info</span><button class="close-btn" onclick="closeIcaoPanel()">&times;</button></h3>
+<div id="icao-panel-body"></div>
+</div>
+</div>
+</div>
+
+<script>
+let acData=[], sortKey='hex', sortDir=1, selectedIcao=null;
+const icaoCache={};
+
+function escapeHtml(s){
+    if(typeof s!=='string')return s;
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+const squawkMeanings={
+'7500':'⚠️ HIJACK — Unlawful interference',
+'7600':'⚠️ RADIO FAILURE (NORDO) — Communications lost',
+'7700':'🚨 GENERAL EMERGENCY — Mayday',
+'7000':'VFR — Conspicuity code (ICAO/EUR)',
+'2000':'IFR — Non-SSR environment / on surface (ICAO)',
+'1000':'IFR GAT — Mode S airspace (ICAO)',
+'1200':'VFR — Standard USA/Canada',
+'1400':'VFR — Above 12500 ft (USA)',
+'1202':'VFR — Gliders (USA)',
+'1234':'VFR general (some countries)',
+'0000':'SSR data unreliable',
+'0001':'Height Monitoring Unit',
+'0002':'Ground Transponder Testing',
+'0020':'Air Ambulance / HEMS (Helicopter Emergency Medical)',
+'0021':'Fixed-wing aircraft (service from ship)',
+'0022':'Helicopter (service from ship)',
+'0023':'SAR — Search and Rescue operations',
+'0024':'Radar Flight Evaluation / Calibration',
+'0033':'Paradropping / Skydiving',
+'0034':'Antenna trailing / target towing',
+'0036':'Helicopter Pipeline/Powerline Inspection',
+'7001':'Military fixed-wing low level',
+'7002':'Danger Areas General',
+'7003':'Military display / aerobatic transit',
+'7004':'Aerobatics and Display conspicuity',
+'7005':'High-Energy Manoeuvres',
+'7006':'Autonomous ops within TRA (Temporary Reserved Airspace)',
+'7007':'Open Skies Observation Aircraft',
+'7010':'Operating in Aerodrome Traffic Pattern',
+'3000':'NATO — AEW aircraft service','3100':'NATO — AEW aircraft service',
+'3200':'NATO — AEW aircraft service','3300':'NATO — AEW aircraft service',
+'3400':'NATO — AEW aircraft service','3500':'NATO — AEW aircraft service',
+'3600':'NATO — AEW aircraft service','3700':'NATO — AEW aircraft service',
+'4000':'NATO — AEW aircraft service','4100':'NATO — AEW aircraft service',
+'4200':'NATO — AEW aircraft service','4300':'NATO — AEW aircraft service',
+'4400':'NATO — AEW aircraft service','4500':'NATO — AEW aircraft service',
+'4600':'NATO — AEW aircraft service','4700':'NATO — AEW aircraft service',
+'5000':'NATO — AEW aircraft service','5100':'NATO — AEW aircraft service',
+'5200':'NATO — AEW aircraft service','5300':'NATO — AEW aircraft service',
+'5400':'NATO — AEW aircraft service','5500':'NATO — AEW aircraft service',
+'5600':'NATO — AEW aircraft service','5700':'NATO — AEW aircraft service',
+'7776':'SSR Monitors','7777':'SSR Monitors / Military intercept',
+};
+
+const squawkRanges=[
+{lo:0o0101,hi:0o0117,d:'Transit ORCAM Brussels'},{lo:0o0120,hi:0o0137,d:'Transit ORCAM Germany'},
+{lo:0o0140,hi:0o0177,d:'Transit ORCAM Amsterdam'},{lo:0o0270,hi:0o0277,d:'Superdomestic Ireland→DE/Benelux'},
+{lo:0o0301,hi:0o0377,d:'Transit ORCAM UK'},
+{lo:0o0501,hi:0o0577,d:'Transit ORCAM UK'},
+{lo:0o0601,hi:0o0637,d:'Transit ORCAM Germany'},{lo:0o0640,hi:0o0677,d:'Transit ORCAM Paris'},
+{lo:0o0701,hi:0o0777,d:'Transit ORCAM Maastricht'},
+{lo:0o1001,hi:0o1077,d:'Transit ORCAM Spain'},{lo:0o1101,hi:0o1137,d:'Transit ORCAM Rhein'},
+{lo:0o1140,hi:0o1177,d:'Transit ORCAM UK'},
+{lo:0o1301,hi:0o1327,d:'NATO Air Policing — Quick Reaction Alert'},
+{lo:0o1330,hi:0o1357,d:'Transit ORCAM Bremen'},{lo:0o1360,hi:0o1377,d:'Transit ORCAM Munich'},
+{lo:0o1500,hi:0o1577,d:'NATO CAOC 9 Exercises'},{lo:0o1601,hi:0o1677,d:'NATO CAOC 9 Exercises'},
+{lo:0o1701,hi:0o1727,d:'NATO CAOC 9 Exercises'},
+{lo:0o2001,hi:0o2077,d:'Transit ORCAM Shannon'},
+{lo:0o2101,hi:0o2177,d:'Transit ORCAM Amsterdam'},
+{lo:0o2201,hi:0o2277,d:'Superdomestic UK→FR/ES/PT/Canaries'},
+{lo:0o2301,hi:0o2337,d:'Transit ORCAM Bordeaux'},{lo:0o2340,hi:0o2377,d:'Transit ORCAM Brest'},
+{lo:0o2400,hi:0o2477,d:'NATO CAOC 9 Exercises'},
+{lo:0o2501,hi:0o2577,d:'Transit ORCAM Karlsruhe'},
+{lo:0o2701,hi:0o2737,d:'Transit ORCAM Shannon'},{lo:0o2740,hi:0o2777,d:'Transit ORCAM Zurich'},
+{lo:0o3001,hi:0o3077,d:'Transit ORCAM Zurich'},
+{lo:0o3101,hi:0o3127,d:'Transit ORCAM Germany'},{lo:0o3130,hi:0o3177,d:'Transit ORCAM Amsterdam'},
+{lo:0o3221,hi:0o3257,d:'Superdomestic UK→Oceanic via Shannon/Dublin'},
+{lo:0o3401,hi:0o3457,d:'Superdomestic UK→DE/NL/Benelux'},
+{lo:0o3460,hi:0o3477,d:'Transit ORCAM Germany→UK'},
+{lo:0o3501,hi:0o3507,d:'Transit ORCAM Luxembourg'},
+{lo:0o3510,hi:0o3537,d:'Transit ORCAM Maastricht'},{lo:0o3540,hi:0o3577,d:'Transit ORCAM Berlin'},
+{lo:0o4001,hi:0o4077,d:'Transit ORCAM Aix-en-Provence'},
+{lo:0o4101,hi:0o4127,d:'Transit ORCAM Frankfurt'},{lo:0o4130,hi:0o4177,d:'Transit ORCAM Düsseldorf'},
+{lo:0o4215,hi:0o4247,d:'Superdomestic Shannon→UK'},
+{lo:0o4401,hi:0o4427,d:'Superdomestic Brussels→UK'},
+{lo:0o4430,hi:0o4477,d:'Superdomestic UK→Ireland/Oceanic'},
+{lo:0o4701,hi:0o4777,d:'Special Events (NOTAM activated)'},
+{lo:0o5201,hi:0o5260,d:'Transit ORCAM UK'},
+{lo:0o5261,hi:0o5270,d:'Transit ORCAM Dublin→Europe'},
+{lo:0o5271,hi:0o5277,d:'Transit ORCAM Channel Islands'},
+{lo:0o5301,hi:0o5377,d:'Transit ORCAM Barcelona'},
+{lo:0o5501,hi:0o5577,d:'Transit ORCAM Barcelona'},
+{lo:0o5601,hi:0o5647,d:'Transit ORCAM Paris'},
+{lo:0o5650,hi:0o5657,d:'Transit ORCAM Luxembourg'},
+{lo:0o5660,hi:0o5677,d:'Transit ORCAM Reims'},
+{lo:0o5701,hi:0o5777,d:'Transit ORCAM Geneva'},
+{lo:0o6201,hi:0o6227,d:'Superdomestic Dublin→UK'},
+{lo:0o6230,hi:0o6247,d:'Superdomestic UK→Scandinavia/Russia'},
+{lo:0o6250,hi:0o6257,d:'Superdomestic UK→Amsterdam'},
+{lo:0o6260,hi:0o6277,d:'Superdomestic Amsterdam→UK/Ireland/Iceland'},
+{lo:0o6301,hi:0o6377,d:'Superdomestic UK→France'},
+{lo:0o6601,hi:0o6677,d:'Transit ORCAM Germany'},
+{lo:0o6701,hi:0o6747,d:'Transit ORCAM Reims'},
+{lo:0o6750,hi:0o6777,d:'Transit ORCAM Aix-en-Provence'},
+{lo:0o7101,hi:0o7177,d:'Transit ORCAM Brussels'},
+{lo:0o7201,hi:0o7247,d:'Transit ORCAM Vienna'},
+{lo:0o7250,hi:0o7277,d:'Superdomestic UK/Shannon→France/Spain'},
+{lo:0o7310,hi:0o7327,d:'Superdomestic UK→Netherlands'},
+{lo:0o7330,hi:0o7347,d:'Superdomestic Netherlands→UK'},
+{lo:0o7440,hi:0o7477,d:'Superdomestic Spain/France→UK/Ireland/N.America'},
+{lo:0o7501,hi:0o7537,d:'Transit ORCAM Geneva'},
+{lo:0o7540,hi:0o7547,d:'Transit ORCAM Bremen'},{lo:0o7550,hi:0o7577,d:'Transit ORCAM Paris'},
+{lo:0o7601,hi:0o7607,d:'Superdomestic Shannon/Dublin→Nordic'},
+{lo:0o7620,hi:0o7677,d:'Superdomestic UK→USA/Canada/Caribbean'},
+{lo:0o7701,hi:0o7717,d:'Superdomestic UK→France/Spain'},
+{lo:0o7720,hi:0o7727,d:'Transit ORCAM Munich'},
+{lo:0o7730,hi:0o7757,d:'Superdomestic Shannon→UK'},
+{lo:0o7760,hi:0o7775,d:'Superdomestic UK→Channel Islands'},
+{lo:0o0401,hi:0o6777,d:'ATC assigned code'},
+];
+
+const emergencySquawks=['7500','7600','7700'];
+function isEmergencySquawk(sq){ return sq && emergencySquawks.includes(String(sq)); }
+function getSquawkTitle(sq){
+    if(!sq)return '';
+    const s=String(sq).padStart(4,'0');
+    if(squawkMeanings[s]) return squawkMeanings[s];
+    const n=parseInt(s,8);
+    for(const r of squawkRanges){if(n>=r.lo && n<=r.hi) return r.d+' ('+s+')';}
+    return 'Code '+s;
+}
+function sortAC(key){if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=1;}renderAC();}
+
+function isMilitary(a){
+    const n=parseInt(a.hex,16);
+    if(!isNaN(n)){
+        if(n>=0xAE0000&&n<=0xAFFFFF)return true;
+        if(n>=0x43C000&&n<=0x43CFFF)return true;
+    }
+    const sq=String(a.squawk||'');
+    if(/^700[1-7]$/.test(sq))return true;
+    if(icaoCache[a.hex]){const ow=(icaoCache[a.hex].registered_owner||'').toLowerCase();
+        if(/air force|navy|army|milit|luftwaffe|marine nationale|aeronautica|bundeswehr|ministry of defen|royal air force/.test(ow))return true;}
+    return false;
+}
+
+function renderAC(){
+    acData.sort((a,b)=>{
+        let va=a[sortKey],vb=b[sortKey];
+        if(va==null)va='';if(vb==null)vb='';
+        if(typeof va==='number'&&typeof vb==='number')return(va-vb)*sortDir;
+        return String(va).localeCompare(String(vb))*sortDir;
+    });
+    let html='';
+    for(const a of acData){
+        let flags='';
+        const isGhost=!a.flight&&a.lat==null&&a.lon==null;
+        if(isGhost)flags+=`<span class="badge" style="background:rgba(150,150,150,0.3);color:#888" title="ICAO only — no ADS-B data">👻</span> `;
+        if(isMilitary(a))flags+=`<span class="badge" style="background:rgba(255,160,0,0.25);color:#ffa000" title="Probable military aircraft">🎖️</span> `;
+        if(a.gps_integrity==='suspect')flags+=`<span class="badge err">GPS!</span> `;
+        else if(a.gps_integrity==='degraded')flags+=`<span class="badge warn">GPS↓</span> `;
+        if(a.circling)flags+=`<span class="badge info">🔄</span> `;
+        if(a.alert)flags+=`<span class="badge err">ALERT</span> `;
+        const sqStr=a.squawk||'';
+        const sqEmerg=isEmergencySquawk(sqStr);
+        const sqTitle=getSquawkTitle(sqStr);
+        const rowStyle=sqEmerg?'background:rgba(255,60,60,0.15)':'';
+        const sqStyle=sqEmerg?'color:var(--danger);font-weight:bold':'';
+        const safeHex=escapeHtml(a.hex||'');
+        const safeFlight=escapeHtml((a.flight||'').trim());
+        const safeSqStr=escapeHtml(sqStr);
+        const safeSqTitle=escapeHtml(sqTitle);
+        const safeCat=escapeHtml(a.category||'');
+        if(sqEmerg)flags+=`<span class="badge err">${escapeHtml(squawkMeanings[String(sqStr)]||'EMERG')}</span> `;
+        const ghostStyle=isGhost?'opacity:0.45':'';
+        html+=`<tr style="${rowStyle}${ghostStyle}" data-icao="${safeHex}">
+            <td class="icao-link" style="font-family:monospace;color:var(--accent)" onclick="lookupICAO('${safeHex}')">${safeHex}</td>
+            <td><strong>${safeFlight}</strong></td>
+            <td style="${sqStyle}" title="${safeSqTitle}">${safeSqStr}</td>
+            <td>${a.alt_baro!=null?a.alt_baro:''}</td>
+            <td>${a.gs!=null?Math.round(a.gs):''}</td>
+            <td>${a.track!=null?Math.round(a.track)+'°':''}</td>
+            <td>${a.lat!=null?a.lat.toFixed(4):''}</td>
+            <td>${a.lon!=null?a.lon.toFixed(4):''}</td>
+            <td>${a.baro_rate!=null?a.baro_rate:''}</td>
+            <td>${safeCat}</td>
+            <td>${a.rssi!=null?a.rssi.toFixed(1):''}</td>
+            <td>${a.messages||''}</td>
+            <td>${a.seen!=null?a.seen.toFixed(1)+'s':''}</td>
+            <td>${flags}</td>
+        </tr>`;
+    }
+    document.getElementById('ac-body').innerHTML=html;
+    if(selectedIcao){const sr=document.querySelector(`tr[data-icao="${selectedIcao}"]`);if(sr)sr.classList.add('ac-row-selected');}
+}
+
+function closeIcaoPanel(){document.getElementById('icao-side-panel').classList.remove('show');selectedIcao=null;document.querySelectorAll('.ac-row-selected').forEach(r=>r.classList.remove('ac-row-selected'));}
+
+async function lookupICAO(hex){
+    if(!hex)return;
+    if(!/^[0-9a-fA-F]{1,6}$/.test(hex))return;
+    selectedIcao=hex;
+    document.querySelectorAll('.ac-row-selected').forEach(r=>r.classList.remove('ac-row-selected'));
+    const row=document.querySelector(`tr[data-icao="${hex}"]`);
+    if(row)row.classList.add('ac-row-selected');
+    const panel=document.getElementById('icao-side-panel');
+    const title=document.getElementById('icao-panel-title');
+    const body=document.getElementById('icao-panel-body');
+    title.textContent=`✈ ${hex.toUpperCase()}`;
+    panel.classList.add('show');
+
+    if(icaoCache[hex]){
+        renderIcaoInfo(hex,icaoCache[hex]);
+        return;
+    }
+
+    // 1) adsbdb.com
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">⏳ 1/3 adsbdb.com...</div>';
+    try{
+        const r=await fetch(`https://api.adsbdb.com/v0/aircraft/${hex}`);
+        const d=await r.json();
+        if(d.response&&d.response.aircraft){
+            const info=d.response.aircraft;
+            info._src='adsbdb.com';
+            icaoCache[hex]=info;
+            renderIcaoInfo(hex,info);
+            return;
+        }
+    }catch(e){}
+
+    // 2) hexdb.io
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">⏳ 2/3 hexdb.io...</div>';
+    try{
+        const r=await fetch(`https://hexdb.io/api/v1/aircraft/${hex}`);
+        if(r.ok){
+            const d=await r.json();
+            if(d.Registration||d.RegisteredOwners||d.Type){
+                const info={
+                    registration:d.Registration||'',
+                    registered_owner:d.RegisteredOwners||'',
+                    type:d.Type||'',
+                    manufacturer:d.Manufacturer||'',
+                    icao_type:d.ICAOTypeCode||'',
+                    registered_owner_country_name:'',
+                    url_photo:'',url_photo_thumbnail:'',
+                    _src:'hexdb.io'
+                };
+                icaoCache[hex]=info;
+                renderIcaoInfo(hex,info);
+                return;
+            }
+        }
+    }catch(e){}
+
+    // 3) opensky-network.org
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">⏳ 3/3 opensky-network.org...</div>';
+    try{
+        const r=await fetch(`https://opensky-network.org/api/metadata/aircraft/icao/${hex}`);
+        if(r.ok){
+            const d=await r.json();
+            if(d.registration||d.owner||d.model){
+                const info={
+                    registration:d.registration||'',
+                    registered_owner:d.owner||d.operatorCallsign||'',
+                    type:d.model||'',
+                    manufacturer:d.manufacturerName||'',
+                    icao_type:d.typecode||'',
+                    registered_owner_country_name:d.country||'',
+                    url_photo:'',url_photo_thumbnail:'',
+                    _src:'opensky-network.org'
+                };
+                icaoCache[hex]=info;
+                renderIcaoInfo(hex,info);
+                return;
+            }
+        }
+    }catch(e){}
+
+    icaoCache[hex]={_src:'none'};
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">No information found for <strong>'+hex.toUpperCase()+'</strong><br><span style="font-size:11px;margin-top:6px;display:block">Searched on: adsbdb.com, hexdb.io, opensky-network.org</span></div>';
+}
+
+function renderIcaoInfo(hex,info){
+    const body=document.getElementById('icao-panel-body');
+    const title=document.getElementById('icao-panel-title');
+    const reg=escapeHtml(info.registration||'');
+    const owner=escapeHtml(info.registered_owner||info.owner||'');
+    const type=escapeHtml(info.type||'');
+    const mfr=escapeHtml(info.manufacturer||'');
+    const icaoType=escapeHtml(info.icao_type||'');
+    const country=escapeHtml(info.registered_owner_country_name||'');
+    const rawUrl=info.url_photo||info.image||'';
+    const rawThumb=info.url_photo_thumbnail||'';
+    const url=(rawUrl&&/^https?:\/\//i.test(rawUrl))?escapeHtml(rawUrl):'';
+    const urlThumb=(rawThumb&&/^https?:\/\//i.test(rawThumb))?escapeHtml(rawThumb):'';
+    const src=escapeHtml(info._src||'');
+    if(reg||owner)title.textContent=`✈ ${(info.registration||hex.toUpperCase())} — ${(info.registered_owner||info.owner||'')}`;
+    const isMil=/air force|navy|army|milit|luftwaffe|marine nationale|aeronautica|bundeswehr|ministry of defen|royal air force/.test((info.registered_owner||'').toLowerCase());
+    const dbFields=[
+        ['ICAO',escapeHtml(hex.toUpperCase())],
+        ['Registration',reg||'—'],
+        ['Owner',(isMil?'🎖️ ':'')+owner||'—'],
+        ['Type',type||'—'],
+        ['Manufacturer',mfr||'—'],
+        ['ICAO Type',icaoType||'—'],
+        ['Country',country||'—'],
+    ];
+    let html='';
+    if(isMil)html+='<div style="background:rgba(255,160,0,0.15);border:1px solid rgba(255,160,0,0.3);border-radius:6px;padding:6px;text-align:center;margin-bottom:8px;color:#ffa000;font-weight:600">🎖️ Military Aircraft</div>';
+    html+=dbFields.map(f=>`<div class="info-row"><span class="lbl">${f[0]}</span><span class="val">${f[1]}</span></div>`).join('');
+    if(urlThumb||url){
+        html+=`<div class="photo"><img src="${urlThumb||url}" alt="${reg}" onerror="this.parentElement.style.display='none'"></div>`;
+    }
+    if(src)html+=`<div style="text-align:right;color:var(--dim);font-size:10px;margin-top:6px">source: ${src}</div>`;
+    body.innerHTML=html;
+}
+
+async function loadAircraft(){
+    try{
+        const r=await fetch('/api/aircraft');
+        const d=await r.json();
+        acData=d.aircraft||[];
+        document.getElementById('ac-count').textContent=`✈ ${acData.length} aircraft`;
+        document.getElementById('ac-msgs').textContent=`Total messages: ${(d.messages||0).toLocaleString()}`;
+        document.getElementById('ac-update').textContent=`Updated: ${new Date().toLocaleTimeString()}`;
+        renderAC();
+    }catch(e){}
+}
+
+loadAircraft();
+setInterval(loadAircraft,1000);
+</script>
+</body>
+</html>

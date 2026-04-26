@@ -1,0 +1,30 @@
+# Compiled binaries
+*.o
+dump1090
+view1090
+faup1090
+starch-benchmark
+
+# Configuration (may contain user keys/credentials)
+panel.conf
+*.env
+.env*
+*.key
+*.pem
+*.crt
+
+# Editor / OS
+.*.swp
+*~
+*.rej
+*.orig
+
+# Build artifacts
+wisdom.local
+testfiles/*.bin
+misc
+frames.js
+untrackedDeveloperSettings.js
+
+# Large data files (download separately for aircraft DB rebuild)
+tools/*.csv.xz

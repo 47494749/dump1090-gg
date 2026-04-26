@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg-light Control Panel</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.tab{display:none;padding:16px;max-width:1600px;margin:0 auto}
+.tab.active{display:block}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
+.card h3{color:var(--accent);margin-bottom:12px;font-size:15px;border-bottom:1px solid var(--border);padding-bottom:6px}
+.field{display:grid;grid-template-columns:200px 1fr;gap:8px;align-items:center;margin-bottom:8px}
+.field label{color:var(--dim);font-size:13px;text-align:right}
+.field input,.field select,.field textarea{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);outline:none}
+.field input[type=checkbox]{width:18px;height:18px;justify-self:start}
+.field textarea{font-family:'Cascadia Code','Fira Code',monospace;resize:vertical}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:0;z-index:10;cursor:pointer;user-select:none}
+td{padding:6px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--hover)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.ok{background:#003322;color:var(--ok)}
+.badge.warn{background:#332200;color:var(--warn)}
+.badge.err{background:#330000;color:var(--danger)}
+.badge.info{background:#002244;color:var(--link)}
+.btn{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+.btn-primary{background:var(--accent);color:#000}.btn-primary:hover{filter:brightness(1.2)}
+.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{filter:brightness(1.2)}
+.toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+#logbox,#msgbox{background:#000;color:#0f0;font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;
+padding:12px;border-radius:6px;height:70vh;overflow-y:auto;white-space:pre-wrap;word-break:break-all;border:1px solid var(--border)}
+.status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.status-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
+.status-card h4{font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.status-card .detail{color:var(--dim);font-size:12px;margin:2px 0}
+.status-card a{color:var(--link);text-decoration:none;font-size:12px}
+.status-card a:hover{text-decoration:underline}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.dot.green{background:var(--ok)}.dot.red{background:var(--danger)}.dot.yellow{background:var(--warn)}.dot.gray{background:#555}
+.section-toggle{cursor:pointer;user-select:none}
+.section-toggle::before{content:'▶ ';font-size:11px}
+.section-toggle.open::before{content:'▼ '}
+.gps-degraded{color:var(--warn)}.gps-suspect{color:var(--danger)}
+.circling{color:var(--link);font-weight:bold}
+.icao-link{cursor:pointer;text-decoration:underline;text-decoration-style:dotted}
+.icao-link:hover{color:var(--link)}
+#icao-side-panel{display:none;width:340px;min-width:300px;max-height:calc(100vh - 120px);overflow-y:auto;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-left:12px;flex-shrink:0}
+#icao-side-panel.show{display:block}
+#icao-side-panel h3{color:var(--accent);margin-bottom:10px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+#icao-side-panel .close-btn{font-size:18px;color:var(--dim);cursor:pointer;background:none;border:none;padding:0 4px}
+#icao-side-panel .close-btn:hover{color:var(--danger)}
+#icao-side-panel .info-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px}
+#icao-side-panel .info-row .lbl{color:var(--dim)}
+#icao-side-panel .info-row .val{color:var(--text);font-weight:500;text-align:right;max-width:180px;word-break:break-word}
+#icao-side-panel .photo{margin-top:10px;text-align:center}
+#icao-side-panel .photo img{max-width:100%;border-radius:6px;border:1px solid var(--border)}
+.ac-row-selected td{background:var(--hover)!important}
+@media(max-width:768px){.field{grid-template-columns:1fr}.field label{text-align:left}}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs" id="tabbar">
+<a onclick="showTab('config')" data-tab="config">⚙️ Config</a>
+<a onclick="showTab('status')" data-tab="status">📡 Status</a>
+<a onclick="showTab('logs')" data-tab="logs">📋 Logs</a>
+<a onclick="showTab('messages')" data-tab="messages">📨 Messages</a>
+<a onclick="showTab('aircraft')" data-tab="aircraft">✈️ Aircraft</a>
+<a href="/devices.html" style="text-decoration:none">🔌 Devices</a>
+</div>
+</nav>
+
+<div id="config" class="tab">
+<div class="toolbar">
+<button class="btn btn-primary" onclick="saveConfig()">💾 Save</button>
+<span id="save-status" style="color:var(--dim)"></span>
+</div>
+<div id="config-form"></div>
+</div>
+
+<div id="status" class="tab">
+<div class="toolbar"><span style="color:var(--dim)">Auto-refresh every 5s</span></div>
+<div class="status-grid" id="status-grid"></div>
+</div>
+
+<div id="logs" class="tab">
+<div class="toolbar">
+<label style="color:var(--dim)"><input type="checkbox" id="log-scroll" checked> Auto-scroll</label>
+<button class="btn btn-danger" onclick="clearLogs()" style="padding:4px 12px">Clear</button>
+</div>
+<div id="logbox"></div>
+</div>
+
+<div id="messages" class="tab">
+<div class="toolbar">
+<label style="color:var(--dim)"><input type="checkbox" id="msg-scroll" checked> Auto-scroll</label>
+</div>
+<div id="msgbox"></div>
+</div>
+
+<div id="aircraft" class="tab">
+<div style="padding:8px 0 12px 0;border-bottom:1px solid var(--border);margin-bottom:8px">
+<span id="ac-count" style="font-size:16px;font-weight:600;color:var(--accent)"></span>
+<span id="ac-msgs" style="color:var(--dim);margin-left:16px"></span>
+<span id="ac-update" style="color:var(--dim);margin-left:16px;font-size:12px"></span>
+</div>
+<div style="display:flex;gap:0;align-items:flex-start">
+<div style="overflow-y:auto;max-height:calc(100vh - 120px);flex:1;min-width:0">
+<table id="ac-table">
+<thead><tr>
+<th onclick="sortAC('hex')">ICAO</th>
+<th onclick="sortAC('flight')">Callsign</th>
+<th onclick="sortAC('squawk')">Squawk</th>
+<th onclick="sortAC('alt_baro')">Alt(ft)</th>
+<th onclick="sortAC('gs')">GS(kt)</th>
+<th onclick="sortAC('track')">Hdg</th>
+<th onclick="sortAC('lat')">Lat</th>
+<th onclick="sortAC('lon')">Lon</th>
+<th onclick="sortAC('baro_rate')">VS</th>
+<th onclick="sortAC('category')">Cat</th>
+<th onclick="sortAC('rssi')">RSSI</th>
+<th onclick="sortAC('messages')">Msgs</th>
+<th onclick="sortAC('seen')">Seen</th>
+<th>Flags</th>
+</tr></thead>
+<tbody id="ac-body"></tbody>
+</table>
+</div>
+<div id="icao-side-panel">
+<h3><span id="icao-panel-title">Aircraft info</span><button class="close-btn" onclick="closeIcaoPanel()">&times;</button></h3>
+<div id="icao-panel-body"></div>
+</div>
+</div>
+</div>
+
+<script>
+let currentTab='config', cfg={}, sortKey='hex', sortDir=1, logLines=[], msgLines=[];
+
+function showTab(t){
+    document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
+    document.querySelectorAll('.tabs a').forEach(el=>el.classList.remove('active'));
+    document.getElementById(t).classList.add('active');
+    document.querySelector(`[data-tab="${t}"]`).classList.add('active');
+    currentTab=t;
+    if(t==='config')loadConfig();
+    if(t==='status')loadStatus();
+    if(t==='aircraft')loadAircraft();
+    if(t==='logs')loadLogs();
+    if(t==='messages')loadMessages();
+}
+
+// ---- Config ----
+const configSchema=[
+{title:'📍 Station',id:'station',fields:[
+    {k:'station.lat',l:'Latitude',t:'number',s:'0.000001'},
+    {k:'station.lon',l:'Longitude',t:'number',s:'0.000001'},
+    {k:'station.max_range',l:'Max Range (NM)',t:'number',s:'1'},
+]},
+{title:'🌐 OGN',id:'ogn',fields:[
+    {k:'ogn.station',l:'Station name',t:'text',h:'Station name for APRS-IS / Open Glider Network'},
+    {k:'ogn.server',l:'Server',t:'text'},
+    {k:'ogn.port',l:'Port',t:'number',s:'1'},
+]},
+{title:'🔑 Encryption Keys',id:'keys',fields:[
+    {k:'keys.flarm_key_table',l:'FLARM key_table (12×hex)',t:'text',h:'12 hex values separated by comma for the XXTEA table. E.g.: a1b2c3d4,5e6f7a8b,...'},
+    {k:'keys.flarm_key2',l:'FLARM key2',t:'text',h:'FLARM V6 key (hex 32bit)'},
+    {k:'keys.flarm_key3',l:'FLARM key3',t:'text',h:'FLARM V6 key (hex 32bit)'},
+    {k:'keys.flarm_key4',l:'FLARM key4',t:'text',h:'FLARM V7 key (hex 32bit)'},
+    {k:'keys.flarm_key5',l:'FLARM key5 (4×hex)',t:'text',h:'4 hex values separated by comma for V7'},
+]},
+{title:'📊 Network',id:'network',fields:[
+    {k:'network.raw_out',l:'Raw output ports',t:'text',h:'Ports for raw output (default: 30002)'},
+    {k:'network.raw_in',l:'Raw input ports',t:'text',h:'Ports for raw input (default: 30001)'},
+    {k:'network.sbs_out',l:'SBS output ports',t:'text',h:'Ports for SBS/BaseStation output (default: 30003)'},
+    {k:'network.beast_in',l:'Beast input ports',t:'text',h:'Ports for Beast input (default: 30004,30104)'},
+    {k:'network.beast_out',l:'Beast output ports',t:'text',h:'Ports for Beast output (default: 30005)'},
+    {k:'network.json_dir',l:'JSON directory',t:'text',h:'Directory for periodic JSON output (aircraft.json, stats.json)'},
+]},
+{title:'🔐 Panel',id:'panel',fields:[
+    {k:'panel.port',l:'Panel port',t:'number',s:'1'},
+    {k:'panel.password',l:'New password',t:'password'},
+]},
+];
+
+function getNestedVal(obj,path){
+    return path.split('.').reduce((o,k)=>o&&o[k],obj);
+}
+
+function renderConfigForm(){
+    let html='';
+    for(const sec of configSchema){
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${sec.title}</h3><div>`;
+        for(const f of sec.fields){
+            const val=getNestedVal(cfg,f.k);
+            const help=f.h?`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">${f.h}</div>`:'';
+            if(f.t==='checkbox'){
+                html+=`<div class="field"><label>${f.l}</label><input type="checkbox" data-key="${f.k}" ${val?'checked':''}></div>${help}`;
+            }else if(f.t==='textarea'){
+                html+=`<div class="field"><label>${f.l}</label><textarea data-key="${f.k}" rows="3">${val||''}</textarea></div>${help}`;
+            }else{
+                html+=`<div class="field"><label>${f.l}</label><input type="${f.t}" data-key="${f.k}" value="${val!=null?val:''}" ${f.s?'step="'+f.s+'"':''} ${f.t==='text'&&f.k.startsWith('keys.')?'style="font-family:monospace;letter-spacing:1px"':''}></div>${help}`;
+            }
+        }
+        html+=`</div></div>`;
+    }
+
+    // ---- Feeder section ----
+    html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 Feeder</h3><div>`;
+
+    // OpenSky Network
+    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <input type="checkbox" data-key="opensky.enabled" ${cfg.opensky&&cfg.opensky.enabled?'checked':''} style="width:20px;height:20px">
+        <div style="flex:1"><strong style="color:var(--accent)">OpenSky Network</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to opensky-network.org — academic open data project</span></div>
+        <a href="https://opensky-network.org/my-opensky" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
+    </div>`;
+    html+=`<div style="padding:8px 0 8px 32px">
+        <div class="field"><label>Username</label><input type="text" data-key="opensky.username" value="${cfg.opensky&&cfg.opensky.username||''}"></div>
+        <div class="field"><label>Host</label><input type="text" data-key="opensky.host" value="${cfg.opensky&&cfg.opensky.host||''}"></div>
+        <div class="field"><label>Port</label><input type="number" data-key="opensky.port" value="${cfg.opensky&&cfg.opensky.port||10004}" step="1"></div>
+    </div>`;
+
+    // PiAware / FlightAware
+    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <input type="checkbox" data-key="piaware.enabled" ${cfg.piaware&&cfg.piaware.enabled?'checked':''} style="width:20px;height:20px">
+        <div style="flex:1"><strong style="color:var(--accent)">PiAware / FlightAware</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to FlightAware for statistics and tracking</span></div>
+        <a href="https://flightaware.com/adsb/stats" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
+    </div>`;
+    html+=`<div style="padding:8px 0 8px 32px">
+        <div class="field"><label>Feeder ID</label><input type="text" data-key="piaware.feeder_id" value="${cfg.piaware&&cfg.piaware.feeder_id||''}" style="font-family:monospace"></div>
+    </div>`;
+
+    // FLARM / OGN
+    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <input type="checkbox" data-key="sdr_flarm.enabled" ${cfg.sdr_flarm&&cfg.sdr_flarm.enabled?'checked':''} style="width:20px;height:20px">
+        <div style="flex:1"><strong style="color:var(--accent)">FLARM / Open Glider Network</strong><br><span style="color:var(--dim);font-size:12px">Receive and decode FLARM signals — Send glider data to OGN</span></div>
+        <a href="http://live.glidernet.org" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
+    </div>`;
+    html+=`<div style="padding:8px 0 8px 32px">
+        <div class="field"><label>Solo OGN</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${cfg.sdr_flarm&&cfg.sdr_flarm.ogn_only?'checked':''}></div>
+    </div>`;
+
+    // Beast feeds — aggregatori open data
+    const feedInfo={
+        'ADSBx':{desc:'ADS-B Exchange — community-driven aggregator, no restrictions',url:'https://adsbexchange.com'},
+        'adsb.fi':{desc:'adsb.fi — open and free Finnish tracker',url:'https://adsb.fi'},
+        'FlyItaly':{desc:'Fly Italy ADSB — Italian ADS-B tracking network',url:'https://flyitalyadsb.com'},
+        'PlaneWatch':{desc:'plane.watch — open source Australian tracker',url:'https://plane.watch'},
+        'adsb.one':{desc:'adsb.one — global open data aggregator',url:'https://adsb.one'},
+        'adsb.lol':{desc:'adsb.lol — non-profit open data aggregator',url:'https://adsb.lol'},
+        'airplanes.live':{desc:'airplanes.live — live tracker with 3D map',url:'https://airplanes.live'},
+        'Planespotters':{desc:'Planespotters — aircraft database and photos',url:'https://planespotters.net'},
+        'TheAirTraffic':{desc:'TheAirTraffic — air traffic aggregator',url:'https://theairtraffic.com'},
+        'AVDelphi':{desc:'AVDelphi — air traffic analysis platform',url:'https://avdelphi.com'},
+        'ADSBHub':{desc:'ADSBHub — aggregator with free sharing (RAW format)',url:'https://adsbhub.org'},
+    };
+
+    html+=`<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+        <strong style="color:var(--accent);font-size:14px">📡 Beast Feeds — Open Data Aggregators</strong>
+        <div style="color:var(--dim);font-size:12px;margin:4px 0 12px 0">Enable/disable data feeding to each aggregator. Feeds use the Beast (or RAW) protocol on the indicated port.</div>
+    </div>`;
+
+    if(cfg.beast_feeds&&cfg.beast_feeds.length){
+        for(let i=0;i<cfg.beast_feeds.length;i++){
+            const bf=cfg.beast_feeds[i];
+            const info=feedInfo[bf.name]||{desc:'Custom feed',url:''};
+            const isRaw=bf.format==='raw';
+            html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+                <input type="checkbox" data-key="beast_feeds.${i}.enabled" ${bf.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0">
+                <div style="flex:1;min-width:0">
+                    <strong style="color:${bf.enabled?'var(--accent)':'var(--dim)'}">${bf.name}</strong>
+                    ${isRaw?'<span class="badge warn" style="margin-left:6px">RAW</span>':''}
+                    <br><span style="color:var(--dim);font-size:11px">${info.desc}</span>
+                </div>
+                <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+                    <span style="color:var(--dim);font-size:11px">${bf.host}:${bf.port}</span>
+                </div>
+                ${info.url?`<a href="${info.url}" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0">↗</a>`:''}
+            </div>`;
+        }
+    } else {
+        html+=`<div style="color:var(--dim);font-size:12px;margin-top:6px;padding:8px;background:var(--input-bg);border-radius:4px">No beast feeds available.</div>`;
+    }
+
+    html+=`</div></div>`;
+
+    // MLAT section
+    if(cfg.mlat&&cfg.mlat.servers){
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 MLAT (${cfg.mlat.servers.length} server)</h3><div>`;
+        html+=`<div class="field"><label>Username</label><input type="text" value="${cfg.mlat.user||''}" data-key="mlat.user"></div>`;
+        html+=`<div class="field"><label>Altitude (m)</label><input type="number" value="${cfg.mlat.alt||0}" data-key="mlat.alt"></div>`;
+        html+=`<div class="field"><label>Return results</label><input type="checkbox" data-key="mlat.return_results" ${cfg.mlat.return_results?'checked':''}></div>`;
+        if(cfg.mlat.servers.length){
+            html+=`<table><tr><th>Host</th><th>Port</th><th>State</th></tr>`;
+            const mstates=['disconnected','connecting','handshake','ready'];
+            for(const ms of cfg.mlat.servers){
+                const st=mstates[ms.state]||'?';
+                const cls=ms.state===3?'ok':ms.state===0?'err':'warn';
+                html+=`<tr><td>${ms.host}</td><td>${ms.port}</td><td><span class="badge ${cls}">${st}</span></td></tr>`;
+            }
+            html+=`</table>`;
+        }
+        html+=`</div></div>`;
+    }
+    // Dynamic SDR Receivers section (populated from /api/devices + /api/receivers)
+    html+=`<div id="sdr-receivers-config"></div>`;
+    document.getElementById('config-form').innerHTML=html;
+    loadSdrReceiverConfig();
+}
+
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)'};
+const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈'};
+
+async function loadSdrReceiverConfig(){
+    try{
+        const [devRes,rxRes]=await Promise.all([fetch('/api/devices').then(r=>r.json()),fetch('/api/receivers').then(r=>r.json())]);
+        let html='';
+        // Show assigned receivers from /api/devices (active dongles with roles)
+        const assigned=devRes.sdr_devices.filter(d=>d.role&&d.role!=='none');
+        if(assigned.length===0&&rxRes.count===0){
+            html+=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--dim)">No SDR dongles assigned. Use the <a href="/devices" style="color:var(--accent)">Devices</a> page to assign roles to dongles.</p></div>`;
+        }else{
+            // Merge device info with receiver info
+            for(const dev of assigned){
+                const rx=rxRes.receivers.find(r=>r.serial===dev.serial||r.serial_actual===dev.serial);
+                const role=rx?rx.role:dev.role;
+                const gain=rx?rx.gain:40.0;
+                const ppm=rx?rx.ppm:0;
+                const state=rx?rx.state:'legacy';
+                const stCls=state==='running'?'ok':state==='error'?'err':'info';
+                const icon=roleIcons[role]||'📡';
+                const label=roleLabels[role]||role.toUpperCase();
+                html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${icon} ${label} — SN: ${dev.serial}</h3><div>`;
+                html+=`<div class="field"><label>Tuner</label><span style="color:var(--accent)">${dev.tuner} (${dev.freq_range})</span></div>`;
+                html+=`<div class="field"><label>State</label><span class="badge ${stCls}">${state.toUpperCase()}</span></div>`;
+                html+=`<div class="field"><label>Gain (dB)</label><input type="number" step="0.1" value="${gain.toFixed(1)}" id="rx_gain_${dev.serial}" min="-10" max="50"></div>`;
+                html+=`<div class="field"><label>PPM Correction</label><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}"></div>`;
+                if(role==='adsb'){
+                    const ac=cfg.sdr_adsb||{};
+                    html+=`<div class="field"><label>Adaptive Range</label><input type="checkbox" data-key="sdr_adsb.adaptive_range" ${ac.adaptive_range?'checked':''}></div>`;
+                    html+=`<div class="field"><label>Adaptive Burst</label><input type="checkbox" data-key="sdr_adsb.adaptive_burst" ${ac.adaptive_burst?'checked':''}></div>`;
+                    html+=`<div class="field"><label>Min Gain (dB)</label><input type="number" step="0.1" data-key="sdr_adsb.adaptive_min_gain" value="${ac.adaptive_min_gain||0}"></div>`;
+                    html+=`<div class="field"><label>Max Gain (dB)</label><input type="number" step="0.1" data-key="sdr_adsb.adaptive_max_gain" value="${ac.adaptive_max_gain||99999}"></div>`;
+                    html+=`<div class="field"><label>CRC Rescue</label><input type="checkbox" data-key="sdr_adsb.crc_rescue" ${ac.crc_rescue?'checked':''}></div>`;
+                    html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Attempts to recover messages with corrupted preamble but valid CRC</div>`;
+                    html+=`<div class="field"><label>Error Correction</label><input type="number" step="1" data-key="sdr_adsb.fix_crc" value="${ac.fix_crc!=null?ac.fix_crc:1}" min="0" max="2"></div>`;
+                    html+=`<div class="field"><label>Mode A/C</label><input type="checkbox" data-key="sdr_adsb.mode_ac" ${ac.mode_ac?'checked':''}></div>`;
+                }
+                if(role==='flarm'){
+                    const fc=cfg.sdr_flarm||{};
+                    html+=`<div class="field"><label>OGN only</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${fc.ogn_only?'checked':''}></div>`;
+                    html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">If enabled, FLARM data is sent only to OGN</div>`;
+                }
+                html+=`</div></div>`;
+            }
+        }
+        document.getElementById('sdr-receivers-config').innerHTML=html;
+    }catch(e){
+        document.getElementById('sdr-receivers-config').innerHTML=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--danger)">Error: ${e}</p></div>`;
+    }
+}
+
+async function loadConfig(){
+    try{
+        const r=await fetch('/api/config');
+        cfg=await r.json();
+        renderConfigForm();
+    }catch(e){document.getElementById('config-form').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
+}
+
+// ---- Security: Input sanitization ----
+const DANGEROUS_CHARS=/[`$!|;&()<>'"]/;
+const DANGEROUS_PATTERNS=/(\.\.|\/\/|\\\\|%2e|%00|<script|javascript:|onerror|onload)/i;
+function sanitizeValue(val){
+    if(typeof val!=='string')return val;
+    if(DANGEROUS_CHARS.test(val)||DANGEROUS_PATTERNS.test(val)){
+        return val.replace(/[`$!|;&()<>'"\\]/g,'');
+    }
+    return val;
+}
+function escapeHtml(s){
+    if(typeof s!=='string')return s;
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+async function saveConfig(){
+    // Collect and sanitize form values
+    let hasError=false;
+    document.querySelectorAll('[data-key]').forEach(el=>{
+        const keys=el.dataset.key.split('.');
+        let obj=cfg;
+        for(let i=0;i<keys.length-1;i++){if(!obj[keys[i]])obj[keys[i]]={};obj=obj[keys[i]];}
+        if(el.type==='checkbox'){obj[keys[keys.length-1]]=el.checked;}
+        else if(el.type==='number'){obj[keys[keys.length-1]]=parseFloat(el.value)||0;}
+        else{
+            const raw=el.value;
+            if(DANGEROUS_CHARS.test(raw)||DANGEROUS_PATTERNS.test(raw)){
+                el.style.borderColor='var(--danger)';
+                hasError=true;
+            }else{
+                el.style.borderColor='';
+                obj[keys[keys.length-1]]=raw;
+            }
+        }
+    });
+    if(hasError){
+        document.getElementById('save-status').textContent='❌ Forbidden characters in highlighted fields: ` $ ! | ; & ( ) < > \' "';
+        document.getElementById('save-status').style.color='var(--danger)';
+        return;
+    }
+    document.getElementById('save-status').textContent='Saving...';
+    document.getElementById('save-status').style.color='var(--dim)';
+    try{
+        const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+        const j=await r.json();
+        if(j.error){document.getElementById('save-status').textContent='❌ '+j.error;document.getElementById('save-status').style.color='var(--danger)';return;}
+        document.getElementById('save-status').textContent='✅ Configuration saved and applied';document.getElementById('save-status').style.color='var(--ok)';
+        setTimeout(()=>{document.getElementById('save-status').textContent='';loadConfig();},3000);
+    }catch(e){document.getElementById('save-status').textContent='❌ Error: '+e;}
+}
+
+// ---- Status ----
+async function loadStatus(){
+    try{
+        const r=await fetch('/api/status');
+        const d=await r.json();
+        let html='';
+        for(const f of d.feeders){
+            const isDisabled=f.enabled===false;
+            const stateText=isDisabled?'disabled':(f.state||'enabled');
+            const isOk=!isDisabled&&(stateText==='ready'||stateText==='logged_in'||stateText==='running'||stateText==='enabled');
+            const dotCls=isDisabled?'gray':isOk?'green':(stateText==='disconnected'||stateText==='failed')?'red':'yellow';
+            html+=`<div class="status-card" style="${isDisabled?'opacity:0.5':''}">
+                <h4><span class="dot ${dotCls}"></span> ${f.name} <span class="badge info">${f.type}</span>${isDisabled?' <span class="badge warn">OFF</span>':''}</h4>
+                ${f.host?`<div class="detail">Server: ${f.host}:${f.port||''}</div>`:''}
+                <div class="detail">State: <strong>${stateText}</strong></div>
+                ${f.packets?`<div class="detail">Packets: ${f.packets}</div>`:''}
+                ${f.frames?`<div class="detail">Frames: ${f.frames}</div>`:''}
+                ${f.msgs?`<div class="detail">Messages: ${f.msgs}</div>`:''}
+                ${f.aircraft?`<div class="detail">Aircraft sent: ${f.aircraft}</div>`:''}
+                ${f.uploads_ok?`<div class="detail">Upload OK: ${f.uploads_ok}, Fail: ${f.uploads_fail||0}</div>`:''}
+                ${f.link?`<a href="${f.link}" target="_blank">🔗 Check online</a>`:''}
+            </div>`;
+        }
+        document.getElementById('status-grid').innerHTML=html||'<p style="color:var(--dim)">No feeders configured</p>';
+    }catch(e){document.getElementById('status-grid').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
+}
+
+// ---- Logs ----
+async function loadLogs(){
+    try{
+        const r=await fetch('/api/logs');
+        const d=await r.json();
+        const box=document.getElementById('logbox');
+        box.textContent=d.lines.join('\n');
+        if(document.getElementById('log-scroll').checked)box.scrollTop=box.scrollHeight;
+    }catch(e){}
+}
+function clearLogs(){document.getElementById('logbox').textContent='';}
+
+// ---- Messages ----
+async function loadMessages(){
+    try{
+        const r=await fetch('/api/messages');
+        const d=await r.json();
+        const box=document.getElementById('msgbox');
+        box.textContent=d.messages.join('\n');
+        if(document.getElementById('msg-scroll').checked)box.scrollTop=box.scrollHeight;
+    }catch(e){}
+}
+
+// ---- Aircraft ----
+let acData=[];
+const squawkMeanings={
+// === ICAO EMERGENCY ===
+'7500':'⚠️ HIJACK — Unlawful interference',
+'7600':'⚠️ RADIO FAILURE (NORDO) — Communications lost',
+'7700':'🚨 GENERAL EMERGENCY — Mayday',
+// === ICAO / EUROCONTROL STANDARD ===
+'7000':'VFR — Conspicuity code (ICAO/EUR)',
+'2000':'IFR — Non-SSR environment / on surface (ICAO)',
+'1000':'IFR GAT — Mode S airspace (ICAO)',
+'1200':'VFR — Standard USA/Canada',
+'1400':'VFR — Above 12500 ft (USA)',
+'1202':'VFR — Gliders (USA)',
+'1234':'VFR general (some countries)',
+// === Codici speciali internazionali (00xx) ===
+'0000':'SSR data unreliable',
+'0001':'Height Monitoring Unit',
+'0002':'Ground Transponder Testing',
+'0020':'Air Ambulance / HEMS (Helicopter Emergency Medical)',
+'0021':'Fixed-wing aircraft (service from ship)',
+'0022':'Helicopter (service from ship)',
+'0023':'SAR — Search and Rescue operations',
+'0024':'Radar Flight Evaluation / Calibration',
+'0033':'Paradropping / Skydiving',
+'0034':'Antenna trailing / target towing',
+'0036':'Helicopter Pipeline/Powerline Inspection',
+// === Codici militari 70xx (ICAO) ===
+'7001':'Military fixed-wing low level',
+'7002':'Danger Areas General',
+'7003':'Military display / aerobatic transit',
+'7004':'Aerobatics and Display conspicuity',
+'7005':'High-Energy Manoeuvres',
+'7006':'Autonomous ops within TRA (Temporary Reserved Airspace)',
+'7007':'Open Skies Observation Aircraft',
+'7010':'Operating in Aerodrome Traffic Pattern',
+// === NATO ===
+'3000':'NATO — AEW aircraft service','3100':'NATO — AEW aircraft service',
+'3200':'NATO — AEW aircraft service','3300':'NATO — AEW aircraft service',
+'3400':'NATO — AEW aircraft service','3500':'NATO — AEW aircraft service',
+'3600':'NATO — AEW aircraft service','3700':'NATO — AEW aircraft service',
+'4000':'NATO — AEW aircraft service','4100':'NATO — AEW aircraft service',
+'4200':'NATO — AEW aircraft service','4300':'NATO — AEW aircraft service',
+'4400':'NATO — AEW aircraft service','4500':'NATO — AEW aircraft service',
+'4600':'NATO — AEW aircraft service','4700':'NATO — AEW aircraft service',
+'5000':'NATO — AEW aircraft service','5100':'NATO — AEW aircraft service',
+'5200':'NATO — AEW aircraft service','5300':'NATO — AEW aircraft service',
+'5400':'NATO — AEW aircraft service','5500':'NATO — AEW aircraft service',
+'5600':'NATO — AEW aircraft service','5700':'NATO — AEW aircraft service',
+// === SSR / test ===
+'7776':'SSR Monitors','7777':'SSR Monitors / Military intercept',
+};
+
+// Range-based ORCAM transit routes (international European ATC blocks)
+const squawkRanges=[
+// ORCAM Transit — European FIR routing codes
+{lo:0o0101,hi:0o0117,d:'Transit ORCAM Brussels'},{lo:0o0120,hi:0o0137,d:'Transit ORCAM Germany'},
+{lo:0o0140,hi:0o0177,d:'Transit ORCAM Amsterdam'},{lo:0o0270,hi:0o0277,d:'Superdomestic Ireland→DE/Benelux'},
+{lo:0o0301,hi:0o0377,d:'Transit ORCAM UK'},
+{lo:0o0501,hi:0o0577,d:'Transit ORCAM UK'},
+{lo:0o0601,hi:0o0637,d:'Transit ORCAM Germany'},{lo:0o0640,hi:0o0677,d:'Transit ORCAM Paris'},
+{lo:0o0701,hi:0o0777,d:'Transit ORCAM Maastricht'},
+{lo:0o1001,hi:0o1077,d:'Transit ORCAM Spain'},{lo:0o1101,hi:0o1137,d:'Transit ORCAM Rhein'},
+{lo:0o1140,hi:0o1177,d:'Transit ORCAM UK'},
+{lo:0o1301,hi:0o1327,d:'NATO Air Policing — Quick Reaction Alert'},
+{lo:0o1330,hi:0o1357,d:'Transit ORCAM Bremen'},{lo:0o1360,hi:0o1377,d:'Transit ORCAM Munich'},
+{lo:0o1500,hi:0o1577,d:'NATO CAOC 9 Exercises'},{lo:0o1601,hi:0o1677,d:'NATO CAOC 9 Exercises'},
+{lo:0o1701,hi:0o1727,d:'NATO CAOC 9 Exercises'},
+{lo:0o2001,hi:0o2077,d:'Transit ORCAM Shannon'},
+{lo:0o2101,hi:0o2177,d:'Transit ORCAM Amsterdam'},
+{lo:0o2201,hi:0o2277,d:'Superdomestic UK→FR/ES/PT/Canaries'},
+{lo:0o2301,hi:0o2337,d:'Transit ORCAM Bordeaux'},{lo:0o2340,hi:0o2377,d:'Transit ORCAM Brest'},
+{lo:0o2400,hi:0o2477,d:'NATO CAOC 9 Exercises'},
+{lo:0o2501,hi:0o2577,d:'Transit ORCAM Karlsruhe'},
+{lo:0o2701,hi:0o2737,d:'Transit ORCAM Shannon'},{lo:0o2740,hi:0o2777,d:'Transit ORCAM Zurich'},
+{lo:0o3001,hi:0o3077,d:'Transit ORCAM Zurich'},
+{lo:0o3101,hi:0o3127,d:'Transit ORCAM Germany'},{lo:0o3130,hi:0o3177,d:'Transit ORCAM Amsterdam'},
+{lo:0o3221,hi:0o3257,d:'Superdomestic UK→Oceanic via Shannon/Dublin'},
+{lo:0o3401,hi:0o3457,d:'Superdomestic UK→DE/NL/Benelux'},
+{lo:0o3460,hi:0o3477,d:'Transit ORCAM Germany→UK'},
+{lo:0o3501,hi:0o3507,d:'Transit ORCAM Luxembourg'},
+{lo:0o3510,hi:0o3537,d:'Transit ORCAM Maastricht'},{lo:0o3540,hi:0o3577,d:'Transit ORCAM Berlin'},
+{lo:0o4001,hi:0o4077,d:'Transit ORCAM Aix-en-Provence'},
+{lo:0o4101,hi:0o4127,d:'Transit ORCAM Frankfurt'},{lo:0o4130,hi:0o4177,d:'Transit ORCAM Düsseldorf'},
+{lo:0o4215,hi:0o4247,d:'Superdomestic Shannon→UK'},
+{lo:0o4401,hi:0o4427,d:'Superdomestic Brussels→UK'},
+{lo:0o4430,hi:0o4477,d:'Superdomestic UK→Ireland/Oceanic'},
+{lo:0o4701,hi:0o4777,d:'Special Events (NOTAM activated)'},
+{lo:0o5201,hi:0o5260,d:'Transit ORCAM UK'},
+{lo:0o5261,hi:0o5270,d:'Transit ORCAM Dublin→Europe'},
+{lo:0o5271,hi:0o5277,d:'Transit ORCAM Channel Islands'},
+{lo:0o5301,hi:0o5377,d:'Transit ORCAM Barcelona'},
+{lo:0o5501,hi:0o5577,d:'Transit ORCAM Barcelona'},
+{lo:0o5601,hi:0o5647,d:'Transit ORCAM Paris'},
+{lo:0o5650,hi:0o5657,d:'Transit ORCAM Luxembourg'},
+{lo:0o5660,hi:0o5677,d:'Transit ORCAM Reims'},
+{lo:0o5701,hi:0o5777,d:'Transit ORCAM Geneva'},
+{lo:0o6201,hi:0o6227,d:'Superdomestic Dublin→UK'},
+{lo:0o6230,hi:0o6247,d:'Superdomestic UK→Scandinavia/Russia'},
+{lo:0o6250,hi:0o6257,d:'Superdomestic UK→Amsterdam'},
+{lo:0o6260,hi:0o6277,d:'Superdomestic Amsterdam→UK/Ireland/Iceland'},
+{lo:0o6301,hi:0o6377,d:'Superdomestic UK→France'},
+{lo:0o6601,hi:0o6677,d:'Transit ORCAM Germany'},
+{lo:0o6701,hi:0o6747,d:'Transit ORCAM Reims'},
+{lo:0o6750,hi:0o6777,d:'Transit ORCAM Aix-en-Provence'},
+// 7xxx block
+{lo:0o7101,hi:0o7177,d:'Transit ORCAM Brussels'},
+{lo:0o7201,hi:0o7247,d:'Transit ORCAM Vienna'},
+{lo:0o7250,hi:0o7277,d:'Superdomestic UK/Shannon→France/Spain'},
+{lo:0o7310,hi:0o7327,d:'Superdomestic UK→Netherlands'},
+{lo:0o7330,hi:0o7347,d:'Superdomestic Netherlands→UK'},
+{lo:0o7440,hi:0o7477,d:'Superdomestic Spain/France→UK/Ireland/N.America'},
+{lo:0o7501,hi:0o7537,d:'Transit ORCAM Geneva'},
+{lo:0o7540,hi:0o7547,d:'Transit ORCAM Bremen'},{lo:0o7550,hi:0o7577,d:'Transit ORCAM Paris'},
+{lo:0o7601,hi:0o7607,d:'Superdomestic Shannon/Dublin→Nordic'},
+{lo:0o7620,hi:0o7677,d:'Superdomestic UK→USA/Canada/Caribbean'},
+{lo:0o7701,hi:0o7717,d:'Superdomestic UK→France/Spain'},
+{lo:0o7720,hi:0o7727,d:'Transit ORCAM Munich'},
+{lo:0o7730,hi:0o7757,d:'Superdomestic Shannon→UK'},
+{lo:0o7760,hi:0o7775,d:'Superdomestic UK→Channel Islands'},
+// Fallback: general ATC assigned blocks
+{lo:0o0401,hi:0o6777,d:'ATC assigned code'},
+];
+
+const emergencySquawks=['7500','7600','7700'];
+function isEmergencySquawk(sq){ return sq && emergencySquawks.includes(String(sq)); }
+function getSquawkTitle(sq){
+    if(!sq)return '';
+    const s=String(sq).padStart(4,'0');
+    if(squawkMeanings[s]) return squawkMeanings[s];
+    const n=parseInt(s,8);
+    for(const r of squawkRanges){if(n>=r.lo && n<=r.hi) return r.d+' ('+s+')';}
+    return 'Code '+s;
+}
+function sortAC(key){if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=1;}renderAC();}
+function renderAC(){
+    acData.sort((a,b)=>{
+        let va=a[sortKey],vb=b[sortKey];
+        if(va==null)va='';if(vb==null)vb='';
+        if(typeof va==='number'&&typeof vb==='number')return(va-vb)*sortDir;
+        return String(va).localeCompare(String(vb))*sortDir;
+    });
+    let html='';
+    for(const a of acData){
+        let flags='';
+        const isGhost=!a.flight&&a.lat==null&&a.lon==null;
+        if(isGhost)flags+=`<span class="badge" style="background:rgba(150,150,150,0.3);color:#888" title="ICAO only — no ADS-B data">👻</span> `;
+        if(isMilitary(a))flags+=`<span class="badge" style="background:rgba(255,160,0,0.25);color:#ffa000" title="Probable military aircraft">🎖️</span> `;
+        if(a.gps_integrity==='suspect')flags+=`<span class="badge err">GPS!</span> `;
+        else if(a.gps_integrity==='degraded')flags+=`<span class="badge warn">GPS↓</span> `;
+        if(a.circling)flags+=`<span class="badge info">🔄</span> `;
+        if(a.alert)flags+=`<span class="badge err">ALERT</span> `;
+        const sqStr=a.squawk||'';
+        const sqEmerg=isEmergencySquawk(sqStr);
+        const sqTitle=getSquawkTitle(sqStr);
+        const rowStyle=sqEmerg?'background:rgba(255,60,60,0.15)':'';
+        const sqStyle=sqEmerg?'color:var(--danger);font-weight:bold':'';
+        const safeHex=escapeHtml(a.hex||'');
+        const safeFlight=escapeHtml((a.flight||'').trim());
+        const safeSqStr=escapeHtml(sqStr);
+        const safeSqTitle=escapeHtml(sqTitle);
+        const safeCat=escapeHtml(a.category||'');
+        if(sqEmerg)flags+=`<span class="badge err">${escapeHtml(squawkMeanings[String(sqStr)]||'EMERG')}</span> `;
+        const ghostStyle=isGhost?'opacity:0.45':'';
+        html+=`<tr style="${rowStyle}${ghostStyle}" data-icao="${safeHex}">
+            <td class="icao-link" style="font-family:monospace;color:var(--accent)" onclick="lookupICAO('${safeHex}')">${safeHex}</td>
+            <td><strong>${safeFlight}</strong></td>
+            <td style="${sqStyle}" title="${safeSqTitle}">${safeSqStr}</td>
+            <td>${a.alt_baro!=null?a.alt_baro:''}</td>
+            <td>${a.gs!=null?Math.round(a.gs):''}</td>
+            <td>${a.track!=null?Math.round(a.track)+'°':''}</td>
+            <td>${a.lat!=null?a.lat.toFixed(4):''}</td>
+            <td>${a.lon!=null?a.lon.toFixed(4):''}</td>
+            <td>${a.baro_rate!=null?a.baro_rate:''}</td>
+            <td>${safeCat}</td>
+            <td>${a.rssi!=null?a.rssi.toFixed(1):''}</td>
+            <td>${a.messages||''}</td>
+            <td>${a.seen!=null?a.seen.toFixed(1)+'s':''}</td>
+            <td>${flags}</td>
+        </tr>`;
+    }
+    document.getElementById('ac-body').innerHTML=html;
+    if(selectedIcao){const sr=document.querySelector(`tr[data-icao="${selectedIcao}"]`);if(sr)sr.classList.add('ac-row-selected');}
+}
+
+// ---- ICAO Lookup via adsbdb.com (side panel) ----
+const icaoCache={};
+let selectedIcao=null;
+function isMilitary(a){
+    const n=parseInt(a.hex,16);
+    if(!isNaN(n)){
+        if(n>=0xAE0000&&n<=0xAFFFFF)return true;
+        if(n>=0x43C000&&n<=0x43CFFF)return true;
+    }
+    const sq=String(a.squawk||'');
+    if(/^700[1-7]$/.test(sq))return true;
+    if(icaoCache[a.hex]){const ow=(icaoCache[a.hex].registered_owner||'').toLowerCase();
+        if(/air force|navy|army|milit|luftwaffe|marine nationale|aeronautica|bundeswehr|ministry of defen|royal air force/.test(ow))return true;}
+    return false;
+}
+function closeIcaoPanel(){document.getElementById('icao-side-panel').classList.remove('show');selectedIcao=null;document.querySelectorAll('.ac-row-selected').forEach(r=>r.classList.remove('ac-row-selected'));}
+async function lookupICAO(hex){
+    if(!hex)return;
+    // Validate ICAO hex: must be 1-6 hex characters only
+    if(!/^[0-9a-fA-F]{1,6}$/.test(hex))return;
+    selectedIcao=hex;
+    document.querySelectorAll('.ac-row-selected').forEach(r=>r.classList.remove('ac-row-selected'));
+    const row=document.querySelector(`tr[data-icao="${hex}"]`);
+    if(row)row.classList.add('ac-row-selected');
+    const panel=document.getElementById('icao-side-panel');
+    const title=document.getElementById('icao-panel-title');
+    const body=document.getElementById('icao-panel-body');
+    title.textContent=`✈ ${hex.toUpperCase()}`;
+    panel.classList.add('show');
+
+    if(icaoCache[hex]){
+        renderIcaoInfo(hex,icaoCache[hex]);
+        return;
+    }
+
+    // 1) adsbdb.com
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">⏳ 1/3 adsbdb.com...</div>';
+    try{
+        const r=await fetch(`https://api.adsbdb.com/v0/aircraft/${hex}`);
+        const d=await r.json();
+        if(d.response&&d.response.aircraft){
+            const info=d.response.aircraft;
+            info._src='adsbdb.com';
+            icaoCache[hex]=info;
+            renderIcaoInfo(hex,info);
+            return;
+        }
+    }catch(e){}
+
+    // 2) hexdb.io
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">⏳ 2/3 hexdb.io...</div>';
+    try{
+        const r=await fetch(`https://hexdb.io/api/v1/aircraft/${hex}`);
+        if(r.ok){
+            const d=await r.json();
+            if(d.Registration||d.RegisteredOwners||d.Type){
+                const info={
+                    registration:d.Registration||'',
+                    registered_owner:d.RegisteredOwners||'',
+                    type:d.Type||'',
+                    manufacturer:d.Manufacturer||'',
+                    icao_type:d.ICAOTypeCode||'',
+                    registered_owner_country_name:'',
+                    url_photo:'',url_photo_thumbnail:'',
+                    _src:'hexdb.io'
+                };
+                icaoCache[hex]=info;
+                renderIcaoInfo(hex,info);
+                return;
+            }
+        }
+    }catch(e){}
+
+    // 3) opensky-network.org
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">⏳ 3/3 opensky-network.org...</div>';
+    try{
+        const r=await fetch(`https://opensky-network.org/api/metadata/aircraft/icao/${hex}`);
+        if(r.ok){
+            const d=await r.json();
+            if(d.registration||d.owner||d.model){
+                const info={
+                    registration:d.registration||'',
+                    registered_owner:d.owner||d.operatorCallsign||'',
+                    type:d.model||'',
+                    manufacturer:d.manufacturerName||'',
+                    icao_type:d.typecode||'',
+                    registered_owner_country_name:d.country||'',
+                    url_photo:'',url_photo_thumbnail:'',
+                    _src:'opensky-network.org'
+                };
+                icaoCache[hex]=info;
+                renderIcaoInfo(hex,info);
+                return;
+            }
+        }
+    }catch(e){}
+
+    // No source has data
+    icaoCache[hex]={_src:'none'};
+    body.innerHTML='<div style="color:var(--dim);text-align:center;padding:20px">No information found for <strong>'+hex.toUpperCase()+'</strong><br><span style="font-size:11px;margin-top:6px;display:block">Searched on: adsbdb.com, hexdb.io, opensky-network.org</span></div>';
+}
+function renderIcaoInfo(hex,info){
+    const body=document.getElementById('icao-panel-body');
+    const title=document.getElementById('icao-panel-title');
+    const reg=escapeHtml(info.registration||'');
+    const owner=escapeHtml(info.registered_owner||info.owner||'');
+    const type=escapeHtml(info.type||'');
+    const mfr=escapeHtml(info.manufacturer||'');
+    const icaoType=escapeHtml(info.icao_type||'');
+    const country=escapeHtml(info.registered_owner_country_name||'');
+    const rawUrl=info.url_photo||info.image||'';
+    const rawThumb=info.url_photo_thumbnail||'';
+    // Only allow http(s) image URLs — block javascript:, data:, etc.
+    const url=(rawUrl&&/^https?:\/\//i.test(rawUrl))?escapeHtml(rawUrl):'';
+    const urlThumb=(rawThumb&&/^https?:\/\//i.test(rawThumb))?escapeHtml(rawThumb):'';
+    const src=escapeHtml(info._src||'');
+    if(reg||owner)title.textContent=`✈ ${(info.registration||hex.toUpperCase())} — ${(info.registered_owner||info.owner||'')}`;
+    const isMil=/air force|navy|army|milit|luftwaffe|marine nationale|aeronautica|bundeswehr|ministry of defen|royal air force/.test((info.registered_owner||'').toLowerCase());
+    const dbFields=[
+        ['ICAO',escapeHtml(hex.toUpperCase())],
+        ['Registration',reg||'—'],
+        ['Owner',(isMil?'🎖️ ':'')+owner||'—'],
+        ['Type',type||'—'],
+        ['Manufacturer',mfr||'—'],
+        ['ICAO Type',icaoType||'—'],
+        ['Country',country||'—'],
+    ];
+    let html='';
+    if(isMil)html+='<div style="background:rgba(255,160,0,0.15);border:1px solid rgba(255,160,0,0.3);border-radius:6px;padding:6px;text-align:center;margin-bottom:8px;color:#ffa000;font-weight:600">🎖️ Military Aircraft</div>';
+    html+=dbFields.map(f=>`<div class="info-row"><span class="lbl">${f[0]}</span><span class="val">${f[1]}</span></div>`).join('');
+    if(urlThumb||url){
+        html+=`<div class="photo"><img src="${urlThumb||url}" alt="${reg}" onerror="this.parentElement.style.display='none'"></div>`;
+    }
+    if(src)html+=`<div style="text-align:right;color:var(--dim);font-size:10px;margin-top:6px">source: ${src}</div>`;
+    body.innerHTML=html;
+}
+
+async function loadAircraft(){
+    try{
+        const r=await fetch('/api/aircraft');
+        const d=await r.json();
+        acData=d.aircraft||[];
+        document.getElementById('ac-count').textContent=`✈ ${acData.length} aircraft`;
+        document.getElementById('ac-msgs').textContent=`Total messages: ${(d.messages||0).toLocaleString()}`;
+        document.getElementById('ac-update').textContent=`Updated: ${new Date().toLocaleTimeString()}`;
+        renderAC();
+    }catch(e){}
+}
+
+// ---- Auto-refresh ----
+setInterval(()=>{if(currentTab==='aircraft')loadAircraft();},1000);
+setInterval(()=>{if(currentTab==='logs')loadLogs();if(currentTab==='messages')loadMessages();},1500);
+setInterval(()=>{if(currentTab==='status')loadStatus();},5000);
+
+// Start
+showTab('config');
+</script>
+</body>
+</html>
