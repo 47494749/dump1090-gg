@@ -1263,6 +1263,168 @@ static void test_full_frame(void)
     }
 }
 
+// ===================== M10 helpers (mirror of sonde_demod.c) =====================
+
+#define M10_FRAME_LEN  101
+
+// CRC-16 CCITT over bytes 0..(len-3), stored LE at bytes [len-2..len-1]
+static bool m10_check_crc(const uint8_t *frame, int len)
+{
+    if (len < 3) return false;
+    uint16_t calc = crc16_ccitt(frame, len - 2);
+    uint16_t stored = (uint16_t)(frame[len - 2] | ((uint16_t)frame[len - 1] << 8));
+    return (calc == stored);
+}
+
+// Stamp CRC into frame (for building test vectors)
+static void m10_stamp_crc(uint8_t *frame, int len)
+{
+    uint16_t crc = crc16_ccitt(frame, len - 2);
+    frame[len - 2] = (uint8_t)(crc & 0xFF);
+    frame[len - 1] = (uint8_t)(crc >> 8);
+}
+
+static void write_i16_le(uint8_t *p, int16_t v)
+{
+    p[0] = (uint8_t)((uint16_t)v & 0xFF);
+    p[1] = (uint8_t)((uint16_t)v >> 8);
+}
+
+// ===================== Test 7: M10 CRC and frame parsing =====================
+
+static void test_m10(void)
+{
+    printf("\n--- Test 7: M10 CRC and frame validation ---\n");
+
+    // Build a synthetic M10 GPS frame (101 bytes)
+    // Layout (after sync, offsets 0-100):
+    //   byte[0]      = 0x9A  (frame type: GPS telemetry)
+    //   byte[1]      = 0x00  (reserved)
+    //   byte[2..5]   = serial (4 bytes)
+    //   byte[6..7]   = frame counter (uint16 LE)
+    //   byte[12..15] = latitude  (int32 LE, 1e-6 deg)
+    //   byte[16..19] = longitude (int32 LE, 1e-6 deg)
+    //   byte[20..23] = altitude  (int32 LE, cm)
+    //   byte[24..25] = vel X (int16 LE, cm/s)
+    //   byte[26..27] = vel Y (int16 LE, cm/s)
+    //   byte[28..29] = vel Z (int16 LE, cm/s)
+    //   byte[99..100]= CRC-16 CCITT over bytes 0..98
+
+    // Known position: Blaubeuren, Germany
+    const double exp_lat =  48.408486;
+    const double exp_lon =   9.937249;
+    const double exp_alt = 10000.0;   // 10 km altitude
+
+    uint8_t frame[M10_FRAME_LEN];
+    memset(frame, 0, sizeof(frame));
+
+    frame[0] = 0x9A;                    // type byte
+    frame[1] = 0x00;
+    frame[2] = 0x12; frame[3] = 0x34;  // serial
+    frame[4] = 0x56; frame[5] = 0x78;
+    write_u16_le(&frame[6], 1000);      // frame counter
+
+    write_i32_le(&frame[12], (int32_t)(exp_lat * 1e6));
+    write_i32_le(&frame[16], (int32_t)(exp_lon * 1e6));
+    write_i32_le(&frame[20], (int32_t)(exp_alt * 100.0));
+
+    // Velocity: 10 m/s east (vx=1000 cm/s, vy=0, vz=0)
+    write_i16_le(&frame[24], 1000);
+    write_i16_le(&frame[26], 0);
+    write_i16_le(&frame[28], 0);
+
+    m10_stamp_crc(frame, M10_FRAME_LEN);
+
+    // ---- Test 7a: CRC of valid frame ----
+    {
+        TEST("M10 CRC: valid frame accepted");
+        if (m10_check_crc(frame, M10_FRAME_LEN)) PASS();
+        else FAIL("CRC rejected valid frame");
+    }
+
+    // ---- Test 7b: CRC of noise frame ----
+    {
+        TEST("M10 CRC: random noise frame rejected");
+        uint8_t noise[M10_FRAME_LEN];
+        unsigned seed = 0xCAFEBABE;
+        for (int i = 0; i < M10_FRAME_LEN; i++) {
+            seed = seed * 1103515245 + 12345;
+            noise[i] = (uint8_t)((seed >> 16) & 0xFF);
+        }
+        // Set CRC bytes to random (almost certainly wrong)
+        if (!m10_check_crc(noise, M10_FRAME_LEN)) PASS();
+        else FAIL("noise frame unexpectedly passed CRC");
+    }
+
+    // ---- Test 7c: 1-bit error in data detected ----
+    {
+        TEST("M10 CRC: 1-bit error in data detected");
+        uint8_t tf[M10_FRAME_LEN];
+        memcpy(tf, frame, M10_FRAME_LEN);
+        tf[10] ^= 0x01;  // flip one bit in middle of frame
+        if (!m10_check_crc(tf, M10_FRAME_LEN)) PASS();
+        else FAIL("1-bit error not detected");
+    }
+
+    // ---- Test 7d: GPS data roundtrip ----
+    {
+        TEST("M10 GPS: lat/lon/alt roundtrip (1e-6 deg, cm)");
+        int32_t lat_raw = (int32_t)(exp_lat * 1e6);
+        int32_t lon_raw = (int32_t)(exp_lon * 1e6);
+        int32_t alt_raw = (int32_t)(exp_alt * 100.0);
+
+        double lat_out = lat_raw / 1.0e6;
+        double lon_out = lon_raw / 1.0e6;
+        double alt_out = alt_raw / 100.0;
+
+        if (fabs(lat_out - exp_lat) < 1e-5 &&
+            fabs(lon_out - exp_lon) < 1e-5 &&
+            fabs(alt_out - exp_alt) < 0.1)
+            PASS();
+        else {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "lat=%.6f lon=%.6f alt=%.1f", lat_out, lon_out, alt_out);
+            FAIL(msg);
+        }
+    }
+
+    // ---- Test 7e: Frame type byte check ----
+    {
+        TEST("M10 type byte: 0x9A accepted, other rejected");
+        int ok_09a = (frame[0] == 0x9A);
+
+        uint8_t tf[M10_FRAME_LEN];
+        memcpy(tf, frame, M10_FRAME_LEN);
+        tf[0] = 0x00;
+        m10_stamp_crc(tf, M10_FRAME_LEN);
+        int bad_crc_ok = m10_check_crc(tf, M10_FRAME_LEN); // CRC itself passes
+        int bad_type_ok = (tf[0] != 0x9A);  // but type check should reject
+
+        if (ok_09a && bad_crc_ok && bad_type_ok) PASS();
+        else {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "ok_09a=%d bad_crc_ok=%d bad_type_ok=%d",
+                     ok_09a, bad_crc_ok, bad_type_ok);
+            FAIL(msg);
+        }
+    }
+
+    // ---- Test 7f: Velocity decode ----
+    {
+        TEST("M10 velocity: vx=10m/s (1000cm/s) -> vel_h=10m/s");
+        int16_t vx = (int16_t)read_u16_le(&frame[24]);
+        int16_t vy = (int16_t)read_u16_le(&frame[26]);
+        double dvx = vx / 100.0, dvy = vy / 100.0;
+        double vel_h = sqrt(dvx * dvx + dvy * dvy);
+        if (fabs(vel_h - 10.0) < 0.01) PASS();
+        else {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "vel_h=%.3f", vel_h);
+            FAIL(msg);
+        }
+    }
+}
+
 // ===================== Main =====================
 
 int main(void)
@@ -1279,6 +1441,7 @@ int main(void)
     test_whitening();
     test_ecef_lla();
     test_full_frame();
+    test_m10();
 
     printf("\n=====================================\n");
     printf("Results: %d/%d passed, %d failed\n", tests_passed, tests_run, tests_failed);

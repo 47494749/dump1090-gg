@@ -20,6 +20,7 @@
 #include <math.h>
 
 #include "dump1090.h"
+#include "ogntp_decode.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -46,6 +47,11 @@ static struct {
     flarm_message_t  msg_queue[FLARM_MSG_QUEUE_SIZE];
     volatile unsigned msg_queue_head;   // written by producer
     volatile unsigned msg_queue_tail;   // written by consumer
+
+    // OGNTP message queue (same lock-free SPSC pattern)
+    ogntp_message_t  ogntp_queue[FLARM_MSG_QUEUE_SIZE];
+    volatile unsigned ogntp_queue_head;
+    volatile unsigned ogntp_queue_tail;
 
     volatile int     stop_flag;
 } Flarm;
@@ -87,6 +93,29 @@ static bool flarm_dequeue_message(flarm_message_t *msg)
     *msg = Flarm.msg_queue[Flarm.msg_queue_tail];
     __sync_synchronize();
     Flarm.msg_queue_tail = (Flarm.msg_queue_tail + 1) % FLARM_MSG_QUEUE_SIZE;
+    return true;
+}
+
+static void ogntp_enqueue_message(const ogntp_message_t *msg, void *ctx)
+{
+    (void)ctx;
+    unsigned next_head = (Flarm.ogntp_queue_head + 1) % FLARM_MSG_QUEUE_SIZE;
+    if (next_head == Flarm.ogntp_queue_tail) {
+        return; // queue full, drop
+    }
+    Flarm.ogntp_queue[Flarm.ogntp_queue_head] = *msg;
+    __sync_synchronize();
+    Flarm.ogntp_queue_head = next_head;
+}
+
+static bool ogntp_dequeue_message(ogntp_message_t *msg)
+{
+    if (Flarm.ogntp_queue_tail == Flarm.ogntp_queue_head) {
+        return false;
+    }
+    *msg = Flarm.ogntp_queue[Flarm.ogntp_queue_tail];
+    __sync_synchronize();
+    Flarm.ogntp_queue_tail = (Flarm.ogntp_queue_tail + 1) % FLARM_MSG_QUEUE_SIZE;
     return true;
 }
 
@@ -210,7 +239,9 @@ bool flarmReaderOpen(void)
         .ref_lon      = Modes.fUserLon,
         .ref_alt_geoid = 0,
         .callback     = flarm_enqueue_message,
-        .callback_ctx = NULL
+        .callback_ctx = NULL,
+        .ogntp_callback     = ogntp_enqueue_message,
+        .ogntp_callback_ctx = NULL
     };
 
     Flarm.demod = flarm_demod_create(&demod_config);
@@ -283,6 +314,11 @@ void flarmReaderClose(void)
                 (unsigned long long)stats.packets_crc_ok,
                 (unsigned long long)stats.packets_decoded,
                 (unsigned long long)stats.packets_failed);
+        fprintf(stderr, "flarm: OGNTP stats: detected=%llu ldpc_ok=%llu decoded=%llu failed=%llu\n",
+                (unsigned long long)stats.ogntp_packets_detected,
+                (unsigned long long)stats.ogntp_packets_ldpc_ok,
+                (unsigned long long)stats.ogntp_packets_decoded,
+                (unsigned long long)stats.ogntp_packets_failed);
 
         flarm_demod_destroy(Flarm.demod);
         Flarm.demod = NULL;
@@ -688,6 +724,71 @@ void flarmReaderPeriodicWork(void)
             float gs_kts = msg.speed * 1.94384f;
             int vrate_fpm = (int)(msg.vs * 196.85f);
             flarm_build_velocity_msg(raw, addr, gs_kts, msg.course, vrate_fpm);
+            flarm_submit_synthetic(raw, signal);
+        }
+    }
+
+    // ---- Drain OGNTP queue ----
+    ogntp_message_t omsg;
+    while (ogntp_dequeue_message(&omsg)) {
+        if (!omsg.valid) continue;
+
+        uint32_t addr = omsg.addr & 0xFFFFFF;
+
+        double signal = omsg.signal_level;
+        if (signal <= 0) signal = 0.001;
+        if (signal > 1.0) signal = 1.0;
+
+        // Map OGN aircraft type to ADS-B category (same table as FLARM)
+        unsigned category;
+        switch (omsg.aircraft_type) {
+            case FLARM_ACFT_GLIDER:
+            case FLARM_ACFT_HANGGLIDER:
+            case FLARM_ACFT_PARAGLIDER:
+                category = 0xB1; break;
+            case FLARM_ACFT_HELICOPTER:
+                category = 0xA7; break;
+            case FLARM_ACFT_BALLOON:
+            case FLARM_ACFT_ZEPPELIN:
+                category = 0xB2; break;
+            case FLARM_ACFT_PARACHUTE:
+                category = 0xB3; break;
+            case FLARM_ACFT_UAV:
+                category = 0xB6; break;
+            case FLARM_ACFT_POWERED:
+            case FLARM_ACFT_TOWPLANE:
+            case FLARM_ACFT_DROPPLANE:
+                category = 0xA1; break;
+            case FLARM_ACFT_JET:
+                category = 0xA3; break;
+            default:
+                category = 0xC0; break;
+        }
+
+        // OGN callsign: OGN prefix + lower 20 bits of address
+        char callsign[9];
+        snprintf(callsign, sizeof(callsign), "OGN%05X", addr & 0xFFFFF);
+
+        unsigned char raw[14];
+
+        // 1. Identity message
+        flarm_build_ident_msg(raw, addr, callsign, category);
+        flarm_submit_synthetic(raw, signal);
+
+        // 2. Position messages (even and odd for CPR resolution)
+        if (omsg.latitude != 0 && omsg.longitude != 0) {
+            int alt_ft = (int)(omsg.altitude * 3.28084);
+            flarm_build_position_msg(raw, addr, omsg.latitude, omsg.longitude, alt_ft, 0);
+            flarm_submit_synthetic(raw, signal);
+            flarm_build_position_msg(raw, addr, omsg.latitude, omsg.longitude, alt_ft, 1);
+            flarm_submit_synthetic(raw, signal);
+        }
+
+        // 3. Velocity message
+        if (omsg.speed > 0.1f || fabsf(omsg.vs) > 0.1f) {
+            float gs_kts = omsg.speed * 1.94384f;
+            int vrate_fpm = (int)(omsg.vs * 196.85f);
+            flarm_build_velocity_msg(raw, addr, gs_kts, omsg.course, vrate_fpm);
             flarm_submit_synthetic(raw, signal);
         }
     }

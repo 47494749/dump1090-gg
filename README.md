@@ -1,11 +1,11 @@
 # dump1090-gg-light
 
-**dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / ACARS / VDL2 /
+**dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / OGNTP / ACARS / VDL2 /
 Radiosonde / CPDLC receiver and multi-feed relay for Linux.
 It is a fork of [dump1090-fa](https://github.com/flightaware/dump1090) by FlightAware,
 extended with native threaded feeder clients, a multi-SDR receiver architecture,
 decoders for aeronautical communication and weather sounding signals, and a built-in
-web control panel.
+web control panel with version display.
 
 This is the **light version** for public distribution. The proprietary feeder
 protocols (Flightradar24, PlaneFinder, RadarBox) have been replaced with inert
@@ -22,7 +22,7 @@ This project is an **experiment to test the effectiveness of AI as a software
 developer**. The repository contains substantial upstream code from **dump1090-fa**
 and its predecessors (by Oliver Jowett / FlightAware), which retains its original
 authorship and copyright. All of the **new functionality** — the native feeder
-clients, multi-SDR architecture, FLARM / ACARS / VDL2 / Radiosonde / CPDLC
+clients, multi-SDR architecture, FLARM / OGNTP / ACARS / VDL2 / Radiosonde / CPDLC
 decoders, the web control panel, Makefile modifications, protocol implementations,
 the information gathering, and this README itself — was **written entirely by AI**,
 under the **continuous supervision of a human** who directed what to do, how to do
@@ -86,10 +86,10 @@ compiling, and deploying code — proved highly effective for this project.
 | OpenSky Network feed | external daemon | **native thread** (binary protocol) |
 | Beast feeds (11 networks) | not supported | **native thread** (ADSBx, adsb.fi, FlyItaly, adsb.one, adsb.lol, airplanes.live, Planespotters, TheAirTraffic, AVDelphi, PlaneWatch, ADSBHub) |
 | SondeHub upload | not supported | **native thread** (HTTPS PUT to SondeHub v2 API) |
-| FLARM / OGN feed | not supported | **native** (2nd RTL-SDR, GFSK demod, OGN APRS-IS) |
+| FLARM / OGNTP / OGN feed | not supported | **native** (2nd RTL-SDR, GFSK demod, LDPC, OGN APRS-IS) |
 | ACARS decoding | not supported | **native** (AM envelope + MSK demod, 5 channels) |
 | VDL2 decoding | not supported | **native** (D8PSK demod, AVLC parsing, ACARS extraction) |
-| Radiosonde decoding | not supported | **native** (RS41 decoder, RS ECC, GPS, PTU) |
+| Radiosonde decoding | not supported | **native** (RS41/RS92/DFM/M10, RS ECC, GPS, PTU) |
 | CPDLC decoding | not supported | **native** (FANS-1/A ASN.1 UPER via ELM) |
 | ELM reassembly (DF24–31) | not supported | **native** (ACARS/CPDLC extraction from Comm-D) |
 | Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR) |
@@ -114,14 +114,16 @@ RTL-SDR #1 (1090 MHz) ──► ADS-B decode ──┬──► PiAware thread  
                                           └──► JSON files       → /run/dump1090-gg/
 
 RTL-SDR #2 (868 MHz)  ──► FLARM demod ───┬──► OGN thread       → aprs.glidernet.org:14580 (APRS-IS)
+                          OGNTP demod ────┤
                                           └──► Synthetic DF18   → ADS-B pipeline (merged)
 
 RTL-SDR #3 (131 MHz)  ──► ACARS demod ───┬──► Message display  (5 EU channels, AM-MSK)
                           VDL2 demod  ────┤    (3 EU channels, D8PSK 10.5 ksym/s)
                                           └──► aircraft.json integration
 
-RTL-SDR #4 (403 MHz)  ──► RS41 sonde ────┬──► SondeHub thread  → api.v2.sondehub.org (HTTPS PUT)
-                                          └──► Message display  (FFT freq scan, RS ECC)
+RTL-SDR #4 (403 MHz)  ──► Sonde demod ───┬──► SondeHub thread  → api.v2.sondehub.org (HTTPS PUT)
+                          (RS41/RS92/    │
+                           DFM/M10)      └──► Message display  (FFT freq scan, RS ECC)
 
 Web control panel (port 8888) ──► Live config, status, logs, device management
 ```
@@ -519,6 +521,27 @@ all feeder networks alongside ADS-B traffic.
 
 **Standards:** FLARM Legacy v6/v7 (868 MHz ISM band), DF18 TIS-B (DO-260B §2.2.4.4).
 
+### OGNTP receiver (`ogntp_decode.c/.h`)
+
+**OGN Tracking Protocol** decoder, running in parallel with the FLARM decoder
+on the same 868 MHz RTL-SDR dongle.
+
+- **LDPC(208,160) parity check** — 48 parity bits validated to ensure data
+  integrity before position extraction
+- **8-byte syncword detection**: `0xAA 0x66 0x55 0xA5 0x96 0x99 0x96 0x5A`
+  (Hamming distance ≤ 4)
+- **Parallel demodulation**: OGNTP sync detection runs alongside FLARM in the
+  same `process_bit()` pipeline — the first sync match determines the protocol
+- **Position decoding**: latitude, longitude (scaled integers), altitude,
+  aircraft type, address type
+- **DF18 synthesis**: decoded OGNTP positions are injected into the main
+  pipeline as synthetic DF18 frames, identical to FLARM integration
+- **Callsign prefix**: `OGN` + 5-hex-digit address (vs `FLR` for FLARM)
+- **Lock-free SPSC queue**: separate from FLARM queue, drained in
+  `flarmReaderPeriodicWork()`
+
+**Standards:** OGN Tracking Protocol (community-documented), LDPC(208,160).
+
 ### OGN / APRS-IS client (`ogn_client.c/.h`)
 
 Submits decoded FLARM positions to the Open Glider Network.
@@ -606,30 +629,41 @@ ARINC 618 (ACARS over AVLC), ISO/IEC 13239 (HDLC/AVLC framing).
 
 ### Radiosonde decoder (`sonde_demod.c/.h`)
 
-**Vaisala RS41** radiosonde decoder for weather balloon telemetry on 403 MHz.
+Multi-protocol radiosonde decoder supporting **RS41, RS92, DFM, and M10**
+sondes on 403 MHz.
 
-- **PLL (Phase-Locked Loop) bit clock recovery** for GFSK demodulation
-- **FFT frequency scanning** to automatically locate the radiosonde signal
-  within the receiver bandwidth
+#### Vaisala RS41
+- **PLL bit clock recovery** for GFSK demodulation
+- **FFT frequency scanning** to locate the signal within receiver bandwidth
 - **Reed-Solomon RS(255,231) error correction** — corrects up to 12 symbol
-  errors per block, ensuring reliable decoding of weak signals
-- **Whitening/scrambling** removal (RS41 XOR sequence)
-- **CRC-16** validation on individual data sub-blocks (data-only CRC, not
-  covering the sub-block type/length header)
-- **GPS decoding**: GPS week number, iTOW (time of week), ECEF (Earth-Centered
-  Earth-Fixed) coordinates converted to WGS84 latitude/longitude/altitude,
-  velocity vector (3D ECEF velocities → ground speed, vertical speed, heading)
-- **PTU (Pressure/Temperature/Humidity)**: calibrated temperature and relative
-  humidity using per-sonde calibration coefficients embedded in the telemetry
-  frame
-- **Serial number extraction**: RS41 serial string (e.g. "K1930293") from
-  the sonde status sub-block
-- **Frame numbering**: monotonically increasing frame counter for tracking
-  transmission continuity
-- **Satellite count**: number of GPS satellites used in the fix
+  errors; hard fail on uncorrectable frames
+- **XOR whitening** removal (64-byte mask)
+- **CRC-16 CCITT** validation on all data sub-blocks (always enforced)
+- **GPS decoding**: ECEF coordinates → WGS84 lat/lon/alt, velocity vector
+- **PTU**: calibrated temperature and humidity from per-sonde coefficients
+- **Serial number** required before emitting position (`serial[0] != '\0'`)
 
-**Standards:** Vaisala RS41 telemetry format (community-documented), WMO BUFR
-radiosonde data encoding, WGS84 geodetic reference system.
+#### Vaisala RS92
+- **Reed-Solomon RS(255,231)** with hard fail on uncorrectable frames
+- **GPS decoding**: ECEF → WGS84
+- **Serial number** required before emitting position
+
+#### Graw DFM (DFM06/DFM09)
+- **Manchester decoding**: 66 raw bytes → 33 decoded bytes
+- **Nibble XOR parity** validation per subframe (2-byte header + 6×5-byte subframes)
+- **GPS decoding**: lat/lon/alt from decoded subframes
+- **Serial number** required before emitting position
+
+#### Meteomodem M10
+- **CRC-16 CCITT** over bytes 0..98, stored little-endian at bytes 99..100
+- **Frame type byte** must be `0x9A` (M10 GPS frame)
+- **Sync threshold** 22/24 bits (raised from 20 to reduce false positives)
+- **GPS decoding**: lat/lon/alt, velocity (cm/s → m/s)
+- **101-byte frame** length
+
+**Standards:** Vaisala RS41/RS92 telemetry format (community-documented by
+[rs1729](https://github.com/rs1729/RS)), Graw DFM (community RE), Meteomodem
+M10 (community RE), WGS84 geodetic reference system.
 
 ### SondeHub client (`sondehub_client.c/.h`)
 
@@ -641,7 +675,7 @@ collaborative radiosonde tracking platform.
   - `/sondes/telemetry` — batched telemetry upload every 30 seconds (JSON array)
   - `/listeners` — station position upload every 10 minutes (JSON object)
 - **Mandatory telemetry fields**: software name/version, uploader callsign,
-  time received (ISO 8601), manufacturer ("Vaisala"), type ("RS41"),
+  time received (ISO 8601), manufacturer, type ("RS41", "RS92", "DFM", "M10"),
   serial, frame number, datetime, lat/lon/alt
 - **Optional fields**: horizontal/vertical velocity, heading, satellite count,
   frequency, SNR, temperature, humidity, uploader position
@@ -670,7 +704,7 @@ restarts for most settings.
   |---|---|---|
   | `/api/config` | GET | Full configuration dump |
   | `/api/config` | POST | Live configuration update (no restart needed) |
-  | `/api/status` | GET | System status, uptime, versions |
+  | `/api/status` | GET | System status, uptime, version, variant |
   | `/api/aircraft` | GET | Live aircraft table |
   | `/api/connections` | GET | Feeder connection status (all networks) |
   | `/api/stats` | GET | Decode and feed statistics |
@@ -698,6 +732,25 @@ restarts for most settings.
 ![Web panel — Decoded messages view (ACARS, VDL2, CPDLC, FLARM, Radiosonde)](docs/images/messages.png)
 
 ![Web panel — Live log viewer with auto-scroll](docs/images/logs.png)
+
+### Aircraft table features (`panel/aircraft.html`)
+
+The aircraft table page includes several interactive features:
+
+- **Source column**: color-coded badges showing how each aircraft was acquired:
+  ADS-B (cyan), FLARM (green), OGNTP (blue), MLAT (purple), TIS-B (orange),
+  ADS-R (teal), Mode-S (gray). The source is derived from the `type` field
+  in `aircraft.json` (omitted for standard ADS-B ICAO addresses)
+- **Military aircraft detection**: heuristic `isMilitary()` function using:
+  - ICAO address ranges (US 0xAE-0xAF, UK RAF 0x43C, French FAF 0x3B,
+    Australian RAAF 0x7C7, Turkish ThAF 0x71)
+  - Military squawk codes (7001–7007)
+  - Known military callsign prefixes (SPARO, GRIFONE, FALCO, COBRA, VIPER,
+    AWACS, NATO, REAPER, etc.)
+  - Owner keywords from ICAO database lookups (air force, navy, army, etc.)
+- **GPS integrity flags**: GPS! (suspect) and GPS↓ (degraded) badges
+- **Version badge**: all pages display the running program version (fetched
+  from `/api/status`) in the top-right corner of the navigation bar
 
 ---
 
@@ -733,7 +786,8 @@ are preserved.
 | `config_panel.c/.h` | Web control panel (HTTP REST) | Original implementation | GPL-3.0-or-later |
 | `acars_demod.c/.h` | ACARS AM-MSK demodulator | ARINC 618/620 public standards | GPL-3.0-or-later |
 | `vdl2_demod.c/.h` | VDL Mode 2 D8PSK demodulator | ICAO Doc 9776, Annex 10 Vol III | GPL-3.0-or-later |
-| `sonde_demod.c/.h` | RS41 radiosonde decoder | Community-documented RS41 format | GPL-3.0-or-later |
+| `sonde_demod.c/.h` | Multi-protocol radiosonde decoder (RS41/RS92/DFM/M10) | Community-documented formats ([rs1729/RS](https://github.com/rs1729/RS)) | GPL-3.0-or-later |
+| `ogntp_decode.c/.h` | OGN Tracking Protocol decoder (LDPC) | Community-documented OGN-TP format | GPL-3.0-or-later |
 | `sondehub_client.c/.h` | SondeHub v2 telemetry uploader | [SondeHub API](https://github.com/projecthorus/sondehub-infra/wiki), reference: [radiosonde_auto_rx](https://github.com/projecthorus/radiosonde_auto_rx) | GPL-3.0-or-later |
 | `elm.c/.h` | Comm-D ELM reassembly | ICAO Annex 10 Vol IV (Comm-D framing) | GPL-3.0-or-later |
 | `cpdlc_decode.c/.h` | FANS-1/A CPDLC message decoder | ICAO Doc 9705, RTCA DO-258A, ASN.1 constraints from [libacars](https://github.com/szpajder/libacars) | GPL-3.0-or-later |
@@ -874,6 +928,12 @@ These decoders are implemented from **published aviation standards** and
   Volume III (Digital Data Communication Systems), ISO/IEC 13239 (HDLC/AVLC)
 - **RS41 Radiosonde**: Community-documented telemetry format, based on
   publicly available reverse-engineering efforts by the radiosonde community
+  (notably [rs1729](https://github.com/rs1729/RS))
+- **RS92 / DFM / M10**: Community-documented formats from the same
+  radiosonde reverse-engineering community
+- **OGNTP**: OGN Tracking Protocol, documented on the
+  [OGN protocol wiki](http://wiki.glidernet.org/) and in the
+  [ogn-decode](https://github.com/glidernet) source code
 
 ---
 
@@ -927,4 +987,6 @@ Oliver Jowett `<oliver@mutability.co.uk>` (see `LICENSE` file).
 - **Tomasz Lemiech** (szpajder) — libacars (ASN.1 CPDLC specifications)
 - **Mark Jessop** (VK5QI) — radiosonde_auto_rx, SondeHub API
 - **Project Horus** — SondeHub infrastructure
-- **Radiosonde community** — RS41 telemetry format documentation
+- **Radiosonde community** — RS41/RS92/DFM/M10 telemetry format documentation
+- **rs1729** — Comprehensive radiosonde decoder reference implementations
+- **Open Glider Network** — OGN Tracking Protocol documentation

@@ -344,6 +344,10 @@ static int https_get(const char *host, const char *path, char *buf, int bufsz) {
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) { close(fd); return -1; }
+    // Force HTTP/1.1 via ALPN — without this, servers may negotiate h2 (HTTP/2 binary framing)
+    // which our plain-text HTTP/1.0 parser cannot handle.
+    static const unsigned char alpn[] = { 8, 'h','t','t','p','/','1','.','1' };
+    SSL_CTX_set_alpn_protos(ctx, alpn, sizeof(alpn));
     SSL *ssl = SSL_new(ctx);
     if (!ssl) { SSL_CTX_free(ctx); close(fd); return -1; }
     SSL_set_fd(ssl, fd);
@@ -407,9 +411,6 @@ static void url_encode(const char *src, char *dst, size_t dst_size) {
 // ===================== Internet Connectivity Check =====================
 // Quick DNS probe: resolve a well-known host to detect internet.
 
-#define NET_CHECK_HOST         "feed.adsbexchange.com"
-#define NET_CHECK_INTERVAL_MS  30000   // check every 30s when online
-#define NET_CHECK_OFFLINE_MS   5000    // check every 5s when offline
 
 static int check_internet(void) {
     struct addrinfo hints, *res;
@@ -720,7 +721,7 @@ static void *mlat_thread_entry(void *arg) {
         // (real-time data is useless when buffered for later)
         if (!atomic_load(&net_available)) {
             while (feeder_queue_pop(&mlat_queue, &mm)) { /* discard */ }
-            mlatClientDisconnectAll("internet offline");
+            //mlatClientDisconnectAll("internet offline");
             usleep(500000); // 500ms sleep while offline
             continue;
         }

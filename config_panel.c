@@ -20,6 +20,7 @@
 #include "sdr.h"
 #include "fifo.h"
 #include "opensky_client.h"
+#include "sondehub_client.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -40,6 +41,10 @@
 #include <limits.h>
 
 panel_state_t PanelState;
+
+// Sonde feed config (radiosondy.info and wettersonde.net — no C client yet, UI-only)
+static bool RadiosondyEnabled = false;
+static bool WettersondeEnabled = false;
 
 // ============================= Initialization ============================
 
@@ -345,6 +350,9 @@ static void panelApplyConfig(const char *body)
                     MlatConfig.user = malloc(nlen + 1);
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
                     panelLog("Panel: station name set to '%s'", MlatConfig.user);
+                    // Sync OGN station name from station.name
+                    strncpy(FlarmConfig.ogn_station, MlatConfig.user, sizeof(FlarmConfig.ogn_station) - 1);
+                    FlarmConfig.ogn_station[sizeof(FlarmConfig.ogn_station) - 1] = '\0';
                 }
             }
         }
@@ -374,21 +382,9 @@ static void panelApplyConfig(const char *body)
     // OGN settings
     const char *ogn = json_find_obj(body, "ogn");
     if (ogn) {
-        // Extract station name
-        const char *v = json_find_key(ogn, "station");
-        if (v) {
-            while (*v == ' ') v++;
-            if (*v == '"') {
-                v++;
-                const char *e = strchr(v, '"');
-                if (e && (e - v) < (int)sizeof(FlarmConfig.ogn_station) - 1) {
-                    memcpy(FlarmConfig.ogn_station, v, e - v);
-                    FlarmConfig.ogn_station[e - v] = '\0';
-                }
-            }
-        }
+        // Station name is always taken from station.name (synced above)
         // Extract server
-        v = json_find_key(ogn, "server");
+        const char *v = json_find_key(ogn, "server");
         if (v) {
             while (*v == ' ') v++;
             if (*v == '"') {
@@ -452,6 +448,34 @@ static void panelApplyConfig(const char *body)
                 }
             }
         }
+    }
+
+    // SondeHub
+    const char *shub = json_find_obj(body, "sondehub");
+    if (shub) {
+        SondehubConfig.enabled = json_get_bool(shub, "enabled", SondehubConfig.enabled);
+    }
+    // Callsign always synced from station.name
+    if (MlatConfig.user && MlatConfig.user[0]) {
+        strncpy(SondehubConfig.callsign, MlatConfig.user, sizeof(SondehubConfig.callsign) - 1);
+        SondehubConfig.callsign[sizeof(SondehubConfig.callsign) - 1] = '\0';
+    }
+    if (shub) {
+        panelLog("Panel: SondeHub %s (callsign: %s)",
+                 SondehubConfig.enabled ? "enabled" : "disabled",
+                 SondehubConfig.callsign);
+    }
+
+    // radiosondy.info
+    const char *rsondy = json_find_obj(body, "radiosondy");
+    if (rsondy) {
+        RadiosondyEnabled = json_get_bool(rsondy, "enabled", RadiosondyEnabled);
+    }
+
+    // wettersonde.net
+    const char *wetter = json_find_obj(body, "wettersonde");
+    if (wetter) {
+        WettersondeEnabled = json_get_bool(wetter, "enabled", WettersondeEnabled);
     }
 
     panelLog("Panel: configuration applied at runtime (no restart)");
@@ -524,17 +548,16 @@ void panelLoadBeastFeedState(void)
         const char *pos = strstr(data, needle);
         if (!pos) continue;
 
-        // Look for "enabled":true/false within the next 200 chars (same JSON object)
-        const char *end = pos + strlen(needle) + 200;
-        if (end > data + rd) end = data + rd;
+        // Use the closing brace of this JSON object as the boundary
+        const char *next_obj = strchr(pos + 1, '}');
         const char *en_true = strstr(pos, "\"enabled\":true");
         const char *en_false = strstr(pos, "\"enabled\":false");
-        if (en_true && en_true < end) {
-            Modes.beast_feeds[i].enabled = 1;
-            fprintf(stderr, "Panel: %s enabled by saved config\n", Modes.beast_feeds[i].name);
-        } else if (en_false && en_false < end) {
+        if (en_false && (!next_obj || en_false < next_obj)) {
             Modes.beast_feeds[i].enabled = 0;
             fprintf(stderr, "Panel: %s disabled by saved config\n", Modes.beast_feeds[i].name);
+        } else if (en_true && (!next_obj || en_true < next_obj)) {
+            Modes.beast_feeds[i].enabled = 1;
+            fprintf(stderr, "Panel: %s enabled by saved config\n", Modes.beast_feeds[i].name);
         }
     }
 
@@ -544,22 +567,37 @@ void panelLoadBeastFeedState(void)
         FlarmConfig.flarm_ogn_only = json_get_bool(flarm, "ogn_only", FlarmConfig.flarm_ogn_only != 0) ? 1 : 0;
     }
 
-    // Restore OGN settings from saved config
-    const char *ogn = json_find_obj(data, "ogn");
-    if (ogn) {
-        const char *v = json_find_key(ogn, "station");
+    // Restore station name and sync to OGN station
+    const char *stationobj = json_find_obj(data, "station");
+    if (stationobj) {
+        const char *v = json_find_key(stationobj, "name");
         if (v) {
             while (*v == ' ') v++;
             if (*v == '"') {
                 v++;
                 const char *e = strchr(v, '"');
-                if (e && (e - v) > 0 && (e - v) < (int)sizeof(FlarmConfig.ogn_station) - 1) {
-                    memcpy(FlarmConfig.ogn_station, v, e - v);
-                    FlarmConfig.ogn_station[e - v] = '\0';
+                if (e && (e - v) > 0 && (e - v) < 64) {
+                    free(MlatConfig.user);
+                    int nlen = (int)(e - v);
+                    MlatConfig.user = malloc(nlen + 1);
+                    if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
+                    strncpy(FlarmConfig.ogn_station, MlatConfig.user, sizeof(FlarmConfig.ogn_station) - 1);
+                    FlarmConfig.ogn_station[sizeof(FlarmConfig.ogn_station) - 1] = '\0';
                 }
             }
         }
-        v = json_find_key(ogn, "server");
+        double lat = json_get_double(stationobj, "lat", Modes.fUserLat);
+        double lon = json_get_double(stationobj, "lon", Modes.fUserLon);
+        double mr  = json_get_double(stationobj, "max_range", Modes.maxRange / 1852.0);
+        if (lat != 0.0 || lon != 0.0) { Modes.fUserLat = lat; Modes.fUserLon = lon; }
+        if (mr > 0) Modes.maxRange = mr * 1852.0;
+    }
+
+    // Restore OGN settings from saved config
+    const char *ogn = json_find_obj(data, "ogn");
+    if (ogn) {
+        // ogn.station is always derived from station.name (no separate restore)
+        const char *v = json_find_key(ogn, "server");
         if (v) {
             while (*v == ' ') v++;
             if (*v == '"') {
@@ -574,6 +612,28 @@ void panelLoadBeastFeedState(void)
         int port = json_get_int(ogn, "port", 0);
         if (port > 0 && port < 65536) FlarmConfig.ogn_port = port;
     }
+
+    // Restore SondeHub settings
+    const char *shub = json_find_obj(data, "sondehub");
+    if (shub) {
+        SondehubConfig.enabled = json_get_bool(shub, "enabled", SondehubConfig.enabled);
+    }
+    // Callsign always synced from station.name
+    if (MlatConfig.user && MlatConfig.user[0]) {
+        strncpy(SondehubConfig.callsign, MlatConfig.user, sizeof(SondehubConfig.callsign) - 1);
+        SondehubConfig.callsign[sizeof(SondehubConfig.callsign) - 1] = '\0';
+    }
+    if (shub) {
+        fprintf(stderr, "Panel: SondeHub %s (callsign: %s)\n",
+                SondehubConfig.enabled ? "enabled" : "disabled",
+                SondehubConfig.callsign);
+    }
+
+    // Restore radiosondy / wettersonde enabled state
+    const char *rsondy = json_find_obj(data, "radiosondy");
+    if (rsondy) RadiosondyEnabled = json_get_bool(rsondy, "enabled", false);
+    const char *wetter = json_find_obj(data, "wettersonde");
+    if (wetter) WettersondeEnabled = json_get_bool(wetter, "enabled", false);
 
     free(data);
 }
@@ -678,6 +738,32 @@ static void api_get_config(int fd)
         PiawareClient.state,
         (unsigned long long)PiawareClient.msgs_sent);
 
+    // Radiosonde SDR status (derived from SdrManager)
+    {
+        int sonde_active = 0;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_RADIOSONDE) {
+                sonde_active = 1;
+                break;
+            }
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "\"sdr_radiosonde\":{\"enabled\":%s},\n",
+            sonde_active ? "true" : "false");
+    }
+
+    // Sonde feeds
+    p += snprintf(p, (size_t)(end - p),
+        "\"sondehub\":{\"enabled\":%s,\"callsign\":\"%s\"},\n",
+        SondehubConfig.enabled ? "true" : "false",
+        json_escape(esc, sizeof(esc), SondehubConfig.callsign));
+    p += snprintf(p, (size_t)(end - p),
+        "\"radiosondy\":{\"enabled\":%s},\n",
+        RadiosondyEnabled ? "true" : "false");
+    p += snprintf(p, (size_t)(end - p),
+        "\"wettersonde\":{\"enabled\":%s},\n",
+        WettersondeEnabled ? "true" : "false");
+
     // MLAT
     p += snprintf(p, (size_t)(end - p), "\"mlat\":{\"servers\":[\n");
     for (int i = 0; i < MlatConfig.server_count; i++) {
@@ -695,8 +781,7 @@ static void api_get_config(int fd)
 
     // OGN
     p += snprintf(p, (size_t)(end - p),
-        "\"ogn\":{\"station\":\"%s\",\"server\":\"%s\",\"port\":%d},\n",
-        json_escape(esc, sizeof(esc), FlarmConfig.ogn_station),
+        "\"ogn\":{\"server\":\"%s\",\"port\":%d},\n",
         json_escape(esc, sizeof(esc), FlarmConfig.ogn_server),
         FlarmConfig.ogn_port);
 
@@ -802,7 +887,7 @@ static void api_get_status(int fd)
         p += snprintf(p, (size_t)(end - p),
             "%s{\"name\":\"OpenSky Network\",\"type\":\"native\",\"enabled\":%s,"
             "\"host\":\"%s\",\"port\":%d,\"user\":\"%s\","
-            "\"link\":\"https://opensky-network.org/my-opensky\"}",
+            "\"link\":\"https://opensky-network.org/my-opensky/sensors/view-sensors\"}",
             need_comma ? "," : "",
             OpenSkyConfig.enabled ? "true" : "false",
             OpenSkyConfig.host, OpenSkyConfig.port, OpenSkyConfig.username);
@@ -852,7 +937,7 @@ static void api_get_status(int fd)
             }
         }
         p += snprintf(p, (size_t)(end - p),
-            "%s{\"name\":\"FLARM / OGN\",\"type\":\"flarm\",\"enabled\":%s,"
+            "%s{\"name\":\"FLARM / OGNTP\",\"type\":\"flarm\",\"enabled\":%s,"
             "\"station\":\"%s\",\"server\":\"%s\","
             "\"link\":\"http://live.glidernet.org\"}",
             need_comma ? "," : "",
@@ -860,7 +945,8 @@ static void api_get_status(int fd)
             FlarmConfig.ogn_station, FlarmConfig.ogn_server);
     }
 
-    p += snprintf(p, (size_t)(end - p), "]}\n");
+    p += snprintf(p, (size_t)(end - p),
+        "],\"version\":\"" MODES_DUMP1090_VERSION "\",\"variant\":\"" MODES_DUMP1090_VARIANT "\"}\n");
 
     http_send_json(fd, buf, (int)(p - buf));
     free(buf);
@@ -1801,7 +1887,7 @@ static void serve_devices_page(int fd)
         "h+='<td><select id=\"'+selId+'\">';"
         "h+='<option value=none'+(curRole=='none'?' selected':'')+'>&#x274c; None</option>';"
         "h+='<option value=adsb'+(curRole=='adsb'?' selected':'')+'>&#x2708; ADS-B (1090 MHz)</option>';"
-        "h+='<option value=flarm'+(curRole=='flarm'?' selected':'')+'>&#x1f6a9; FLARM (868 MHz)</option>';"
+        "h+='<option value=flarm'+(curRole=='flarm'?' selected':'')+'>&#x1f6a9; FLARM / OGNTP (868 MHz)</option>';"
         "h+='<option value=acars'+(curRole=='acars'?' selected':'')+'>&#x1f4e1; ACARS (131 MHz)</option>';"
         "h+='<option value=vdl2'+(curRole=='vdl2'?' selected':'')+'>&#x1f4e1; VDL2 (136 MHz)</option>';"
         "h+='<option value=radiosonde'+(curRole=='radiosonde'?' selected':'')+'>&#x1f388; Radiosonde (403 MHz)</option>';"

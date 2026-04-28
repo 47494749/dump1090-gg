@@ -224,7 +224,7 @@ function renderConfigForm(){
     html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
         <input type="checkbox" data-key="opensky.enabled" ${cfg.opensky&&cfg.opensky.enabled?'checked':''} style="width:20px;height:20px">
         <div style="flex:1"><strong style="color:var(--accent)">OpenSky Network</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to opensky-network.org — academic open data project</span></div>
-        <a href="https://opensky-network.org/my-opensky" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
+        <a href="https://opensky-network.org/my-opensky/sensors/view-sensors" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
     </div>`;
     html+=`<div style="padding:8px 0 8px 32px">
         <div class="field"><label>Username</label><input type="text" data-key="opensky.username" value="${cfg.opensky&&cfg.opensky.username||''}"></div>

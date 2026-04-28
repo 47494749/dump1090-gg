@@ -24,6 +24,7 @@
 
 #include "flarm_demod.h"
 #include "flarm_decode.h"
+#include "ogntp_decode.h"
 
 // ======================== Constants ========================
 
@@ -86,11 +87,16 @@ struct flarm_state {
     // Syncword detection
     uint64_t shift_reg;     // 64-bit shift register for syncword matching
 
-    // Packet assembly
-    int      in_packet;     // Currently receiving a packet
+    // FLARM packet assembly
+    int      in_packet;     // Currently receiving a FLARM packet
     unsigned packet_bits;   // Bits received since sync
-    uint8_t  packet_manchester[PAYLOAD_MANCHESTER_BITS]; // Manchester half-bits
+    uint8_t  packet_manchester[PAYLOAD_MANCHESTER_BITS]; // FLARM Manchester half-bits
     unsigned packet_mbit_count;
+
+    // OGNTP packet assembly
+    int      in_ogntp_packet;
+    uint8_t  ogntp_manchester[PAYLOAD_MANCHESTER_BITS]; // OGNTP Manchester half-bits
+    unsigned ogntp_mbit_count;
 
     // Stats
     flarm_demod_stats_t stats;
@@ -126,6 +132,8 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
     s->shift_reg = 0;
     s->in_packet = 0;
     s->packet_mbit_count = 0;
+    s->in_ogntp_packet = 0;
+    s->ogntp_mbit_count = 0;
 
     return s;
 }
@@ -274,6 +282,47 @@ static void try_decode_packet(struct flarm_state *state)
     }
 }
 
+// ======================== OGNTP try-decode ========================
+
+static void try_decode_ogntp_packet(struct flarm_state *state)
+{
+    uint8_t payload[OGNTP_PACKET_TOTAL];
+    unsigned payload_len = 0;
+
+    // Manchester-decode using same inverted convention as FLARM
+    if (!manchester_decode_payload(state->ogntp_manchester,
+                                   state->ogntp_mbit_count,
+                                   payload, &payload_len)) {
+        state->stats.ogntp_packets_failed++;
+        return;
+    }
+
+    if (payload_len < OGNTP_PACKET_TOTAL) {
+        state->stats.ogntp_packets_failed++;
+        return;
+    }
+
+    // LDPC parity check (replaces CRC for OGN1)
+    if (ogntp_ldpc_check(payload) != 0) {
+        state->stats.ogntp_packets_failed++;
+        return;
+    }
+    state->stats.ogntp_packets_ldpc_ok++;
+
+    // Protocol decode
+    ogntp_message_t msg;
+    if (ogntp_decode_packet(payload, state->config.ref_lat, state->config.ref_lon, &msg)) {
+        state->stats.ogntp_packets_decoded++;
+        msg.signal_level = 0.0f; // TODO: propagate FM amplitude
+
+        if (state->config.ogntp_callback) {
+            state->config.ogntp_callback(&msg, state->config.ogntp_callback_ctx);
+        }
+    } else {
+        state->stats.ogntp_packets_failed++;
+    }
+}
+
 // ======================== Process one bit ========================
 
 static void process_bit(struct flarm_state *state, uint8_t bit)
@@ -281,32 +330,56 @@ static void process_bit(struct flarm_state *state, uint8_t bit)
     // Push into 64-bit shift register for syncword detection
     state->shift_reg = (state->shift_reg << 1) | (bit & 1);
 
+    // ---- FLARM: collect bits or look for FLARM syncword ----
     if (state->in_packet) {
-        // Collecting payload Manchester bits
+        // Collecting FLARM payload Manchester bits
         state->packet_manchester[state->packet_mbit_count++] = bit;
 
         if (state->packet_mbit_count >= PAYLOAD_MANCHESTER_BITS) {
-            // Got full packet, try to decode
             try_decode_packet(state);
             state->in_packet = 0;
             state->packet_mbit_count = 0;
         }
     } else {
-        // Look for syncword
         static uint64_t sync_pattern = 0;
         if (sync_pattern == 0) {
             sync_pattern = build_syncword_pattern();
         }
 
-        // XOR with expected pattern, count matching bits
         uint64_t diff = state->shift_reg ^ sync_pattern;
         int errors = popcount64(diff);
 
         if (errors <= (64 - SYNC_THRESHOLD)) {
-            // Syncword detected!
             state->stats.packets_detected++;
             state->in_packet = 1;
             state->packet_mbit_count = 0;
+        }
+    }
+
+    // ---- OGNTP: collect bits or look for OGNTP syncword (independent) ----
+    if (state->in_ogntp_packet) {
+        // Collecting OGNTP payload Manchester bits
+        state->ogntp_manchester[state->ogntp_mbit_count++] = bit;
+
+        if (state->ogntp_mbit_count >= PAYLOAD_MANCHESTER_BITS) {
+            try_decode_ogntp_packet(state);
+            state->in_ogntp_packet = 0;
+            state->ogntp_mbit_count = 0;
+        }
+    } else {
+        static uint64_t ogntp_sync_pattern = 0;
+        if (ogntp_sync_pattern == 0) {
+            for (int i = 0; i < OGNTP_SYNCWORD_SIZE; i++)
+                ogntp_sync_pattern = (ogntp_sync_pattern << 8) | OGNTP_SYNCWORD[i];
+        }
+
+        uint64_t ogntp_diff = state->shift_reg ^ ogntp_sync_pattern;
+        int ogntp_errors = popcount64(ogntp_diff);
+
+        if (ogntp_errors <= (64 - SYNC_THRESHOLD)) {
+            state->stats.ogntp_packets_detected++;
+            state->in_ogntp_packet = 1;
+            state->ogntp_mbit_count = 0;
         }
     }
 }

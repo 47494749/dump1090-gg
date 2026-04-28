@@ -47,6 +47,7 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 <a href="/aircraft.html">✈️ Aircraft</a>
 <a href="/devices.html">📻 Devices</a>
 </div>
+<span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>
 
 <div class="main">
@@ -84,7 +85,7 @@ async function loadStatus(){
             const t=f.type||'other';
             if(groups[t]) groups[t].push(f); else{if(!groups.other)groups.other=[];groups.other.push(f);}
         }
-        const labels={beast:'Beast Feeds',native:'Native Feeders',mlat:'MLAT Servers',flarm:'FLARM / OGN',other:'Other'};
+        const labels={beast:'Beast Feeds',native:'Native Feeders',mlat:'MLAT Servers',flarm:'FLARM / OGNTP',other:'Other'};
         let html='';
         for(const[k,arr] of Object.entries(groups)){
             if(!arr.length) continue;
@@ -93,6 +94,8 @@ async function loadStatus(){
             html+='</div>';
         }
         document.getElementById('status-content').innerHTML=html||'<p style="color:var(--dim)">No feeders configured</p>';
+        const vb=document.getElementById('ver-badge');
+        if(vb&&d.version)vb.textContent='v'+d.version;
     }catch(e){document.getElementById('status-content').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
 }
 

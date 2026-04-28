@@ -162,6 +162,9 @@ connected:
     // TLS setup
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) goto cleanup;
+    // Force HTTP/1.1 via ALPN to prevent h2 binary framing
+    static const unsigned char alpn[] = { 8, 'h','t','t','p','/','1','.','1' };
+    SSL_CTX_set_alpn_protos(ctx, alpn, sizeof(alpn));
 
     ssl = SSL_new(ctx);
     if (!ssl) goto cleanup;

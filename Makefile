@@ -1,6 +1,6 @@
 PROGNAME=dump1090
 
-DUMP1090_VERSION ?= unknown
+DUMP1090_VERSION ?= 1.0.1
 
 CFLAGS ?= -O3 -g
 DUMP1090_CFLAGS := -std=c11 -fno-common -Wall -Wmissing-declarations -Werror -Wformat-signedness -W
@@ -222,7 +222,7 @@ showconfig:
 %.o: %.c *.h
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
 
-dump1090: dump1090.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o net_io.o crc.o demod_2400.o stats.o cpr.o icao_filter.o track.o util.o convert.o ais_charset.o adaptive.o elm.o cpdlc_decode.o mlat_client.o piaware_client.o fa_mlat.o planefinder_client.o fr24_client.o radarbox_client.o flarm_decode.o flarm_demod.o flarm_reader.o ogn_client.o opensky_client.o sondehub_client.o feeder_thread.o config_panel.o sdr_receiver.o acars_demod.o vdl2_demod.o sonde_demod.o $(SDR_OBJ) $(COMPAT) $(CPUFEATURES_OBJS) $(STARCH_OBJS)
+dump1090: dump1090.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o net_io.o crc.o demod_2400.o stats.o cpr.o icao_filter.o track.o util.o convert.o ais_charset.o adaptive.o elm.o cpdlc_decode.o mlat_client.o piaware_client.o fa_mlat.o planefinder_client.o fr24_client.o radarbox_client.o flarm_decode.o flarm_demod.o flarm_reader.o ogntp_decode.o ogn_client.o opensky_client.o sondehub_client.o feeder_thread.o config_panel.o sdr_receiver.o acars_demod.o vdl2_demod.o sonde_demod.o $(SDR_OBJ) $(COMPAT) $(CPUFEATURES_OBJS) $(STARCH_OBJS)
 	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_SDR) $(LIBS_CURSES) -lssl -lcrypto -lz
 
 view1090: view1090.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o net_io.o crc.o stats.o cpr.o icao_filter.o track.o util.o ais_charset.o elm.o cpdlc_decode.o mlat_client.o piaware_client.o fa_mlat.o feeder_thread_stub.o config_panel_stub.o sdr_stub.o $(COMPAT)

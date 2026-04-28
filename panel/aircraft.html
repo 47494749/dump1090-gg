@@ -40,6 +40,10 @@ tr:hover td{background:var(--hover)}
 .info-row .val{color:var(--text);text-align:right;max-width:200px;word-break:break-word}
 .photo{margin-top:12px;text-align:center}
 .photo img{max-width:100%;border-radius:6px;border:1px solid var(--border)}
+.tt{position:relative;display:inline-block}
+.tt .ttbox{visibility:hidden;opacity:0;pointer-events:none;position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#1a1a32;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;font-weight:400;white-space:nowrap;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.6);transition:opacity .15s}
+.tt .ttbox::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:#1a1a32}
+.tt:hover .ttbox{visibility:visible;opacity:1}
 </style>
 </head>
 <body>
@@ -54,6 +58,7 @@ tr:hover td{background:var(--hover)}
 <a class="active" href="/aircraft.html">✈️ Aircraft</a>
 <a href="/devices.html">📻 Devices</a>
 </div>
+<span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>
 
 <div class="main">
@@ -79,6 +84,7 @@ tr:hover td{background:var(--hover)}
 <th onclick="sortAC('rssi')">RSSI</th>
 <th onclick="sortAC('messages')">Msgs</th>
 <th onclick="sortAC('seen')">Seen</th>
+<th onclick="sortAC('type')">Source</th>
 <th>Flags</th>
 </tr></thead>
 <tbody id="ac-body"></tbody>
@@ -224,14 +230,36 @@ function getSquawkTitle(sq){
 }
 function sortAC(key){if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=1;}renderAC();}
 
+function getSource(a){
+    const cs=(a.flight||'').trim().toUpperCase();
+    if(cs.startsWith('FLR'))return{label:'FLARM',bg:'rgba(0,200,100,0.18)',col:'#00cc66',title:'FLARM 868 MHz legacy'};
+    if(cs.startsWith('OGN'))return{label:'OGNTP',bg:'rgba(0,180,255,0.18)',col:'#00b4ff',title:'OGN-Tracker Protocol (868 MHz)'};
+    // 'type' is omitted from JSON when addrtype==ADDR_ADSB_ICAO (most common case)
+    const t=(a.type||'adsb_icao').toLowerCase();
+    if(t.startsWith('adsb_icao_nt'))return{label:'ADS-B',bg:'rgba(79,195,247,0.15)',col:'#4fc3f7',title:'ADS-B (no timestamp)'};
+    if(t.startsWith('adsb_icao')||t.startsWith('adsb_other'))return{label:'ADS-B',bg:'rgba(79,195,247,0.15)',col:'#4fc3f7',title:'ADS-B'};
+    if(t.startsWith('adsr'))return{label:'ADS-R',bg:'rgba(150,100,255,0.18)',col:'#9664ff',title:'ADS-R (rebroadcast)'};
+    if(t.startsWith('tisb'))return{label:'TIS-B',bg:'rgba(255,180,0,0.18)',col:'#ffb400',title:'TIS-B (uplink)'};
+    if(t==='mlat')return{label:'MLAT',bg:'rgba(255,120,0,0.18)',col:'#ff7800',title:'Multilateration'};
+    if(t==='mode_s')return{label:'ModeS',bg:'rgba(120,120,120,0.18)',col:'#aaaaaa',title:'Mode S (no position)'};
+    if(t==='mode_ac')return{label:'ModeA/C',bg:'rgba(100,100,100,0.15)',col:'#888',title:'Mode A/C only'};
+    return{label:'?',bg:'rgba(80,80,80,0.15)',col:'#666',title:t||'unknown'};
+}
+
 function isMilitary(a){
     const n=parseInt(a.hex,16);
     if(!isNaN(n)){
-        if(n>=0xAE0000&&n<=0xAFFFFF)return true;
-        if(n>=0x43C000&&n<=0x43CFFF)return true;
+        if(n>=0xAE0000&&n<=0xAFFFFF)return true; // US military
+        if(n>=0x43C000&&n<=0x43CFFF)return true;  // UK RAF/RN
+        if(n>=0x3B0000&&n<=0x3BFFFF)return true;  // French military (FAF sub-range)
+        if(n>=0x7C7000&&n<=0x7C7FFF)return true;  // Australian military (RAAF)
+        if(n>=0x710000&&n<=0x71FFFF)return true;  // Turkish military (ThAF sub-range)
     }
     const sq=String(a.squawk||'');
     if(/^700[1-7]$/.test(sq))return true;
+    // Known military callsign prefixes (Italian AMI, NATO exercise, etc.)
+    const cs=String(a.flight||'').trim().toUpperCase();
+    if(/^(SPARO|GRIFONE|FALCO|AQUILA|CORVO|VIPER|COBRA|SHARK|LYNX|BOXER|ATLAS|AWACS|NATO|REAPER|PREDATOR|GHOST|SPECTR|SENTRY|TALON|ZEUS|MARS|ARES|TITAN)\d/.test(cs))return true;
     if(icaoCache[a.hex]){const ow=(icaoCache[a.hex].registered_owner||'').toLowerCase();
         if(/air force|navy|army|milit|luftwaffe|marine nationale|aeronautica|bundeswehr|ministry of defen|royal air force/.test(ow))return true;}
     return false;
@@ -280,6 +308,7 @@ function renderAC(){
             <td>${a.rssi!=null?a.rssi.toFixed(1):''}</td>
             <td>${a.messages||''}</td>
             <td>${a.seen!=null?a.seen.toFixed(1)+'s':''}</td>
+            <td>${(()=>{const s=getSource(a);return`<span class="tt" style="display:inline-block"><span style="display:inline-block;padding:2px 7px;border-radius:8px;font-size:11px;font-weight:600;background:${s.bg};color:${s.col};cursor:default">${escapeHtml(s.label)}</span><span class="ttbox">${escapeHtml(s.title)}</span></span>`;})()}</td>
             <td>${flags}</td>
         </tr>`;
     }
@@ -422,6 +451,7 @@ async function loadAircraft(){
 
 loadAircraft();
 setInterval(loadAircraft,1000);
+fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
 </script>
 </body>
 </html>

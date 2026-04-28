@@ -35,6 +35,7 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 <a href="/aircraft.html">✈️ Aircraft</a>
 <a href="/devices.html">📻 Devices</a>
 </div>
+<span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>
 
 <div class="main">
@@ -59,6 +60,7 @@ function clearLogs(){document.getElementById('logbox').textContent='';}
 
 loadLogs();
 setInterval(loadLogs,1500);
+fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
 </script>
 </body>
 </html>

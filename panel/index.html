@@ -56,6 +56,7 @@ tr:hover td{background:var(--hover)}
 <a href="/aircraft.html">✈️ Aircraft</a>
 <a href="/devices.html">📻 Devices</a>
 </div>
+<span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>
 
 <div class="main">
@@ -78,7 +79,6 @@ const configSchema=[
     {k:'mlat.alt',l:'Altitude (m)',t:'number',s:'1',h:'Station altitude — also used for MLAT'},
 ]},
 {title:'🌐 OGN',id:'ogn',fields:[
-    {k:'ogn.station',l:'Station name',t:'text',h:'Station name for APRS-IS / Open Glider Network'},
     {k:'ogn.server',l:'Server',t:'text'},
     {k:'ogn.port',l:'Port',t:'number',s:'1'},
 ]},
@@ -132,7 +132,7 @@ function renderConfigForm(){
     html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
         <input type="checkbox" data-key="opensky.enabled" ${cfg.opensky&&cfg.opensky.enabled?'checked':''} style="width:20px;height:20px">
         <div style="flex:1"><strong style="color:var(--accent)">OpenSky Network</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to opensky-network.org — academic open data project</span></div>
-        <a href="https://opensky-network.org/my-opensky" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
+        <a href="https://opensky-network.org/my-opensky/sensors/view-sensors" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
     </div>`;
     html+=`<div style="padding:8px 0 8px 32px">
         <div class="field"><label>Username</label><input type="text" data-key="opensky.username" value="${cfg.opensky&&cfg.opensky.username||''}"></div>
@@ -155,7 +155,7 @@ function renderConfigForm(){
     html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
         <span style="font-size:20px;width:20px;text-align:center">${flarmOn?'🟢':'🔴'}</span>
         <div style="flex:1"><strong style="color:var(--accent)">FLARM / Open Glider Network</strong><br><span style="color:var(--dim);font-size:12px">${flarmOn?'Active — managed from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page':'Inactive — assign a dongle from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
-        <a href="http://live.glidernet.org" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
+        <a href="https://ognrange.glidernet.org/?station=${encodeURIComponent((cfg.ogn&&cfg.ogn.station)||(cfg.station&&cfg.station.name)||'')}&lat=${(cfg.station&&cfg.station.lat)||''}&lng=${(cfg.station&&cfg.station.lon)||''}&zoom=10" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
     </div>`;}
     html+=`<div style="padding:8px 0 8px 32px">
         <div class="field"><label>Solo OGN</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${cfg.sdr_flarm&&cfg.sdr_flarm.ogn_only?'checked':''}></div>
@@ -163,7 +163,7 @@ function renderConfigForm(){
 
     // Beast feeds
     const feedInfo={
-        'ADSBx':{desc:'ADS-B Exchange — community-driven aggregator, no restrictions',url:'https://adsbexchange.com'},
+        'ADSBx':{desc:'ADS-B Exchange — community-driven aggregator, no restrictions',url:'https://adsbexchange.com/myip/'},
         'adsb.fi':{desc:'adsb.fi — open and free Finnish tracker',url:'https://adsb.fi'},
         'FlyItaly':{desc:'Fly Italy ADSB — Italian ADS-B tracking network',url:'https://flyitalyadsb.com'},
         'PlaneWatch':{desc:'plane.watch — open source Australian tracker',url:'https://plane.watch'},
@@ -217,6 +217,47 @@ function renderConfigForm(){
 
     html+=`</div></div>`;
 
+    // Sonde Feeds section
+    {
+        const sondeOn=cfg.sdr_radiosonde&&cfg.sdr_radiosonde.enabled;
+        const stationName=cfg.station&&cfg.station.name||'';
+        const sondeFeeds=[
+            {key:'sondehub',name:'SondeHub',desc:'Upload radiosonde telemetry to sondehub.org — global open radiosonde tracker',url:'https://sondehub.org'},
+            {key:'radiosondy',name:'radiosondy.info',desc:'Upload radiosonde data to radiosondy.info — European radiosonde tracker',url:'https://radiosondy.info'},
+            {key:'wettersonde',name:'wettersonde.net',desc:'Upload radiosonde data to wettersonde.net — German radiosonde network',url:'https://wettersonde.net'},
+        ];
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🎈 Sonde Feeds — Radiosonde Tracking Hubs</h3><div>`;
+        html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:20px;width:20px;text-align:center">${sondeOn?'🟢':'🔴'}</span>
+            <div style="flex:1"><strong style="color:var(--accent)">Radiosonde Receiver</strong><br><span style="color:var(--dim);font-size:12px">${sondeOn?'Active — managed from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page':'Inactive — assign a dongle from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
+        </div>`;
+        html+=`<div style="padding:8px 0 4px 32px">
+            <div class="field"><label>Callsign</label><span style="color:var(--accent);font-size:13px">${stationName||'(not set)'}</span></div>
+            <div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Taken from Station → Station name</div>
+        </div>`;
+        if(!sondeOn){
+            html+=`<div style="padding:8px 12px;background:var(--input-bg);border-radius:6px;color:var(--dim);font-size:12px;margin:8px 0">
+                ⚠️ Sonde feeds disabled — no radiosonde dongle assigned.
+            </div>`;
+        }
+        html+=`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+            <strong style="color:var(--dim);font-size:12px">Upload destinations</strong>
+        </div>`;
+        for(const sf of sondeFeeds){
+            const feedCfg=cfg[sf.key]||{};
+            const isEnabled=sondeOn&&feedCfg.enabled;
+            html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!sondeOn?'opacity:0.45;pointer-events:none':''}">
+                <input type="checkbox" data-key="${sf.key}.enabled" ${isEnabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!sondeOn?'disabled':''}>
+                <div style="flex:1;min-width:0">
+                    <strong style="color:${isEnabled?'var(--accent)':'var(--dim)'}">${sf.name}</strong>
+                    <br><span style="color:var(--dim);font-size:11px">${sf.desc}</span>
+                </div>
+                ${sf.url?`<a href="${sf.url}" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0;${!sondeOn?'pointer-events:auto':''}">↗</a>`:''}
+            </div>`;
+        }
+        html+=`</div></div>`;
+    }
+
     // MLAT section
     if(cfg.mlat&&cfg.mlat.servers){
         html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 MLAT (${cfg.mlat.servers.length} server)</h3><div>`;
@@ -242,7 +283,7 @@ function renderConfigForm(){
     loadSdrReceiverConfig();
 }
 
-const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)'};
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)'};
 const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈'};
 
 async function loadSdrReceiverConfig(){
@@ -341,6 +382,7 @@ async function saveConfig(){
 }
 
 loadConfig();
+fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
 </script>
 </body>
 </html>
