@@ -10,6 +10,8 @@
 //   3. GPS frame: latitude, longitude, altitude (IEEE 754 doubles)
 //   4. USERNAME frame
 //   5. Beast binary ADS-B frames (same as beast feed)
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "dump1090.h"
 #include "feeder_thread.h"

@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <math.h>
+#include <errno.h>
 
 #include "dump1090.h"
 #include "ogntp_decode.h"
@@ -137,6 +138,73 @@ static void flarm_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 }
 #endif
 
+// ======================== IQ file reader thread ========================
+
+// Read raw IQ file in a loop, feeding samples to the demodulator at real-time rate.
+// File format: uint8 I/Q pairs at FLARM_SAMPLE_RATE (1.6 MSPS).
+// The file is replayed continuously until stop_flag is set.
+
+static void *flarm_ifile_reader_thread(void *arg)
+{
+    (void)arg;
+
+    const char *path = FlarmConfig.ifile_path;
+    const unsigned buf_size = MODES_RTL_BUF_SIZE; // 256 KB
+    uint8_t *buf = malloc(buf_size);
+    if (!buf) {
+        fprintf(stderr, "flarm-ifile: failed to allocate read buffer\n");
+        return NULL;
+    }
+
+    fprintf(stderr, "flarm-ifile: reader thread started, file=%s\n", path);
+
+    unsigned loop_count = 0;
+
+    while (!Flarm.stop_flag && !Modes.exit) {
+        FILE *fp = fopen(path, "rb");
+        if (!fp) {
+            fprintf(stderr, "flarm-ifile: cannot open '%s': %s\n", path, strerror(errno));
+            break;
+        }
+
+        if (loop_count > 0) {
+            fprintf(stderr, "flarm-ifile: replaying file (loop %u)\n", loop_count);
+        }
+        loop_count++;
+
+        while (!Flarm.stop_flag && !Modes.exit) {
+            size_t nread = fread(buf, 1, buf_size, fp);
+            if (nread == 0) {
+                // EOF — loop back
+                break;
+            }
+
+            // Ensure even number of bytes (IQ pairs)
+            nread &= ~(size_t)1;
+
+            if (Flarm.demod && nread > 0) {
+                flarm_demod_process(Flarm.demod, buf, (unsigned)nread);
+            }
+
+            // Throttle to real-time pace
+            double actual_samples = nread / 2.0;
+            double sleep_us = (actual_samples / FLARM_SAMPLE_RATE) * 1e6;
+            if (sleep_us > 0) {
+                struct timespec ts;
+                ts.tv_sec = (time_t)(sleep_us / 1e6);
+                ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+                nanosleep(&ts, NULL);
+            }
+        }
+
+        fclose(fp);
+    }
+
+    free(buf);
+    fprintf(stderr, "flarm-ifile: reader thread exiting (loops=%u)\n", loop_count);
+    return NULL;
+}
+
 // ======================== Reader thread ========================
 
 static void *flarm_reader_thread(void *arg)
@@ -186,9 +254,49 @@ bool flarmReaderOpen(void)
 {
     if (!FlarmConfig.enabled) return true;
 
+    // ---- IQ file mode (--flarm-ifile) ----
+    if (FlarmConfig.ifile_path[0] != '\0') {
+        // Verify file exists and is readable
+        FILE *fp = fopen(FlarmConfig.ifile_path, "rb");
+        if (!fp) {
+            fprintf(stderr, "flarm-ifile: cannot open '%s': %s\n",
+                    FlarmConfig.ifile_path, strerror(errno));
+            return false;
+        }
+        // Get file size for info
+        fseek(fp, 0, SEEK_END);
+        long file_size = ftell(fp);
+        fclose(fp);
+
+        double duration = (file_size / 2.0) / FLARM_SAMPLE_RATE;
+        fprintf(stderr, "flarm-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
+                FlarmConfig.ifile_path, file_size, duration, FLARM_SAMPLE_RATE / 1e6);
+
+        // Create demodulator
+        flarm_demod_config_t demod_config = {
+            .ref_lat      = Modes.fUserLat,
+            .ref_lon      = Modes.fUserLon,
+            .ref_alt_geoid = 0,
+            .center_freq  = FLARM_CENTER_FREQ,
+            .callback     = flarm_enqueue_message,
+            .callback_ctx = NULL,
+            .ogntp_callback     = ogntp_enqueue_message,
+            .ogntp_callback_ctx = NULL
+        };
+
+        Flarm.demod = flarm_demod_create(&demod_config);
+        if (!Flarm.demod) {
+            fprintf(stderr, "flarm-ifile: failed to create demodulator\n");
+            return false;
+        }
+
+        fprintf(stderr, "flarm-ifile: initialized (will replay in loop)\n");
+        return true;
+    }
+
 #ifdef ENABLE_RTLSDR
     if (FlarmConfig.device_serial[0] == '\0') {
-        fprintf(stderr, "flarm: no device serial specified (use --flarm-device)\n");
+        fprintf(stderr, "flarm: no device serial specified (use --flarm-device or --flarm-ifile)\n");
         return false;
     }
 
@@ -268,6 +376,16 @@ void flarmReaderStart(void)
 {
     if (!FlarmConfig.enabled) return;
 
+    // IQ file mode
+    if (FlarmConfig.ifile_path[0] != '\0') {
+        if (!Flarm.demod) return;
+        Flarm.stop_flag = 0;
+        Flarm.thread_running = 1;
+        pthread_create(&Flarm.thread, NULL, flarm_ifile_reader_thread, NULL);
+        fprintf(stderr, "flarm-ifile: reader thread started\n");
+        return;
+    }
+
 #ifdef ENABLE_RTLSDR
     if (!Flarm.dev) return;
 
@@ -284,18 +402,19 @@ void flarmReaderStop(void)
 {
     if (!FlarmConfig.enabled) return;
 
-#ifdef ENABLE_RTLSDR
     if (!Flarm.thread_running) return;
 
     Flarm.stop_flag = 1;
+
+#ifdef ENABLE_RTLSDR
     if (Flarm.dev) {
         rtlsdr_cancel_async(Flarm.dev);
     }
+#endif
 
     pthread_join(Flarm.thread, NULL);
     Flarm.thread_running = 0;
     fprintf(stderr, "flarm: reader thread stopped\n");
-#endif
 }
 
 // ======================== Close ========================
@@ -841,6 +960,7 @@ bool flarmDecoderInit(struct sdr_receiver *rx)
         .ref_lat      = Modes.fUserLat,
         .ref_lon      = Modes.fUserLon,
         .ref_alt_geoid = 0,
+        .center_freq  = (uint32_t)rx->config.freq,
         .callback     = flarm_dec_enqueue,
         .callback_ctx = st
     };
@@ -962,6 +1082,7 @@ void flarmReaderShowHelp(void)
         "\n"
         "--flarm                      Enable FLARM 868 MHz decoder\n"
         "--flarm-device <serial>      RTL-SDR serial number for 868 MHz dongle\n"
+        "--flarm-ifile <path>         Read raw IQ from file instead of RTL-SDR (uint8 I/Q, 1.6 MSPS, loops)\n"
         "--flarm-gain <dB>            Gain in dB (0 = auto, default: auto)\n"
         "--flarm-ppm <correction>     Frequency correction in PPM\n"
         "--ogn-station <name>         OGN station name for APRS-IS feed\n"
@@ -981,6 +1102,9 @@ bool flarmReaderHandleOption(int argc, char **argv, int *jptr)
     } else if (!strcmp(argv[j], "--flarm-device") && more) {
         FlarmConfig.enabled = 1;
         strncpy(FlarmConfig.device_serial, argv[++j], sizeof(FlarmConfig.device_serial) - 1);
+    } else if (!strcmp(argv[j], "--flarm-ifile") && more) {
+        FlarmConfig.enabled = 1;
+        strncpy(FlarmConfig.ifile_path, argv[++j], sizeof(FlarmConfig.ifile_path) - 1);
     } else if (!strcmp(argv[j], "--flarm-gain") && more) {
         float gain_db = atof(argv[++j]);
         FlarmConfig.gain = (int)(gain_db * 10);

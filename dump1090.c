@@ -50,10 +50,22 @@
 #include "dump1090.h"
 #include "cpu.h"
 #include "opensky_client.h"
+#include "pocsag_demod.h"
+#include "gsm_tracker.h"
+#include "lte_tracker.h"
 
 #include <stdarg.h>
 
 struct _Modes Modes;
+
+// POCSAG CLI config (used to build rx_config_t for SdrManager)
+static struct {
+    int    enabled;
+    char   device_serial[64];
+    int    freq;           // center frequency in Hz
+    float  gain;           // gain in dB
+    int    ppm_error;
+} PocsagConfig;
 
 //
 // ============================= Utility functions ==========================
@@ -119,6 +131,7 @@ static void modesInitConfig(void) {
     Modes.gain                    = MODES_DEFAULT_GAIN;
     Modes.freq                    = MODES_DEFAULT_FREQ;
     Modes.fix_df                  = 1;
+    Modes.enable_df24             = 1;  // ELM/CPDLC reassembly on by default
     Modes.interactive_display_ttl = MODES_INTERACTIVE_DISPLAY_TTL;
     Modes.json_interval           = 1000;
     Modes.json_stats_interval     = 60000;
@@ -153,6 +166,8 @@ static void modesInitConfig(void) {
 
     sdrInitConfig();
     flarmReaderInitConfig();
+    memset(&PocsagConfig, 0, sizeof(PocsagConfig));
+    PocsagConfig.freq = 466150000;  // Center for multi-channel (covers 466.0-466.3 MHz)
     openskyClientInit();
     sondehubClientInit();
     panelInitConfig();
@@ -478,12 +493,21 @@ static void showHelp(void)
 "--ogn-server <host>          OGN APRS-IS server (default: aprs.glidernet.org)\n"
 "--ogn-port <port>            OGN APRS-IS port (default: 14580)\n"
 "\n"
+"      POCSAG pager decoder\n"
+"\n"
+"--pocsag                     Enable POCSAG pager decoder (multi-channel 466.0-466.3 MHz)\n"
+"--pocsag-device <serial>     RTL-SDR serial number for POCSAG dongle\n"
+"--pocsag-freq <Hz>           POCSAG center frequency in Hz (default: 466150000)\n"
+"--pocsag-gain <dB>           Gain in dB (0 = auto, default: auto)\n"
+"--pocsag-ppm <correction>    Frequency correction in PPM\n"
+"\n"
 "--sondehub <callsign>        Enable SondeHub upload with this callsign\n"
 "\n"
 "      Multi-SDR dynamic receiver management\n"
 "\n"
 "--receiver <spec>            Add a receiver: serial:role[:gain=X][:ppm=Y][:agc]\n"
-"                             role is 'adsb' or 'flarm'. May be repeated.\n"
+"                             role is 'adsb', 'flarm', 'acars', 'vdl2',\n"
+"                             'radiosonde', 'pocsag', 'gsm', or 'lte'.\n"
 "                             Example: --receiver 00000101:adsb:gain=40\n"
 "                                      --receiver 00000102:flarm:gain=30\n"
 "\n"
@@ -578,6 +602,11 @@ static void backgroundTasks(void) {
 
     // Process MLAT results injected back from the MLAT feeder thread
     feederProcessInjectedMessages();
+
+    // Process FLARM messages from standalone reader (--flarm-ifile)
+    if (FlarmConfig.enabled && FlarmConfig.ifile_path[0]) {
+        flarmReaderPeriodicWork();
+    }
 
 
     // Refresh screen when in interactive mode
@@ -726,6 +755,12 @@ int main(int argc, char **argv) {
 
     // Initialize multi-SDR receiver manager
     sdrManagerInit();
+
+    // Initialize GSM cell tracker
+    gsmTrackerInit();
+
+    // Initialize LTE cell tracker
+    lteTrackerInit();
 
     // signal handlers:
     signal(SIGINT, sigintHandler);
@@ -1086,6 +1121,17 @@ int main(int argc, char **argv) {
             ++j;
         } else if (flarmReaderHandleOption(argc, argv, &j)) {
             // handled by flarm reader
+        } else if (!strcmp(argv[j],"--pocsag")) {
+            PocsagConfig.enabled = 1;
+        } else if (!strcmp(argv[j],"--pocsag-device") && more) {
+            PocsagConfig.enabled = 1;
+            strncpy(PocsagConfig.device_serial, argv[++j], sizeof(PocsagConfig.device_serial) - 1);
+        } else if (!strcmp(argv[j],"--pocsag-freq") && more) {
+            PocsagConfig.freq = atoi(argv[++j]);
+        } else if (!strcmp(argv[j],"--pocsag-gain") && more) {
+            PocsagConfig.gain = (float)atof(argv[++j]);
+        } else if (!strcmp(argv[j],"--pocsag-ppm") && more) {
+            PocsagConfig.ppm_error = atoi(argv[++j]);
         } else if (!strcmp(argv[j],"--sondehub") && more) {
             SondehubConfig.enabled = true;
             strncpy(SondehubConfig.callsign, argv[++j], sizeof(SondehubConfig.callsign) - 1);
@@ -1225,7 +1271,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (Modes.sdr_type == SDR_NONE && !Modes.net && !FlarmConfig.enabled && SdrManager.count == 0) {
+    if (Modes.sdr_type == SDR_NONE && !Modes.net && !FlarmConfig.enabled && !PocsagConfig.enabled && SdrManager.count == 0) {
         // Note: CLI ADS-B/FLARM args are converted to SdrManager receivers at startup,
         // so this check only fires if truly nothing was configured
         fprintf(stderr,
@@ -1246,7 +1292,15 @@ int main(int argc, char **argv) {
     // Probe all RTL-SDR tuner types before any device is opened
     panelProbeAllTuners();
 
-    // ========== Convert CLI SDR config into SdrManager receivers ==========
+    // ========== Load saved receivers, then apply CLI overrides ==========
+
+    // Step 1: Load all receivers from receivers.json (baseline config)
+    int loaded = sdrManagerLoad();
+    if (loaded > 0) {
+        log_with_timestamp("Loaded %d receiver(s) from receivers.json", loaded);
+    }
+
+    // Step 2: CLI args override or add receivers
     // Primary ADS-B receiver (--device-index / --device-type rtlsdr)
     if (Modes.sdr_type == SDR_RTLSDR) {
         rx_config_t adsb_cfg = {0};
@@ -1257,12 +1311,18 @@ int main(int argc, char **argv) {
         if (Modes.dev_name) {
             snprintf(adsb_cfg.serial, sizeof(adsb_cfg.serial), "%.63s", Modes.dev_name);
         }
-        int idx = sdrManagerAddReceiver(&adsb_cfg);
-        if (idx >= 0) {
-            log_with_timestamp("ADS-B receiver added to SdrManager (serial=%s)",
-                               adsb_cfg.serial[0] ? adsb_cfg.serial : "auto");
+        int existing = sdrManagerFindBySerial(adsb_cfg.serial);
+        if (existing >= 0) {
+            sdrManagerUpdateConfig(existing, &adsb_cfg);
+            log_with_timestamp("ADS-B receiver %s: CLI override (--device-type rtlsdr --gain %.1f)",
+                               adsb_cfg.serial[0] ? adsb_cfg.serial : "auto", adsb_cfg.gain);
+        } else {
+            int idx = sdrManagerAddReceiver(&adsb_cfg);
+            if (idx >= 0) {
+                log_with_timestamp("ADS-B receiver added (serial=%s)",
+                                   adsb_cfg.serial[0] ? adsb_cfg.serial : "auto");
+            }
         }
-        // Mark legacy SDR as unused — SdrManager owns it now
         Modes.sdr_type = SDR_NONE;
         Modes.net = 1;
     }
@@ -1271,22 +1331,56 @@ int main(int argc, char **argv) {
     if (FlarmConfig.enabled && FlarmConfig.device_serial[0]) {
         rx_config_t flarm_cfg = {0};
         flarm_cfg.role = SDR_ROLE_FLARM;
-        flarm_cfg.freq = 868400000;
+        flarm_cfg.freq = 868300000;
         flarm_cfg.sample_rate = 1600000;
         flarm_cfg.gain = FlarmConfig.gain / 10.0;  // FlarmConfig stores tenths of dB
         flarm_cfg.ppm_error = FlarmConfig.ppm_error;
         snprintf(flarm_cfg.serial, sizeof(flarm_cfg.serial), "%.63s", FlarmConfig.device_serial);
-        int idx = sdrManagerAddReceiver(&flarm_cfg);
-        if (idx >= 0) {
-            log_with_timestamp("FLARM receiver added to SdrManager (serial=%s)", FlarmConfig.device_serial);
+        int existing = sdrManagerFindBySerial(flarm_cfg.serial);
+        if (existing >= 0) {
+            sdrManagerUpdateConfig(existing, &flarm_cfg);
+            log_with_timestamp("FLARM receiver %s: CLI override (--flarm --flarm-gain %.1f --flarm-ppm %d)",
+                               FlarmConfig.device_serial, flarm_cfg.gain, flarm_cfg.ppm_error);
+        } else {
+            int idx = sdrManagerAddReceiver(&flarm_cfg);
+            if (idx >= 0) {
+                log_with_timestamp("FLARM receiver added (serial=%s)", FlarmConfig.device_serial);
+            }
         }
     }
 
-    // Load saved receiver assignments from receivers.json
-    // (skips serials already added via CLI args above)
-    int loaded = sdrManagerLoad();
-    if (loaded > 0) {
-        log_with_timestamp("Loaded %d saved receivers from receivers.json", loaded);
+    // FLARM IQ file input (--flarm-ifile) — standalone path
+    if (FlarmConfig.enabled && FlarmConfig.ifile_path[0]) {
+        if (!flarmReaderOpen()) {
+            fprintf(stderr, "flarm-ifile: failed to open, continuing without FLARM\n");
+            FlarmConfig.enabled = 0;
+        } else {
+            flarmReaderStart();
+            log_with_timestamp("FLARM IQ file reader started: %s", FlarmConfig.ifile_path);
+        }
+    }
+
+    // POCSAG receiver (--pocsag --pocsag-device)
+    if (PocsagConfig.enabled) {
+        rx_config_t pocsag_cfg = {0};
+        pocsag_cfg.role = SDR_ROLE_POCSAG;
+        pocsag_cfg.freq = PocsagConfig.freq;
+        pocsag_cfg.sample_rate = POCSAG_SAMPLE_RATE;
+        pocsag_cfg.gain = PocsagConfig.gain;
+        pocsag_cfg.ppm_error = PocsagConfig.ppm_error;
+        snprintf(pocsag_cfg.serial, sizeof(pocsag_cfg.serial), "%.63s", PocsagConfig.device_serial);
+        int existing = sdrManagerFindBySerial(pocsag_cfg.serial);
+        if (existing >= 0) {
+            sdrManagerUpdateConfig(existing, &pocsag_cfg);
+            log_with_timestamp("POCSAG receiver %s: CLI override (--pocsag --pocsag-freq %d)",
+                               PocsagConfig.device_serial, PocsagConfig.freq);
+        } else {
+            int idx = sdrManagerAddReceiver(&pocsag_cfg);
+            if (idx >= 0) {
+                log_with_timestamp("POCSAG receiver added (serial=%s, freq=%d)",
+                                   PocsagConfig.device_serial, PocsagConfig.freq);
+            }
+        }
     }
 
     // Save current receiver state (merges CLI + loaded receivers)
@@ -1415,6 +1509,11 @@ int main(int argc, char **argv) {
         // Shutdown all receivers
         log_with_timestamp("Stopping all SDR receivers...");
         sdrManagerStopAll();
+
+        // Stop standalone FLARM reader (ifile mode)
+        if (FlarmConfig.enabled && FlarmConfig.ifile_path[0]) {
+            flarmReaderClose();
+        }
     }
 
     interactiveCleanup();

@@ -1,11 +1,13 @@
 # dump1090-gg-light
 
 **dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / OGNTP / ACARS / VDL2 /
-Radiosonde / CPDLC receiver and multi-feed relay for Linux.
+Radiosonde / CPDLC / GSM / POCSAG receiver and multi-feed relay for Linux.
 It is a fork of [dump1090-fa](https://github.com/flightaware/dump1090) by FlightAware,
 extended with native threaded feeder clients, a multi-SDR receiver architecture,
-decoders for aeronautical communication and weather sounding signals, and a built-in
-web control panel with version display.
+decoders for aeronautical communication, weather sounding, and cellular/paging
+signals, and a built-in web control panel with version display.
+
+Fork maintainer and project direction: **Luigi Origa**.
 
 This is the **light version** for public distribution. The proprietary feeder
 protocols (Flightradar24, PlaneFinder, RadarBox) have been replaced with inert
@@ -21,12 +23,18 @@ fully functional.
 This project is an **experiment to test the effectiveness of AI as a software
 developer**. The repository contains substantial upstream code from **dump1090-fa**
 and its predecessors (by Oliver Jowett / FlightAware), which retains its original
-authorship and copyright. All of the **new functionality** — the native feeder
-clients, multi-SDR architecture, FLARM / OGNTP / ACARS / VDL2 / Radiosonde / CPDLC
-decoders, the web control panel, Makefile modifications, protocol implementations,
-the information gathering, and this README itself — was **written entirely by AI**,
+authorship and copyright. Large portions of the upstream code remain intact,
+but this fork also extends several upstream files with new options, feeder
+integration, decoder hooks, panel endpoints, and build changes. All of the
+**new functionality** — the native feeder
+clients, multi-SDR architecture, FLARM / OGNTP / ACARS / VDL2 / Radiosonde / CPDLC /
+GSM / POCSAG decoders, the web control panel, Makefile modifications, protocol
+implementations, the information gathering, and this README itself — was
+**written entirely by AI**,
 under the **continuous supervision of a human** who directed what to do, how to do
 it, which design decisions to make, and which approaches to take.
+
+That human operator and maintainer of this fork is **Luigi Origa**.
 
 **This is not "vibe coding".** The human operator is an **IT security
 specialist** with deep software development expertise. Every design choice, protocol behavior, and implementation
@@ -92,6 +100,8 @@ compiling, and deploying code — proved highly effective for this project.
 | Radiosonde decoding | not supported | **native** (RS41/RS92/DFM/M10, RS ECC, GPS, PTU) |
 | CPDLC decoding | not supported | **native** (FANS-1/A ASN.1 UPER via ELM) |
 | ELM reassembly (DF24–31) | not supported | **native** (ACARS/CPDLC extraction from Comm-D) |
+| GSM cell scanning | not supported | **native** (GMSK demod, FCCH/SCH sync, SI decode, cell tracking) |
+| POCSAG pager decoding | not supported | **native** (FSK demod, BCH ECC, alpha/numeric, multi-baud) |
 | Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR) |
 | Web control panel | not supported | **native** (HTTP REST API, live configuration) |
 
@@ -124,6 +134,13 @@ RTL-SDR #3 (131 MHz)  ──► ACARS demod ───┬──► Message displa
 RTL-SDR #4 (403 MHz)  ──► Sonde demod ───┬──► SondeHub thread  → api.v2.sondehub.org (HTTPS PUT)
                           (RS41/RS92/    │
                            DFM/M10)      └──► Message display  (FFT freq scan, RS ECC)
+
+RTL-SDR #5 (935 MHz)  ──► GSM decode  ───┬──► Cell tracker     (FCCH/SCH sync, SI3 decode)
+                          (GMSK 271 ksym) │    /api/gsm         (MCC/MNC/LAC/CellID/ARFCN)
+                                          └──► PPM calibration  (crystal offset from carrier)
+
+RTL-SDR #6 (466 MHz)  ──► POCSAG demod ──┬──► Message display  (512/1200/2400 baud)
+                          (FSK, BCH ECC)  └──► /api/messages    (alpha + numeric pages)
 
 Web control panel (port 8888) ──► Live config, status, logs, device management
 ```
@@ -180,7 +197,7 @@ Live configuration is also possible via the web control panel.
 | `--fix` | Enable single-bit CRC error correction |
 | `--enable-df24` | Enable DF24–31 Comm-D ELM decoding (required for CPDLC) |
 | `--receiver <spec>` | Add SDR receiver: `serial:role[:gain=X][:ppm=Y][:agc]` |
-| | Role: `adsb`, `flarm`, `acars`, `vdl2`, `radiosonde` |
+| | Role: `adsb`, `flarm`, `acars`, `vdl2`, `radiosonde`, `gsm`, `pocsag`, `lte` |
 
 #### FLARM / OGN
 
@@ -195,6 +212,26 @@ Live configuration is also possible via the web control panel.
 | `--ogn-server <host>` | OGN APRS-IS server (default: aprs.glidernet.org) |
 | `--ogn-port <port>` | OGN APRS-IS port (default: 14580) |
 
+#### GSM cell scanner
+
+| Option | Description |
+|---|---|
+| `--gsm` | Enable GSM broadcast channel decoder |
+| `--gsm-device <serial>` | RTL-SDR serial for GSM dongle |
+| `--gsm-gain <dB>` | GSM dongle gain (0 = auto) |
+| `--gsm-ppm <ppm>` | Frequency correction in PPM |
+| `--gsm-freq <Hz>` | GSM downlink frequency (default: 947.0 MHz / ARFCN 60) |
+
+#### POCSAG pager decoder
+
+| Option | Description |
+|---|---|
+| `--pocsag` | Enable POCSAG pager decoder |
+| `--pocsag-device <serial>` | RTL-SDR serial for POCSAG dongle |
+| `--pocsag-gain <dB>` | POCSAG dongle gain (0 = auto) |
+| `--pocsag-ppm <ppm>` | Frequency correction in PPM |
+| `--pocsag-freq <Hz>` | POCSAG frequency (default: 466.075 MHz) |
+
 #### Feeder clients
 
 | Option | Description |
@@ -203,7 +240,7 @@ Live configuration is also possible via the web control panel.
 | `--piaware-feeder-id <uuid>` | FlightAware feeder ID (no external piaware needed) |
 | `--opensky` | Enable OpenSky Network feed |
 | `--opensky-user <name>` | OpenSky username |
-| `--opensky-serial <file>` | OpenSky serial number file |
+| `--opensky-serial <n>` | OpenSky serial number |
 | `--sondehub <callsign>` | Enable SondeHub upload with this callsign |
 
 #### Beast feed networks (11 supported)
@@ -214,7 +251,7 @@ Each network can be enabled individually. Host and port are overridable.
 |---|---|
 | `--adsbx` | feed.adsbexchange.com:30005 |
 | `--adsbfi` | feed.adsb.fi:30004 |
-| `--flyitaly` | dati.flyitalyadsb.com:4905 |
+| `--flyitalyadsb` | dati.flyitalyadsb.com:4905 |
 | `--planewatch` | atc.plane.watch:30004 |
 | `--adsbone` | feed.adsb.one:64004 |
 | `--adsblol` | feed.adsb.lol:30004 |
@@ -566,7 +603,7 @@ Submits decoded FLARM positions to the Open Glider Network.
 Dynamic assignment of multiple RTL-SDR dongles to different decoder roles.
 Each receiver is identified by its USB serial number and configured via
 `--receiver <serial>:<role>` where role is one of `adsb`, `flarm`, `acars`,
-`vdl2`, or `radiosonde`.
+`vdl2`, `radiosonde`, `gsm`, or `pocsag`.
 
 - Supports up to **8 simultaneous RTL-SDR devices**
 - Each receiver runs its own async IQ reader thread
@@ -691,6 +728,94 @@ collaborative radiosonde tracking platform.
 
 ---
 
+### GSM broadcast channel decoder (`gsm_decode.c/.h`)
+
+Passive GSM downlink scanner for the broadcast control channel (BCCH), used for
+cell identification and RTL-SDR crystal calibration. Operates on a dedicated
+RTL-SDR dongle tuned to GSM-900 downlink frequencies (935–960 MHz).
+
+- **GMSK demodulation**: differential phase demodulator at 270.833 ksym/s,
+  1 MHz IQ sample rate with 100 kHz IF offset
+- **51-tap Hamming-windowed sinc FIR low-pass filter** at 150 kHz bandwidth
+  for channel isolation
+- **FCCH (Frequency Correction Channel) detection**: pure tone (67.7 kHz)
+  correlation with run-length counting — detects GSM carrier presence even
+  on zombie cells with no active BCCH
+- **SCH (Synchronisation Channel) decode**: 64-bit training sequence correlation,
+  Viterbi decoding (rate ½, constraint length 5), BSIC and frame number extraction
+- **BCCH / CCCH decoding**: full convolutional decoding → Fire code CRC-40
+  validation → 4-burst deinterleaving → LAPDm L2 frame parsing
+- **System Information parsing**:
+  - **SI1**: Cell Allocation (list of ARFCNs used by the cell)
+  - **SI2**: Neighbour Cell Description (ARFCNs of adjacent cells)
+  - **SI3**: Full cell identity — MCC, MNC, LAC, Cell ID, BSIC, CCCH
+    configuration, cell selection parameters (C1/C2), RACH control, T3212
+    periodic location update timer, cell barred status
+  - **SI4**: CBCH (Cell Broadcast Channel) description
+- **Cell Broadcast (CBCH)**: SMS-CB message assembly with serial number,
+  message ID, Data Coding Scheme, and text extraction
+- **Paging request decode**: Type 1/2/3 paging, TMSI extraction, channel needed
+- **FCCH-only tracking mode**: when SCH never passes CRC (zombie 2G cells),
+  tracks cells by FCCH detection alone with frequency offset estimation
+- **Band support**: GSM-900, E-GSM-900, DCS-1800, GSM-850, PCS-1900 with
+  automatic ARFCN ↔ frequency conversion
+
+**Standards:** 3GPP TS 05.02 (channel structure), TS 05.03 (channel coding),
+TS 04.08 (L3 messages / System Information), TS 03.41 (Cell Broadcast),
+TS 04.06 (LAPDm).
+
+### GSM cell tracker (`gsm_tracker.c/.h`)
+
+Maintains a table of up to **64 discovered GSM cells**, updated by the GSM
+decoder and served via the web panel REST API.
+
+- Tracks per cell: MCC, MNC, LAC, Cell ID, ARFCN, frequency (MHz), BSIC,
+  sync state, frequency offset (Hz), BCCH/CCCH/CB/paging message counts,
+  last Cell Broadcast text, timestamps
+- **FCCH-only entries**: cells where only FCCH was detected (no SI3 decode)
+  are tracked with MCC=0 and sync state "fcch"
+- **300-second timeout** for stale cell removal
+- **JSON API** at `/api/gsm` for the web panel GSM page
+- **Active cell count** for status summary
+
+### GSM PPM calibrator (`gsm_calibrate.c/.h`)
+
+Uses GSM carrier signals to measure and calibrate the RTL-SDR crystal oscillator
+PPM error, replicating the approach used by
+[ogn-rf](https://github.com/glidernet/ogn-rf) from the Open Glider Network.
+
+- Scans the E-GSM-900 downlink band (920–960 MHz) for strong carriers
+- Measures crystal offset from the GMSK spectral peak
+- Returns corrected PPM value, measurement RMS, and sample count
+- The dongle must be closed before calling (exclusive USB access)
+
+### POCSAG pager decoder (`pocsag_demod.c/.h`)
+
+Multi-baud **POCSAG** (Post Office Code Standardisation Advisory Group) pager
+decoder for receiving paging messages on VHF/UHF frequencies.
+
+- **FSK demodulation**: FM discriminator on IQ samples
+- **Multi-baud support**: automatic detection of **512, 1200, and 2400 baud**
+  rates from the preamble timing
+- **576-bit preamble detection**: alternating 1/0 pattern for bit clock
+  synchronization
+- **Syncword correlation**: 32-bit sync word `0x7CD215D8` with configurable
+  Hamming distance tolerance
+- **BCH(31,21) error correction**: single-bit error correction with
+  generator polynomial `0x769`, plus idle codeword (`0x7A89C197`) detection
+- **Message types**:
+  - **Numeric**: BCD-encoded digits (0–9, U, space, hyphen, bracket, asterisk)
+  - **Alpha**: 7-bit ASCII characters assembled from 20-bit message words
+- **Address extraction**: 21-bit address + 2-bit function code from each
+  address codeword
+- **Gardner-style timing error detector** for symbol clock recovery
+- **Per-batch processing**: 16 codewords per batch (1 sync + 8 address/message
+  pairs), maintaining state across batch boundaries for multi-batch messages
+
+**Standards:** ITU-R M.584 (POCSAG coding format), ETSI ETS 300 133-2.
+
+---
+
 ### Web control panel (`config_panel.c/.h`)
 
 Built-in HTTP server providing a REST API for live configuration, monitoring,
@@ -766,15 +891,21 @@ The aircraft table page includes several interactive features:
 | **dump1090-fa** | FlightAware LLC | GPL-2.0-or-later | <https://github.com/flightaware/dump1090> |
 
 The base codebase (ADS-B demodulation, Mode S decoding, network I/O, adaptive gain,
-interactive display, SkyAware web interface) is **entirely from dump1090-fa** and is
-used unmodified except for the build variant name. All original copyright headers
-are preserved.
+interactive display, SkyAware web interface) is inherited from **dump1090-fa**.
+Many upstream files still retain their original structure and notices, but this
+fork also modifies core files such as `dump1090.c`, `sdr_receiver.c`, and the
+build system to integrate the additional decoders, feeder threads, and panel APIs.
+All preserved upstream copyright headers remain in place.
 
-### New modules added in dump1090-gg
+### Added modules and local extensions
+
+The license shown below is the **license notice used by the local file set**.
+It is intentionally separated from the upstream or reference-project license,
+which is listed in the protocol source column.
 
 | File(s) | Purpose | Protocol source | License |
 |---|---|---|---|
-| `piaware_client.c/.h` | Native FlightAware ADEPT client | Open-source [piaware](https://github.com/flightaware/piaware) (BSD) | GPL-3.0-or-later |
+| `piaware_client.c/.h` | Native FlightAware ADEPT client | Open-source [piaware](https://github.com/flightaware/piaware) (BSD 2-Clause) | GPL-3.0-or-later |
 | `fa_mlat.c/.h` | Native FlightAware MLAT (UDP binary) | Open-source [fa-mlat-client](https://github.com/mutability/mlat-client) by Oliver Jowett (GPL-3.0+) | GPL-3.0-or-later |
 | `mlat_client.c/.h` | ADSBexchange MLAT (JSON-over-TCP) | Open-source [mlat-server](https://github.com/adsbexchange/mlat-server) | GPL-3.0-or-later |
 | `flarm_decode.c/.h` | FLARM Legacy protocol decoder (XXTEA) | Open-source [SoftRF](https://github.com/lyusupov/SoftRF) by Linar Yusupov (GPL-3.0), protocol RE by Stanislaw Pusep | GPL-3.0-or-later |
@@ -782,13 +913,18 @@ are preserved.
 | `flarm_reader.c/.h` | Second RTL-SDR reader (868 MHz) | librtlsdr API | GPL-3.0-or-later |
 | `ogn_client.c/.h` | OGN APRS-IS feed client | [OGN protocol wiki](http://wiki.glidernet.org/) and public APRS-IS documentation | GPL-3.0-or-later |
 | `opensky_client.c/.h` | OpenSky Network native feed client | Open-source [opensky-sensor](https://github.com/openskynetwork/opensky-sensor) v2.1.7 (BSD 3-Clause) | GPL-3.0-or-later |
-| `sdr_receiver.c/.h` | Multi-SDR receiver manager | Original implementation | GPL-3.0-or-later |
+| `sdr_receiver.c/.h` | Multi-SDR receiver manager | Original implementation | GPL-2.0-or-later |
 | `config_panel.c/.h` | Web control panel (HTTP REST) | Original implementation | GPL-3.0-or-later |
-| `acars_demod.c/.h` | ACARS AM-MSK demodulator | ARINC 618/620 public standards | GPL-3.0-or-later |
+| `acars_demod.c/.h` | ACARS AM-MSK demodulator | Algorithms from [acarsdec](https://github.com/TLeconte/acarsdec); upstream repository README states GNU Library GPL version 2 | GPL-3.0-or-later |
 | `vdl2_demod.c/.h` | VDL Mode 2 D8PSK demodulator | ICAO Doc 9776, Annex 10 Vol III | GPL-3.0-or-later |
-| `sonde_demod.c/.h` | Multi-protocol radiosonde decoder (RS41/RS92/DFM/M10) | Community-documented formats ([rs1729/RS](https://github.com/rs1729/RS)) | GPL-3.0-or-later |
+| `sonde_demod.c/.h` | Multi-protocol radiosonde decoder (RS41/RS92/DFM/M10) | Community-documented formats and references from [rs1729/RS](https://github.com/rs1729/RS) (GPL-3.0) and radiosonde_auto_rx (GPL-3.0) | GPL-3.0-or-later |
 | `ogntp_decode.c/.h` | OGN Tracking Protocol decoder (LDPC) | Community-documented OGN-TP format | GPL-3.0-or-later |
 | `sondehub_client.c/.h` | SondeHub v2 telemetry uploader | [SondeHub API](https://github.com/projecthorus/sondehub-infra/wiki), reference: [radiosonde_auto_rx](https://github.com/projecthorus/radiosonde_auto_rx) | GPL-3.0-or-later |
+| `gsm_decode.c/.h` | GSM broadcast channel decoder (GMSK, Viterbi, SI) | 3GPP TS 05.02/05.03/04.08/03.41/04.06 (public standards) | GPL-3.0-or-later |
+| `gsm_tracker.c/.h` | GSM cell tracker and JSON API | Original implementation | GPL-3.0-or-later |
+| `gsm_calibrate.c/.h` | RTL-SDR PPM calibration via GSM carriers | Approach from [ogn-rf](https://github.com/glidernet/ogn-rf) (GPL-3.0) | GPL-3.0-or-later |
+| `lte_decode.c/.h`, `lte_tracker.c/.h` | LTE cell scanner and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
+| `pocsag_demod.c/.h` | POCSAG pager decoder (FSK, BCH, multi-baud) | ITU-R M.584, ETSI ETS 300 133-2 (public standards) | GPL-3.0-or-later |
 | `elm.c/.h` | Comm-D ELM reassembly | ICAO Annex 10 Vol IV (Comm-D framing) | GPL-3.0-or-later |
 | `cpdlc_decode.c/.h` | FANS-1/A CPDLC message decoder | ICAO Doc 9705, RTCA DO-258A, ASN.1 constraints from [libacars](https://github.com/szpajder/libacars) | GPL-3.0-or-later |
 | `feeder_thread.c/.h` | Thread management, lock-free SPSC queues, beast feeds | Original implementation | GPL-3.0-or-later |
@@ -935,40 +1071,101 @@ These decoders are implemented from **published aviation standards** and
   [OGN protocol wiki](http://wiki.glidernet.org/) and in the
   [ogn-decode](https://github.com/glidernet) source code
 
+### GSM broadcast channel
+
+The GSM decoder is implemented from **published 3GPP standards**:
+
+- **3GPP TS 05.02** (GSM 05.02) — Multiplexing and multiple access on the
+  radio path: channel structure, burst formats, multiframe organization
+- **3GPP TS 05.03** (GSM 05.03) — Channel coding: convolutional codes (rate ½,
+  K=5), interleaving, Fire code CRC, SACCH/FACCH/SCH coding
+- **3GPP TS 04.08** (GSM 04.08) — Mobile radio interface Layer 3: System
+  Information messages (SI1–SI4), cell identity, location area, RACH control
+- **3GPP TS 03.41** (GSM 03.41) — Technical realization of Short Message
+  Service Cell Broadcast (SMS-CB)
+- **3GPP TS 04.06** (GSM 04.06) — Mobile Station – Base Station System (MS–BSS)
+  interface: Data Link (DL) layer / LAPDm
+
+The GSM PPM calibration approach is based on the technique used by
+[ogn-rf](https://github.com/glidernet/ogn-rf) from the Open Glider Network,
+published under GPL-3.0.
+
+### POCSAG pager protocol
+
+The POCSAG decoder is implemented from **published ITU/ETSI standards**:
+
+- **ITU-R M.584** — Codes and formats for Radio Paging (POCSAG coding format):
+  sync word, address/message codeword structure, BCH(31,21) encoding, batch
+  format, preamble
+- **ETSI ETS 300 133-2** — Paging Systems: POCSAG code transmission
+
 ---
 
 ## License
 
 dump1090-gg-light is free software.
 
-The **base codebase** (from dump1090-fa) is licensed under the
+This repository is **not uniform on a per-file basis**.
+
+The **base codebase** inherited from dump1090-fa is licensed under the
 **GNU General Public License, version 2 or later** (GPL-2.0-or-later).
-It incorporates BSD-licensed code by Salvatore Sanfilippo and Malcolm Robb
-(see `LICENSE` file for details).
+It also incorporates BSD-licensed code by Salvatore Sanfilippo and Malcolm Robb
+(see `LICENSE` and `COPYING`).
 
-The **new modules** (feeder threads, FLARM decoder/demodulator, native clients,
-ACARS/VDL2/Radiosonde decoders, CPDLC decoder, SondeHub client, web panel) are
-licensed under the **GNU General Public License, version 3 or later**
-(GPL-3.0-or-later), which is compatible with GPL-2.0-or-later.
+Several **locally added modules** are explicitly marked
+**GPL-3.0-or-later** in their source headers, including the FLARM decoder,
+PiAware client, FlightAware MLAT client, feeder thread layer, SondeHub client,
+ELM/CPDLC code, VDL2 decoder, and the web control panel.
 
-The combined work is therefore distributed under **GPL-3.0-or-later**.
+Some other local files currently carry **GPL-2.0-or-later** notices,
+including `sdr_receiver.c/.h` and `lte_decode.c/.h`.
+
+Any combined build or redistribution that includes the GPL-3.0-or-later files
+must therefore be treated as **GPL-3.0-or-later** as a whole.
+
+Unless otherwise noted in individual file headers, **Luigi Origa** claims
+copyright only in the original fork-specific additions and documentation
+contained in this repository. This includes original local code,
+documentation, and integration work, but does not apply to upstream code,
+third-party material, or abstract ideas considered in isolation.
+
+For completeness, this repository ships the GPL-2.0 text in `COPYING` and the
+GPL-3.0 text in `COPYING.GPLv3`.
 
 ### License compatibility
 
 | Original license | Compatible with GPL-3? | Notes |
 |---|---|---|
-| BSD 2-Clause (antirez, Malcolm Robb) | ✅ Yes | Permissive, compatible with any GPL |
+| BSD 2-Clause (antirez, Malcolm Robb, piaware) | ✅ Yes | Permissive, compatible with any GPL |
 | GPL-2.0-or-later (Oliver Jowett, FlightAware) | ✅ Yes | "or later" allows GPL-3 |
-| GPL-3.0 (SoftRF / Linar Yusupov) | ✅ Yes | Same license |
-| GPL-3.0 (radiosonde_auto_rx / Mark Jessop) | ✅ Yes | Reference only (API reimplementation) |
-| BSD (piaware reference) | ✅ Yes | Permissive |
-| BSD 3-Clause (opensky-sensor / OpenSky Network) | ✅ Yes | Permissive; new code is original GPL-3 work, not a derivative |
-| Apache-2.0 (OpenSSL) | ✅ Yes | Compatible with GPL-3 (not GPL-2-only) |
+| GPL-3.0-or-later (SoftRF, rs1729/RS, radiosonde_auto_rx) | ✅ Yes | Same or stronger copyleft family |
+| BSD 3-Clause (opensky-sensor, Redis anet) | ✅ Yes | Permissive |
+| MIT (libacars) | ✅ Yes | Permissive |
+| LGPL-2.0 (acarsdec repository README) | ✅ Yes | Only algorithmic reference is used here |
+| AGPL-3.0 (LTE-Cell-Scanner) | ✅ Yes | Documented as reference/inspiration, not copied third-party code |
+| Apache-2.0 (OpenSSL, LimeSuite, cpu_features) | ✅ Yes | Compatible with GPL-3 |
 
-Since the upstream dump1090-fa uses "GPL version 2 **or later**", and the new
-FLARM code is derived from GPL-3.0 sources (SoftRF), the combined binary is
-distributed under GPL-3.0-or-later. This is fully compatible — no license
-violation occurs.
+Since the upstream dump1090-fa uses "GPL version 2 **or later**", any build of
+this fork that includes the GPL-3.0-or-later-derived modules can be distributed
+under GPL-3.0-or-later without a compatibility conflict.
+
+### External license verification
+
+The following upstream license references were rechecked against the public
+repositories in April 2026:
+
+- `piaware`: BSD 2-Clause
+- `opensky-sensor`: BSD 3-Clause (`COPYING` in repository)
+- `SoftRF`: GPL-3.0
+- `radiosonde_auto_rx`: GPL-3.0
+- `rs1729/RS`: GPL-3.0
+- `libacars`: MIT (`LICENSE.md` in repository)
+- `LTE-Cell-Scanner`: AGPL-3.0 (GitHub repository license metadata)
+- `cpu_features`: Apache-2.0, with additional BSD-licensed files under `ndk_compat/`
+- `SoapySDR`: Boost Software License 1.0
+- `LimeSuite`: Apache-2.0
+- `HackRF`: GPL-2.0
+- `rtl-sdr`: GPL-2.0
 
 **Contact for non-GPL licensing of the original dump1090 base:**
 Oliver Jowett `<oliver@mutability.co.uk>` (see `LICENSE` file).
@@ -981,6 +1178,7 @@ Oliver Jowett `<oliver@mutability.co.uk>` (see `LICENSE` file).
 - **Malcolm Robb** — dump1090 Mode S decoder improvements, view1090
 - **Oliver Jowett** — dump1090-mutability, fa-mlat-client
 - **FlightAware LLC** — dump1090-fa, adaptive gain, PiAware
+- **Luigi Origa** — fork maintainer, architecture direction, supervision, review, validation, and repository-specific integration work
 - **Stanislaw Pusep** — FLARM protocol reverse-engineering
 - **Linar Yusupov** — SoftRF FLARM implementation (GPL-3.0)
 - **ADSBexchange** — mlat-server (JSON MLAT protocol reference)
@@ -989,4 +1187,266 @@ Oliver Jowett `<oliver@mutability.co.uk>` (see `LICENSE` file).
 - **Project Horus** — SondeHub infrastructure
 - **Radiosonde community** — RS41/RS92/DFM/M10 telemetry format documentation
 - **rs1729** — Comprehensive radiosonde decoder reference implementations
-- **Open Glider Network** — OGN Tracking Protocol documentation
+- **Thierry Leconte** — [acarsdec](https://github.com/TLeconte/acarsdec) (ACARS AM-MSK demodulation algorithms; repository README states GNU Library GPL version 2)
+- **Pawel Jalocha** — [esp32-ogn-tracker](https://github.com/pjalocha/esp32-ogn-tracker) (OGN-TP protocol tables, LDPC, GPL-2.0)
+- **Open Glider Network** — OGN Tracking Protocol documentation, APRS-IS feed protocol
+- **Open Glider Network** — [ogn-rf](https://github.com/glidernet/ogn-rf) GSM calibration technique (GPL-3.0)
+- **OpenSky Network** — [opensky-sensor](https://github.com/openskynetwork/opensky-sensor) v2.1.7 (binary feeder protocol, BSD 3-Clause)
+- **James Peroulas** — [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (PSS/SSS Zadoff-Chu correlation, PBCH decoding approach, AGPL-3.0)
+- **3GPP** — GSM broadcast channel standards (TS 05.02, 05.03, 04.08, 03.41, 04.06)
+- **3GPP** — LTE physical layer and RRC standards (TS 36.211, 36.212, 36.331)
+- **ITU / ETSI** — POCSAG paging standard (ITU-R M.584, ETS 300 133-2)
+
+---
+
+## External Libraries
+
+These system libraries are linked at build time. They are **not included**
+in this source tree — you must install them via your package manager.
+
+| Library | Link flag | Purpose | License | Homepage |
+|---------|-----------|---------|---------|----------|
+| librtlsdr | `-lrtlsdr` | RTL-SDR dongle access (mandatory) | GPL-2.0 | https://github.com/osmocom/rtl-sdr |
+| libusb-1.0 | `-lusb-1.0` | USB device communication (via rtlsdr) | LGPL-2.1 | https://libusb.info |
+| OpenSSL | `-lssl -lcrypto` | TLS encryption for feeder clients | Apache-2.0 | https://www.openssl.org |
+| zlib | `-lz` | Compression (HTTP gzip for SondeHub) | zlib license | https://zlib.net |
+| ncurses | `-lncurses` | Terminal interactive display | MIT | https://invisible-island.net/ncurses |
+| libbladeRF | `-lbladeRF` | BladeRF SDR support (optional) | LGPL-2.1 | https://github.com/Nuand/bladeRF |
+| libhackrf | `-lhackrf` | HackRF SDR support (optional) | GPL-2.0 | https://github.com/greatscottgadgets/hackrf |
+| LimeSuite | `-lLimeSuite` | LimeSDR support (optional) | Apache-2.0 | https://github.com/myriadrf/LimeSuite |
+| SoapySDR | `-lSoapySDR` | Generic SDR abstraction (optional) | Boost-1.0 | https://github.com/pothosware/SoapySDR |
+| pthreads | `-lpthread` | POSIX threading | glibc (LGPL-2.1) | — |
+| libm | `-lm` | Math functions | glibc (LGPL-2.1) | — |
+| librt | `-lrt` | Realtime clock (`clock_gettime`) | glibc (LGPL-2.1) | — |
+
+---
+
+## Bundled Third-Party Source Code
+
+These are included in the source tree and compiled directly into the binary.
+
+| Directory | Project | Author | Purpose | License |
+|-----------|---------|--------|---------|---------|
+| `cpu_features/` | [google/cpu_features](https://github.com/google/cpu_features) | Google LLC | Runtime CPU feature detection (NEON, SSE, AVX) | Apache-2.0 (plus BSD-licensed `ndk_compat/` files upstream) |
+| `dsp/generated/` | Part of dump1090-fa starch framework | FlightAware LLC | Architecture-specific DSP dispatch (SIMD magnitude/power) | BSD 2-Clause |
+| `dsp/helpers/` | Part of dump1090-fa starch framework | FlightAware LLC | DSP lookup tables | BSD 2-Clause |
+| `anet.c` | Originally from Redis | Salvatore Sanfilippo | Basic TCP networking utilities | BSD 3-Clause |
+| `compat/clock_gettime/` | MM Weiss | macOS `clock_gettime()` compatibility shim | BSD 3-Clause |
+| `compat/clock_nanosleep/` | Rémi Denis-Courmont | `clock_nanosleep()` compatibility shim | GPL-2.0-or-later |
+
+---
+
+## Source File Copyright Attribution
+
+### Upstream dump1090-fa code (GPL-2.0-or-later)
+
+| File(s) | Copyright holder(s) |
+|---------|---------------------|
+| `dump1090.c` | © 2012 Salvatore Sanfilippo, © 2014–2017 Oliver Jowett, © 2017–2024 FlightAware LLC |
+| `mode_s.c` | © 2014–2016 Oliver Jowett, © 2017–2024 FlightAware LLC |
+| `demod_2400.c` | © 2014–2016 Oliver Jowett, © 2017–2024 FlightAware LLC |
+| `net_io.c` | © 2012 Salvatore Sanfilippo, © 2014–2017 Oliver Jowett, © 2017–2024 FlightAware LLC |
+| `interactive.c` | © 2012 Salvatore Sanfilippo, © 2014–2017 Oliver Jowett |
+| `track.c` | © 2014–2017 Oliver Jowett, © 2017–2024 FlightAware LLC |
+| `cpr.c` | © 2014–2017 Oliver Jowett |
+| `crc.c` | © 2014–2017 Oliver Jowett |
+| `icao_filter.c` | © 2014–2017 Oliver Jowett |
+| `convert.c` | © 2014–2016 Oliver Jowett |
+| `stats.c` | © 2014–2017 Oliver Jowett |
+| `comm_b.c` | © 2017 Oliver Jowett, © 2017 FlightAware LLC |
+| `adaptive.c` | © 2021 FlightAware LLC |
+| `sdr.c`, `sdr_ifile.c`, `sdr_rtlsdr.c` | © 2014–2017 Oliver Jowett, © 2017–2024 FlightAware LLC |
+| `sdr_bladerf.c`, `sdr_hackrf.c`, `sdr_limesdr.c` | © 2016–2017 Oliver Jowett |
+| `anet.c` | © 2006–2012 Salvatore Sanfilippo (BSD 3-Clause) |
+| `ais_charset.c` | © 2014–2017 Oliver Jowett |
+| `fifo.c` | © 2020 FlightAware LLC |
+| `util.c` | © 2014–2017 Oliver Jowett |
+
+### Locally added modules
+
+| File(s) | Description | Derived from |
+|---------|-------------|--------------|
+| `flarm_decode.c/.h` | FLARM Legacy protocol decoder (XXTEA, Manchester, whitening) | [SoftRF](https://github.com/lyusupov/SoftRF) by Linar Yusupov (GPL-3.0), RE by Stanislaw Pusep |
+| `flarm_demod.c/.h` | GFSK demodulator for 868.2/868.4 MHz | Original |
+| `flarm_reader.c/.h` | Second RTL-SDR reader thread (868 MHz) | Original (librtlsdr API) |
+| `ogntp_decode.c/.h` | OGN Tracker Protocol (LDPC FEC, Whitening, TEA encryption) | [esp32-ogn-tracker](https://github.com/pjalocha/esp32-ogn-tracker) by Pawel Jalocha (GPL-2.0), [SoftRF](https://github.com/lyusupov/SoftRF) (GPL-3.0) |
+| `ogn_client.c/.h` | OGN APRS-IS feed client | [OGN protocol wiki](http://wiki.glidernet.org/) |
+| `acars_demod.c/.h` | ACARS AM-MSK 2400 baud demodulator (5 channels) | Algorithms from [acarsdec](https://github.com/TLeconte/acarsdec) by Thierry Leconte (GPL-2.0) |
+| `vdl2_demod.c/.h` | VDL2 D8PSK 10.5 ksym/s demodulator + AVLC parser | Original (standard D8PSK algorithms) |
+| `sonde_demod.c/.h` | RS41/RS92/DFM/M10 radiosonde decoder | Frame formats from [radiosonde_auto_rx](https://github.com/projecthorus/radiosonde_auto_rx) by Mark Jessop (GPL-3.0), [rs1729](https://github.com/rs1729/RS) decoders |
+| `sondehub_client.c/.h` | SondeHub v2 telemetry upload (HTTPS PUT) | [SondeHub API](https://github.com/projecthorus/sondehub-infra) (MIT) |
+| `elm.c/.h` | DF24–31 Comm-D ELM segment reassembly | Original (Mode S standard ICAO Annex 10) |
+| `cpdlc_decode.c/.h` | FANS-1/A CPDLC ASN.1 UPER decoder | PER constraints from [libacars](https://github.com/szpajder/libacars) by Tomasz Lemiech (MIT) |
+| `piaware_client.c/.h` | FlightAware native ADEPT client (TLS) | Protocol from [piaware](https://github.com/flightaware/piaware) (BSD 3-Clause) |
+| `fa_mlat.c/.h` | FlightAware MLAT (UDP binary) | Protocol from [fa-mlat-client](https://github.com/mutability/mlat-client) by Oliver Jowett (GPL-3.0+) |
+| `mlat_client.c/.h` | ADSBexchange MLAT client (JSON-over-TCP) | Protocol from [mlat-server](https://github.com/adsbexchange/mlat-server) |
+| `opensky_client.c/.h` | OpenSky Network native feed client | Protocol from [opensky-sensor](https://github.com/openskynetwork/opensky-sensor) v2.1.7 (BSD 3-Clause) |
+| `gsm_calibrate.c/.h` | RTL-SDR PPM calibration from GSM carriers | Algorithm from [ogn-rf](https://github.com/glidernet/ogn-rf) `gsm_scan` by Open Glider Network (GPL-3.0) |
+| `gsm_decode.c/.h` | GSM broadcast channel decoder (FCCH, SCH, BCCH, Viterbi, Fire CRC) | 3GPP TS 05.02, 05.03, 04.08 standards; GSM reference implementations |
+| `gsm_tracker.c/.h` | Multi-cell GSM tracker (SI3, frequency hopping, cell database) | Original |
+| `lte_decode.c/.h` | LTE PSS/SSS synchronization, PBCH/SIB1 decode | Approach from [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) by James Peroulas (AGPL-3.0); 3GPP TS 36.211, 36.212, 36.331 standards |
+| `lte_tracker.c/.h` | LTE cell tracker with cell database | Original |
+| `pocsag_demod.c/.h` | POCSAG pager decoder (512/1200/2400 baud, BCH ECC) | ITU-R M.584, ETSI ETS 300 133-2 standards |
+| `sdr_receiver.c/.h` | Multi-SDR receiver manager (dynamic role assignment) | Original (librtlsdr API) |
+| `config_panel.c/.h` | Web control panel (HTTP REST API, live config) | Original |
+| `feeder_thread.c/.h` | Beast-binary multi-network feed relay (11 networks) | Original |
+
+---
+
+## Standards and Specifications Referenced
+
+| Standard | Used in | Description |
+|----------|---------|-------------|
+| ICAO Annex 10 Vol. III/IV | `mode_s.c`, `elm.c` | Mode S downlink formats, Comm-D ELM (DF24–31) |
+| ICAO Doc 9871 (FANS-1/A) | `cpdlc_decode.c` | CPDLC message set, ASN.1 UPER encoding |
+| ARINC 618 | `acars_demod.c`, `elm.c` | ACARS character set and message framing |
+| ARINC 631 | `vdl2_demod.c` | VDL Mode 2 physical layer and AVLC framing |
+| 3GPP TS 05.02 | `gsm_decode.c` | GSM multiplexing and burst structure |
+| 3GPP TS 05.03 | `gsm_decode.c` | GSM channel coding (convolutional, interleaving) |
+| 3GPP TS 05.04 | `gsm_decode.c` | GSM modulation (GMSK, 270.833 kbaud) |
+| 3GPP TS 04.06 | `gsm_decode.c` | LAPDm data link protocol |
+| 3GPP TS 04.08 | `gsm_decode.c` | GSM RR protocol, System Information messages |
+| 3GPP TS 23.041 | `gsm_decode.c` | Cell Broadcast Service (CBS/CBCH) |
+| 3GPP TS 36.211 | `lte_decode.c` | LTE physical layer (PSS/SSS Zadoff-Chu, OFDM, resource grid) |
+| 3GPP TS 36.212 | `lte_decode.c` | LTE channel coding (PBCH CRC, convolutional, rate matching) |
+| 3GPP TS 36.331 | `lte_tracker.c` | LTE RRC protocol (MIB, SIB1 cell parameters, PLMN) |
+| ITU-R M.584 | `pocsag_demod.c` | POCSAG paging protocol |
+| ETSI ETS 300 133-2 | `pocsag_demod.c` | European POCSAG paging implementation |
+| Vaisala RS41 SGP | `sonde_demod.c` | Radiosonde telemetry frame format |
+| Graw DFM-09/17 | `sonde_demod.c` | DFM radiosonde protocol |
+| FLARM radio specification | `flarm_demod.c` | 868.2/868.4 MHz, GFSK, 100 kbaud |
+| OGN Tracking Protocol v1 | `ogntp_decode.c` | OGN-TP encoding (LDPC, whitening, TEA) |
+
+---
+
+## Version history
+
+### v1.0.2 (2026-04-30)
+
+**New decoders:**
+- **GSM broadcast channel decoder** (`gsm_decode.c/.h`) — passive GSM-900
+  downlink scanner: GMSK demod at 270.833 ksym/s, FCCH/SCH detection, Viterbi
+  convolutional decoding, Fire code CRC, SI1–SI4 parsing, Cell Broadcast,
+  paging request decode, FCCH-only zombie cell tracking
+- **GSM cell tracker** (`gsm_tracker.c/.h`) — maintains table of up to 64
+  discovered cells with JSON API at `/api/gsm`
+- **GSM PPM calibrator** (`gsm_calibrate.c/.h`) — measures RTL-SDR crystal
+  offset using GSM carriers (approach from ogn-rf)
+- **POCSAG pager decoder** (`pocsag_demod.c/.h`) — multi-baud FSK decoder
+  (512/1200/2400 baud), BCH(31,21) ECC, numeric and alpha message extraction
+- **LTE cell scanner** (`lte_decode.c/.h`, `lte_tracker.c/.h`) — PSS/SSS
+  Zadoff-Chu correlation, OFDM PBCH decoding, MIB extraction (bandwidth,
+  PHICH, SFN), SIB1 PLMN/TAC/CellID decode, cell tracker with JSON API
+
+**Multi-SDR enhancements:**
+- New receiver roles: `gsm`, `pocsag`, `lte` (in addition to existing `adsb`,
+  `flarm`, `acars`, `vdl2`, `radiosonde`)
+- SDR receiver manager extended to support up to 8 RTL-SDR dongles with
+  per-role sample rate, frequency, and gain configuration
+- Panel device management dropdown updated for new roles
+
+**FLARM/OGNTP improvements:**
+- **Dual-channel channelizer**: simultaneous reception on 868.2 MHz and
+  868.4 MHz using NCO frequency shifting and per-channel LPF, replacing
+  single-frequency tuning
+- Per-channel diagnostics and syncword match tracking
+
+**ELM (Comm-D) hardening:**
+- Content validation filter: rejects reassembled ELM payloads that don't
+  contain recognizable ACARS framing, CPDLC/ASN.1 patterns, or structured text
+- DF24–31 false-positive rejection: frames that required CRC bit correction
+  are now discarded (Address/Parity has no independent CRC)
+
+**Mode S decoder improvements:**
+- DF18 false-positive filter: reject frames with valid CRC-24 but no decoded
+  data fields (CRC-24 collision filter)
+- Squawk change logging to panel log (with special squawk descriptions)
+
+**Panel:**
+- All pages updated with consistent nav bar and layout
+- New GSM and LTE status pages
+- **SDR Diagnostics page** (`/diagnostics.html`) — interactive dongle health
+  check: enumerates all connected RTL-SDR devices, reads tuner type/serial/gains,
+  runs a short IQ capture to measure noise floor and signal presence, reports
+  results in real-time via `/api/diagnostics` REST endpoint
+
+**Build:**
+- Makefile updated for new modules (gsm_decode, gsm_tracker, gsm_calibrate,
+  lte_decode, lte_tracker, pocsag_demod)
+- `COPYING.GPLv3` added for GPL-3.0 license text
+
+**Tests:**
+- `gsm_test.c` — GSM decoder unit tests (GMSK, Viterbi, Fire code, SI parse)
+- `pocsag_test.c` — POCSAG BCH, address extraction, alpha/numeric decode
+
+---
+
+### v1.0.1 (2026-04-28)
+
+**New features:**
+- **OGNTP decoder** (`ogntp_decode.c/.h`) — OGN Tracking Protocol demodulation
+  alongside FLARM on 868.4 MHz: syncword detection, Manchester decoding,
+  LDPC(208,160) parity check, position extraction, DF18 synthesis for map
+  display and feeder sharing
+
+**Bug fixes:**
+- HTTP/1.1 ALPN forcing in feeder threads and SondeHub client to prevent h2
+  protocol negotiation failures with some endpoints
+- Fixed OpenSky dashboard URL in panel (now points to sensors view)
+
+**Improvements:**
+- Panel: added Source column with color-coded protocol badges
+  (ADS-B/FLARM/OGNTP/MLAT/TIS-B/ADS-R/Mode-S) in aircraft table
+- Panel: tooltip CSS, version badge in nav bar across all pages
+- config_panel: SondeHub config parsing, OGN station name sync
+- flarm_reader: lock-free SPSC message queue for OGNTP packets
+- test_sonde: added Test 7 for M10 CRC validation and frame parsing
+
+**Cleanup:**
+- Removed obsolete `_rpi_sonde_demod.c` (superseded multi-sonde prototype)
+
+---
+
+### v1.0.0 (2026-04-26)
+
+**Initial public release.** Complete all-in-one ADS-B / Mode S receiver and
+multi-feed relay with the following capabilities:
+
+**Core ADS-B / Mode S:**
+- Full dump1090-fa decoder with enhanced Comm-B (BDS 4,1 / 4,2 / 4,3 / 4,5),
+  ACAS RA extraction (BDS 3,0 / DF16), DF19 military squitter, coarse TIS-B
+  (DF18 CF=3), full TC31 Operational Status, derived wind/OAT/TAT, magnetic
+  declination model, calculated track, squawk debounce, altitude reliability
+
+**Native feeder threads (lock-free SPSC architecture):**
+- PiAware / ADEPT (TLS, FATSV format)
+- FlightAware MLAT (UDP binary protocol)
+- ADSBexchange feed + MLAT (JSON-over-TCP)
+- OpenSky Network (binary upload protocol)
+- Beast-binary feed to 11 networks (ADSBx, adsb.fi, FlyItaly, plane.watch,
+  adsb.one, adsb.lol, airplanes.live, Planespotters, TheAirTraffic, AVDelphi,
+  ADSBHub)
+- OGN / APRS-IS (FLARM → OGN position reports)
+- SondeHub v2 (HTTPS PUT telemetry upload)
+
+**Decoders:**
+- FLARM (868 MHz, GFSK, XXTEA v6/v7, DF18 synthesis)
+- ACARS (AM-MSK, 5 EU channels, CRC-16)
+- VDL2 (D8PSK 10.5 ksym/s, AVLC/HDLC, ACARS extraction, 1-bit FCS correction)
+- Radiosonde (RS41/RS92/DFM/M10 — Reed-Solomon, GPS, PTU)
+- ELM / Comm-D reassembly (DF24–31, 16-segment bitmask, 60s TTL)
+- CPDLC / FANS-1/A (ASN.1 UPER, 129 DM + 183 UM messages, 41 parameter types)
+
+**Infrastructure:**
+- Multi-SDR receiver manager (roles: adsb, flarm, acars, vdl2, radiosonde)
+- Web control panel (HTTP REST API on port 8888, live config, status, logs,
+  messages, aircraft table, device management)
+- Internet connectivity watchdog with automatic feeder pause/resume
+- Stub files for proprietary feeders (FR24, PlaneFinder, RadarBox) — build
+  compatibility without functional code
+
+**Tests:**
+- `test_cpdlc.c` — 57 UPER test vectors for FANS-1/A messages
+- `test_acars.c` — CRC-16, parity, frame extraction tests
+- `test_vdl2.c` — FCS, D8PSK Gray decode, HDLC unstuffing, AVLC tests
+- `test_sonde.c` — RS41 Reed-Solomon, CRC, XOR whitening, ECEF→LLA, full pipeline

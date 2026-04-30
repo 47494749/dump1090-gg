@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
 // elm.h: Comm-D Extended Length Message (ELM) reassembly and decode
@@ -16,6 +18,8 @@
 #define ELM_TTL_MS         60000   // 60 seconds TTL for incomplete messages
 #define ELM_TABLE_SIZE     256     // hash table size
 #define ELM_DECODE_QUEUE   64      // max queued complete messages
+#define ELM_MIN_SEGMENTS   3       // minimum consecutive segments to accept a message
+#define ELM_SEG_GAP_MS     15000   // max ms between consecutive segments (real ELM < 5s)
 
 // Reassembly entry (one per aircraft with active ELM)
 struct elm_entry {
@@ -24,6 +28,7 @@ struct elm_entry {
     uint64_t last_seen;            // sysTimestamp of last segment
     uint16_t segments_mask;        // bitmask of received segments (bit N = ND N)
     unsigned char data[ELM_MAX_SEGMENTS][ELM_SEGMENT_SIZE];
+    uint64_t seg_time[ELM_MAX_SEGMENTS]; // timestamp per segment
     struct elm_entry *next;        // hash chain
 };
 
@@ -31,6 +36,8 @@ struct elm_entry {
 struct elm_complete {
     uint32_t addr;
     int payload_len;               // actual bytes (segments * 10)
+    int segments_received;         // number of consecutive segments from 0
+    int complete_ke;               // 1 if completed by KE close-out (= 100% complete)
     unsigned char payload[ELM_MAX_PAYLOAD];
     uint64_t timestamp;
     struct elm_complete *next;
@@ -56,6 +63,7 @@ struct elm_state {
     uint64_t segments_received;    // total DF24 segments received
     uint64_t messages_completed;   // complete ELMs queued for decode
     uint64_t messages_expired;     // partial ELMs flushed by TTL
+    uint64_t messages_rejected;    // rejected by content validation
     int active_entries;            // current reassembly entries in table
     uint64_t last_stats_time;      // timestamp of last stats print
     uint64_t last_partial_time;    // timestamp of last partial print

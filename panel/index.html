@@ -12,7 +12,7 @@
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
 nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
 nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
-.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}
 .tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
 .tabs a:hover{background:var(--hover);color:var(--text)}
 .tabs a.active{background:var(--accent);color:#000;font-weight:600}
@@ -55,6 +55,9 @@ tr:hover td{background:var(--hover)}
 <a href="/messages.html">📨 Messages</a>
 <a href="/aircraft.html">✈️ Aircraft</a>
 <a href="/devices.html">📻 Devices</a>
+<a href="/gsm.html">📶 GSM</a>
+<a href="/lte.html">📶 LTE</a>
+<a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>
@@ -258,6 +261,35 @@ function renderConfigForm(){
         html+=`</div></div>`;
     }
 
+    // POCSAG section
+    {
+        const pocsagActive=cfg.sdr_pocsag&&cfg.sdr_pocsag.active;
+        const pocsagEnabled=cfg.sdr_pocsag&&cfg.sdr_pocsag.enabled;
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📟 POCSAG Pager Decoder</h3><div>`;
+        html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:20px;width:20px;text-align:center">${pocsagActive?'🟢':'🔴'}</span>
+            <div style="flex:1"><strong style="color:var(--accent)">POCSAG Receiver</strong><br><span style="color:var(--dim);font-size:12px">${pocsagActive?'Active — receiving on '+(cfg.sdr_pocsag.freq_mhz||'466.075')+' MHz. Messages appear on the <a href="/messages.html" style="color:var(--accent)">Messages</a> page':'Inactive — assign a dongle with role <code>pocsag</code> from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
+        </div>`;
+        html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!pocsagActive?'opacity:0.45;pointer-events:none':''}">
+            <input type="checkbox" data-key="sdr_pocsag.enabled" ${pocsagEnabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!pocsagActive?'disabled':''}>
+            <div style="flex:1;min-width:0">
+                <strong style="color:${pocsagEnabled&&pocsagActive?'var(--accent)':'var(--dim)'}">Decode messages</strong>
+                <br><span style="color:var(--dim);font-size:11px">Enable POCSAG decoding output — decoded pager messages will appear on the Messages page</span>
+            </div>
+        </div>`;
+        if(!pocsagActive){
+            html+=`<div style="padding:8px 12px;background:var(--input-bg);border-radius:6px;color:var(--dim);font-size:12px;margin:8px 0">
+                ⚠️ POCSAG decoder disabled — no dongle assigned with role <code>pocsag</code>.
+            </div>`;
+        } else if(pocsagActive){
+            html+=`<div style="padding:8px 0 8px 32px">
+                <div class="field"><label>Frequency</label><span style="color:var(--accent);font-size:13px">${cfg.sdr_pocsag.freq_mhz||'466.075'} MHz</span></div>
+                <div class="field"><label>Baud rates</label><span style="color:var(--dim);font-size:13px">512 / 1200 / 2400 (auto-detect)</span></div>
+            </div>`;
+        }
+        html+=`</div></div>`;
+    }
+
     // MLAT section
     if(cfg.mlat&&cfg.mlat.servers){
         html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 MLAT (${cfg.mlat.servers.length} server)</h3><div>`;
@@ -283,8 +315,8 @@ function renderConfigForm(){
     loadSdrReceiverConfig();
 }
 
-const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)'};
-const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈'};
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)'};
+const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟'};
 
 async function loadSdrReceiverConfig(){
     try{
@@ -306,8 +338,26 @@ async function loadSdrReceiverConfig(){
                 html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${icon} ${label} — SN: ${dev.serial}</h3><div>`;
                 html+=`<div class="field"><label>Tuner</label><span style="color:var(--accent)">${dev.tuner} (${dev.freq_range})</span></div>`;
                 html+=`<div class="field"><label>State</label><span class="badge ${stCls}">${state.toUpperCase()}</span></div>`;
-                html+=`<div class="field"><label>Gain (dB)</label><input type="number" step="0.1" value="${gain.toFixed(1)}" id="rx_gain_${dev.serial}" min="-10" max="50"></div>`;
-                html+=`<div class="field"><label>PPM Correction</label><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}"></div>`;
+                let gainHtml='';
+                const gList=(rx&&rx.gain_list&&rx.gain_list.length>0)?rx.gain_list:null;
+                if(gList){
+                    gainHtml=`<select id="rx_gain_${dev.serial}" style="min-width:80px">`;
+                    for(const g of gList){
+                        const sel=Math.abs(g-gain)<0.05?' selected':'';
+                        gainHtml+=`<option value="${g.toFixed(1)}"${sel}>${g.toFixed(1)}</option>`;
+                    }
+                    gainHtml+=`</select>`;
+                }else{
+                    gainHtml=`<input type="number" step="0.1" value="${gain.toFixed(1)}" id="rx_gain_${dev.serial}" min="-10" max="50">`;
+                }
+                html+=`<div class="field"><label>Gain (dB)</label><div style="display:flex;gap:8px;align-items:center">${gainHtml}`;
+                if(rx&&state==='running'){
+                    html+=`<button id="ag_${dev.serial}" onclick="autoGain('${dev.serial}')" style="font-size:12px;padding:4px 12px;background:#2a1a0a;border:1px solid #ff9800;color:#ff9800;border-radius:4px;cursor:pointer;white-space:nowrap" title="Sweep all gain steps and pick the best">🔍 Auto</button>`;
+                }
+                html+=`</div></div>`;
+                const calBtn=role==='flarm'?`<button onclick="calibratePPM('${dev.serial}')" id="cal_btn_${dev.serial}" style="font-size:12px;padding:4px 12px;background:var(--card);border:1px solid var(--border);color:var(--accent);border-radius:4px;cursor:pointer;white-space:nowrap" title="Calibrate crystal frequency using GSM base station signals (takes ~10s, receiver stops briefly)">📡 Calibrate</button>`:'';
+                html+=`<div class="field"><label>PPM Correction</label><div style="display:flex;gap:8px;align-items:center"><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}" style="width:100px">${calBtn}</div></div>`;
+                html+=`<div style="grid-column:1/-1;min-height:16px;font-size:11px;padding:0 0 4px 0" id="cal_status_${dev.serial}"></div>`;
                 if(role==='adsb'){
                     const ac=cfg.sdr_adsb||{};
                     html+=`<div class="field"><label>Adaptive Range</label><input type="checkbox" data-key="sdr_adsb.adaptive_range" ${ac.adaptive_range?'checked':''}></div>`;
@@ -345,6 +395,87 @@ async function loadConfig(){
 const DANGEROUS_CHARS=/[`$!|;&()<>'"]/;
 const DANGEROUS_PATTERNS=/(\.\.|\/\/|\\\\|%2e|%00|<script|javascript:|onerror|onload)/i;
 
+let _agRunning=false;
+function showStatus(msg,ok,timeout){
+    const el=document.getElementById('save-status');
+    if(!el)return;
+    el.textContent=msg;
+    el.style.color=ok?'#66bb6a':'#f44336';
+    el.style.fontSize='12px';
+    el.style.display='inline';
+    if(timeout!==0)setTimeout(()=>{el.style.color='var(--dim)';},timeout||8000);
+}
+function _rxNoise(stats,serial){
+    if(!stats.rx_noise)return null;
+    return stats.rx_noise.find(n=>n.serial===serial)||null;
+}
+async function autoGain(serial){
+    if(_agRunning){showStatus('Auto-gain already running',false);return;}
+    let rx=null;
+    try{
+        const rxRes=await fetch('/api/receivers').then(r=>r.json());
+        rx=rxRes.receivers.find(r=>r.serial===serial||r.serial_actual===serial);
+    }catch(e){showStatus('Failed to load receiver data',false);return;}
+    if(!rx||!rx.gain_list||rx.gain_list.length<2){showStatus('No gain table for '+serial,false);return;}
+    _agRunning=true;
+    const isAdsb=(rx.role==='adsb');
+    const btn=document.getElementById('ag_'+serial);
+    if(btn)btn.disabled=true;
+    const steps=rx.gain_list.length;
+    const results=[];
+    let bestStep=0,bestScore=-999;
+    showStatus(`Auto-gain: testing ${steps} steps for ${serial}... (${isAdsb?'msg count':'noise floor'})`,true);
+
+    for(let i=0;i<steps;i++){
+        if(btn)btn.textContent=`⏳ ${i+1}/${steps}`;
+        try{
+            await fetch('/api/receivers/setgain',{method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({serial:serial,step:i})});
+            const s1=await fetch('/api/stats/quick').then(r=>r.json());
+            await new Promise(r=>setTimeout(r,2000));
+            const s2=await fetch('/api/stats/quick').then(r=>r.json());
+
+            if(isAdsb){
+                const msgs=s2.demod_total-s1.demod_total;
+                results.push({step:i,gain:rx.gain_list[i],msgs,noise:0});
+                if(msgs>bestScore){bestScore=msgs;bestStep=i;}
+            }else{
+                const n1=_rxNoise(s1,rx.serial_actual||serial);
+                const n2=_rxNoise(s2,rx.serial_actual||serial);
+                let noiseDb=-99;
+                if(n1&&n2&&(n2.iq_count-n1.iq_count)>0){
+                    const dSum=n2.iq_sum-n1.iq_sum;
+                    const dCnt=n2.iq_count-n1.iq_count;
+                    noiseDb=10*Math.log10(dSum/dCnt/32768);
+                }
+                results.push({step:i,gain:rx.gain_list[i],msgs:0,noise:noiseDb});
+                if(noiseDb<-8&&i>=bestStep){bestScore=noiseDb;bestStep=i;}
+            }
+        }catch(e){results.push({step:i,gain:rx.gain_list[i],msgs:-1,noise:-99});}
+    }
+
+    await fetch('/api/receivers/setgain',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({serial:serial,step:bestStep})});
+
+    const gainSel=document.getElementById('rx_gain_'+serial);
+    if(gainSel){
+        for(let j=0;j<gainSel.options.length;j++){
+            if(Math.abs(parseFloat(gainSel.options[j].value)-rx.gain_list[bestStep])<0.05){
+                gainSel.selectedIndex=j;break;}
+        }
+    }
+
+    let summary=`Best: ${rx.gain_list[bestStep].toFixed(1)} dB. `;
+    results.forEach(r=>{
+        summary+=`${r.gain.toFixed(1)}=`;
+        summary+=isAdsb?`${r.msgs}msg `:`${r.noise.toFixed(1)}dB `;
+    });
+    showStatus(summary,true,0);
+
+    if(btn){btn.textContent='🔍 Auto';btn.disabled=false;}
+    _agRunning=false;
+}
+
 async function saveConfig(){
     let hasError=false;
     document.querySelectorAll('[data-key]').forEach(el=>{
@@ -373,12 +504,63 @@ async function saveConfig(){
     document.getElementById('save-status').textContent='Saving...';
     document.getElementById('save-status').style.color='var(--dim)';
     try{
+        // Save receiver gain/ppm changes
+        const gainEls=document.querySelectorAll('[id^="rx_gain_"]');
+        for(const gel of gainEls){
+            const serial=gel.id.replace('rx_gain_','');
+            const ppmEl=document.getElementById('rx_ppm_'+serial);
+            const gain=parseFloat(gel.value)||40.0;
+            const ppm=ppmEl?parseInt(ppmEl.value)||0:0;
+            // Find current role from rxData
+            let role='none';
+            try{const rxRes=await fetch('/api/receivers').then(r=>r.json());
+            const rx=rxRes.receivers.find(r=>r.serial===serial||r.serial_actual===serial);
+            if(rx)role=rx.role;}catch(e){}
+            if(role!=='none'){
+                await fetch('/api/receivers/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({serial:serial,role:role,gain:gain,ppm:ppm})});
+            }
+        }
         const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
         const j=await r.json();
         if(j.error){document.getElementById('save-status').textContent='❌ '+j.error;document.getElementById('save-status').style.color='var(--danger)';return;}
         document.getElementById('save-status').textContent='✅ Configuration saved and applied';document.getElementById('save-status').style.color='var(--ok)';
         setTimeout(()=>{document.getElementById('save-status').textContent='';loadConfig();},3000);
     }catch(e){document.getElementById('save-status').textContent='❌ Error: '+e;}
+}
+
+async function calibratePPM(serial){
+    const btn=document.getElementById('cal_btn_'+serial);
+    const ppmInput=document.getElementById('rx_ppm_'+serial);
+    const status=document.getElementById('cal_status_'+serial);
+    if(!btn||!status)return;
+    btn.disabled=true;
+    const oldText=btn.innerHTML;
+    btn.innerHTML='⏳ Scanning...';
+    btn.style.color='var(--warn)';
+    status.textContent='Stopping receiver, scanning GSM 920-960 MHz...';
+    status.style.color='var(--dim)';
+    try{
+        const resp=await fetch('/api/calibrate-ppm',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({serial:serial})
+        });
+        const data=await resp.json();
+        if(data.ok){
+            if(ppmInput)ppmInput.value=data.ppm;
+            status.innerHTML=`✅ Calibrated: <b>${data.old_ppm} → ${data.ppm} ppm</b> (offset ${data.offset>=0?'+':''}${data.offset.toFixed(1)}, RMS ${data.rms.toFixed(2)}, ${data.samples} samples)`+(data.warning?` ⚠️ ${data.warning}`:'');
+            status.style.color='var(--ok)';
+        }else{
+            status.textContent='❌ '+data.error;
+            status.style.color='var(--danger)';
+        }
+    }catch(e){
+        status.textContent='❌ Network error: '+e.message;
+        status.style.color='var(--danger)';
+    }
+    btn.innerHTML=oldText;
+    btn.style.color='var(--accent)';
+    btn.disabled=false;
 }
 
 loadConfig();

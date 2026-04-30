@@ -2,9 +2,9 @@
 //
 // sdr_receiver.h: Multi-SDR dynamic receiver management
 //
-// Supports a dynamic number of RTL-SDR dongles, each independently
-// assigned to an ADS-B or FLARM role with its own FIFO, converter,
-// gain table, and reader thread.
+// Supports a dynamic number of SDR receivers, each independently
+// assigned to a decode or feed role with its own FIFO, converter,
+// gain table, reader thread, and decoder state.
 //
 // This file is free software: you may copy, redistribute and/or modify it
 // under the terms of the GNU General Public License as published by the
@@ -33,9 +33,12 @@ typedef enum {
     SDR_ROLE_NONE = 0,      // not assigned
     SDR_ROLE_ADSB,          // 1090 MHz ADS-B reception
     SDR_ROLE_FLARM,         // 868 MHz FLARM/OGN reception
-    SDR_ROLE_ACARS,         // ~130 MHz ACARS decoding (external: acarsdec)
-    SDR_ROLE_VDL2,          // ~136.975 MHz VDL Mode 2 (external: dumpvdl2)
-    SDR_ROLE_RADIOSONDE     // ~403 MHz radiosonde (external: radiosonde_auto_rx)
+    SDR_ROLE_ACARS,         // ~130 MHz ACARS decoding
+    SDR_ROLE_VDL2,          // ~136.975 MHz VDL Mode 2 decoding
+    SDR_ROLE_RADIOSONDE,    // ~403 MHz radiosonde decoding
+    SDR_ROLE_POCSAG,        // ~466 MHz POCSAG pager decoding
+    SDR_ROLE_GSM,           // ~935 MHz GSM broadcast channel decoder
+    SDR_ROLE_LTE            // ~800 MHz LTE cell scanner (PSS/SSS/MIB/SIB1)
 } sdr_role_t;
 
 // Decoder operations — plugin interface for each receiver role.
@@ -82,7 +85,7 @@ typedef struct {
 // Per-receiver configuration (set before open, changeable at runtime for some fields)
 typedef struct {
     char    serial[64];             // RTL-SDR serial number (empty = auto)
-    sdr_role_t role;                // ADS-B or FLARM
+    sdr_role_t role;                // receiver role
     int     freq;                   // center frequency in Hz
     float   gain;                   // gain in dB, or MODES_DEFAULT_GAIN / MODES_LEGACY_AUTO_GAIN
     int     ppm_error;              // oscillator correction in PPM
@@ -130,8 +133,19 @@ typedef struct sdr_receiver {
     char            serial_actual[256];
     int             dev_index;      // rtlsdr device index used to open
 
-    // Internal decoder state (for ACARS/VDL2/Radiosonde/FLARM roles)
+    // Internal decoder state for the assigned role.
     void           *decoder_state;  // Opaque pointer to decoder
+
+    // Auto-gain: IQ noise power sampling (updated atomically in reader thread)
+    volatile uint64_t ag_iq_sum;    // sum of (I-128)^2 + (Q-128)^2
+    volatile uint64_t ag_iq_count;  // number of IQ sample pairs accumulated
+
+    // Pending retune request (set by decoder, applied in callback context)
+    volatile uint32_t pending_freq; // 0 = no retune pending
+
+    // USB error recovery
+    unsigned        usb_error_count;    // consecutive set_freq failures
+    unsigned        usb_error_total;    // total set_freq failures
 } sdr_receiver_t;
 
 // Global receiver manager state
@@ -142,6 +156,9 @@ typedef struct {
 } sdr_manager_t;
 
 extern sdr_manager_t SdrManager;
+extern int PocsagOutputEnabled;
+extern int GsmOutputEnabled;
+extern int LteOutputEnabled;
 
 // ======================== Manager API ========================
 
@@ -150,6 +167,9 @@ void sdrManagerInit(void);
 
 // Add a receiver with the given config. Returns receiver index (0..N-1) or -1 on error.
 int sdrManagerAddReceiver(const rx_config_t *config);
+
+// Update config of an existing receiver by index (role, freq, gain, ppm, sample_rate).
+void sdrManagerUpdateConfig(int index, const rx_config_t *config);
 
 // Remove a receiver by index. Stops and closes it first if needed. Returns true on success.
 bool sdrManagerRemoveReceiver(int index);

@@ -411,6 +411,15 @@ static void url_encode(const char *src, char *dst, size_t dst_size) {
 // ===================== Internet Connectivity Check =====================
 // Quick DNS probe: resolve a well-known host to detect internet.
 
+#ifndef NET_CHECK_HOST
+#define NET_CHECK_HOST "dns.google"
+#endif
+#ifndef NET_CHECK_INTERVAL_MS
+#define NET_CHECK_INTERVAL_MS 60000   // check every 60s when online
+#endif
+#ifndef NET_CHECK_OFFLINE_MS
+#define NET_CHECK_OFFLINE_MS  10000   // check every 10s when offline
+#endif
 
 static int check_internet(void) {
     struct addrinfo hints, *res;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
 // mlat_client.h: built-in MLAT (multilateration) client

@@ -1248,17 +1248,14 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
 
                 // Log squawk changes
                 if (PanelState.enabled) {
+                    const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
                     if (mm->squawk == 0x7500 || mm->squawk == 0x7600 || mm->squawk == 0x7700) {
                         const char *desc = mm->squawk == 0x7500 ? "HIJACK" : mm->squawk == 0x7600 ? "NORDO" : "EMERGENCY";
-                        panelLogMessage("🚨 SQUAWK %04x %s %06X %s (was %04x)",
-                                        mm->squawk, desc, a->addr,
-                                        trackDataValid(&a->callsign_valid) ? a->callsign : "",
-                                        old_squawk);
+                        panelLogMessage("\xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 SQUAWK %04x %s (was %04x)",
+                                        a->addr, cs, mm->squawk, desc, old_squawk);
                     } else {
-                        panelLogMessage("SQUAWK %06X %s: %04x → %04x",
-                                        a->addr,
-                                        trackDataValid(&a->callsign_valid) ? a->callsign : "",
-                                        old_squawk, mm->squawk);
+                        panelLogMessage("%06X [%s] \xe2\x86\x92 SQUAWK %04x (was %04x)",
+                                        a->addr, cs, mm->squawk, old_squawk);
                     }
                 }
             }
@@ -1301,9 +1298,9 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
                 "NONE","GENERAL","LIFEGUARD","MINFUEL","NORDO","HIJACK","DOWNED","RESERVED"
             };
             const char *ename = (mm->emergency < 8) ? emerg_names[mm->emergency] : "UNKNOWN";
-            panelLogMessage("EMERGENCY %s %06X %s",
-                            ename, a->addr,
-                            trackDataValid(&a->callsign_valid) ? a->callsign : "");
+            const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
+            panelLogMessage("\xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 EMERGENCY %s",
+                            a->addr, cs, ename);
         }
         a->emergency = mm->emergency;
     }
@@ -1386,7 +1383,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
             a->callsign_matched = 0;
 
             if (PanelState.enabled && mm->callsign[0]) {
-                panelLogMessage("IDENT %06X %s", a->addr, mm->callsign);
+                panelLogMessage("%06X \xe2\x86\x92 IDENT %s", a->addr, mm->callsign);
             }
         }
         memcpy(a->callsign, mm->callsign, sizeof(a->callsign));

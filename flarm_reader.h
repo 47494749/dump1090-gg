@@ -28,6 +28,9 @@ typedef struct {
     char   ogn_station[32];    // OGN station name (e.g. "MYSTATION")
     char   ogn_server[128];    // OGN APRS-IS server (default: aprs.glidernet.org)
     int    ogn_port;           // OGN APRS-IS port (default: 14580)
+
+    // Virtual IQ file input (--flarm-ifile)
+    char   ifile_path[512];    // Path to raw IQ file (uint8 I/Q pairs, 1.6 MSPS)
 } flarm_reader_config_t;
 
 extern flarm_reader_config_t FlarmConfig;

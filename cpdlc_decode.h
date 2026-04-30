@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
 // cpdlc_decode.h: FANS-1/A CPDLC message decoder (ASN.1 UPER)

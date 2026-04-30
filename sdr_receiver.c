@@ -18,6 +18,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "config_panel.h"
+#include "pocsag_demod.h"
+#include "gsm_decode.h"
+#include "gsm_tracker.h"
+#include "lte_decode.h"
+#include "lte_tracker.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -26,6 +31,9 @@
 // ======================== Global state ========================
 
 sdr_manager_t SdrManager;
+int PocsagOutputEnabled = 1;  // toggled from panel; 1 = decode & show messages
+int GsmOutputEnabled = 1;     // toggled from panel; 1 = decode & show GSM cells
+int LteOutputEnabled = 1;     // toggled from panel; 1 = decode & show LTE cells
 
 // ======================== Utility ========================
 
@@ -37,13 +45,16 @@ const char *sdrRoleName(sdr_role_t role)
         case SDR_ROLE_ACARS:      return "acars";
         case SDR_ROLE_VDL2:       return "vdl2";
         case SDR_ROLE_RADIOSONDE: return "radiosonde";
+        case SDR_ROLE_POCSAG:     return "pocsag";
+        case SDR_ROLE_GSM:        return "gsm";
+        case SDR_ROLE_LTE:        return "lte";
         default:                  return "none";
     }
 }
 
 bool rxRoleIsDecoder(sdr_role_t role)
 {
-    return (role == SDR_ROLE_ACARS || role == SDR_ROLE_VDL2 || role == SDR_ROLE_RADIOSONDE);
+    return (role == SDR_ROLE_ACARS || role == SDR_ROLE_VDL2 || role == SDR_ROLE_RADIOSONDE || role == SDR_ROLE_POCSAG || role == SDR_ROLE_GSM || role == SDR_ROLE_LTE);
 }
 
 const char *rxStateName(rx_state_t state)
@@ -91,7 +102,7 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
         config->sample_rate = 2400000;
     } else if (!strcasecmp(token, "flarm")) {
         config->role = SDR_ROLE_FLARM;
-        config->freq = 868400000;
+        config->freq = 868300000;
         config->sample_rate = 1600000;
     } else if (!strcasecmp(token, "acars")) {
         config->role = SDR_ROLE_ACARS;
@@ -105,8 +116,20 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
         config->role = SDR_ROLE_RADIOSONDE;
         config->freq = 403000000;
         config->sample_rate = 2400000;
+    } else if (!strcasecmp(token, "pocsag")) {
+        config->role = SDR_ROLE_POCSAG;
+        config->freq = 466075000;
+        config->sample_rate = 1200000;
+    } else if (!strcasecmp(token, "gsm")) {
+        config->role = SDR_ROLE_GSM;
+        config->freq = 947000000;
+        config->sample_rate = GSM_SAMPLE_RATE;
+    } else if (!strcasecmp(token, "lte")) {
+        config->role = SDR_ROLE_LTE;
+        config->freq = LTE_DEFAULT_FREQ;
+        config->sample_rate = LTE_SAMPLE_RATE;
     } else {
-        fprintf(stderr, "sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde)\n", token);
+        fprintf(stderr, "sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte)\n", token);
         return false;
     }
 
@@ -446,12 +469,51 @@ static void rx_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
         return;
     }
 
+    // Apply deferred retune (e.g. LTE frequency hopping)
+    uint32_t new_freq = rx->pending_freq;
+    if (new_freq) {
+        rx->pending_freq = 0;
+        int ret = rtlsdr_set_center_freq(dev, new_freq);
+        if (ret < 0) {
+            rx->usb_error_count++;
+            rx->usb_error_total++;
+            if (rx->usb_error_count == 1) {
+                fprintf(stderr, "rx[%d]: rtlsdr_set_center_freq failed (%d), "
+                        "USB error recovery started\n", rx->id, ret);
+            }
+            // After 10 consecutive failures, cancel async to trigger device reset
+            if (rx->usb_error_count >= 10) {
+                fprintf(stderr, "rx[%d]: %u consecutive USB errors, "
+                        "cancelling async for device reset\n",
+                        rx->id, rx->usb_error_count);
+                rtlsdr_cancel_async(dev);
+            }
+            return; // discard buffer, don't process stale data
+        }
+        rx->usb_error_count = 0;  // reset on success
+        rx->config.freq = new_freq;
+        return; // discard this buffer (samples at transitional freq)
+    }
+
     unsigned samples_read = len / 2;
     if (!samples_read) return;
 
     // Dispatch to decoder_ops (all roles use this uniform path)
     if (rx->decoder_ops && rx->decoder_ops->process) {
         rx->decoder_ops->process(rx, buf, len);
+    }
+
+    // Sample IQ noise power for auto-gain (first 256 pairs per callback)
+    {
+        unsigned n = (samples_read < 256) ? samples_read : 256;
+        uint64_t s = 0;
+        for (unsigned i = 0; i < n * 2; i += 2) {
+            int I = (int)buf[i] - 128;
+            int Q = (int)buf[i+1] - 128;
+            s += (unsigned)(I*I + Q*Q);
+        }
+        __atomic_add_fetch(&rx->ag_iq_sum, s, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&rx->ag_iq_count, n, __ATOMIC_RELAXED);
     }
 
     rx->sample_counter += samples_read;
@@ -598,6 +660,10 @@ bool rxOpen(sdr_receiver_t *rx)
             rxClose(rx);
             return false;
         }
+        /* GSM init may change rx->config.freq (IF offset); retune if needed */
+        if (rtlsdr_get_center_freq(dev) != (uint32_t)rx->config.freq) {
+            rtlsdr_set_center_freq(dev, rx->config.freq);
+        }
     } else if (rx->config.role != SDR_ROLE_NONE) {
         fprintf(stderr, "rx[%d]: no decoder_ops for role %s\n",
                 rx->id, sdrRoleName(rx->config.role));
@@ -625,11 +691,51 @@ static void *rx_reader_thread(void *arg)
 
     rtlsdr_read_async(dev, rx_rtlsdr_callback, rx, 4, MODES_RTL_BUF_SIZE);
 
+    // If cancelled due to USB errors (not shutdown), try to recover
+    if (!Modes.exit && rx->state != RX_STATE_STOPPING && rx->usb_error_count > 0) {
+        fprintf(stderr, "rx[%d]: USB error recovery — closing and reopening device\n", rx->id);
+        rtlsdr_close(dev);
+        rx->rtl.dev = NULL;
+
+        // Wait 2 seconds for USB to settle
+        struct timespec ts = {2, 0};
+        nanosleep(&ts, NULL);
+
+        if (Modes.exit) goto done;
+
+        // Reopen device
+        rtlsdr_dev_t *new_dev = NULL;
+        int ret = rtlsdr_open(&new_dev, (uint32_t)rx->dev_index);
+        if (ret < 0) {
+            fprintf(stderr, "rx[%d]: failed to reopen device (err=%d), giving up\n", rx->id, ret);
+            rx->state = RX_STATE_ERROR;
+            goto done;
+        }
+        rx->rtl.dev = new_dev;
+        dev = new_dev;
+
+        // Reconfigure device
+        rtlsdr_set_tuner_gain_mode(dev, 1);
+        if (rx->rtl.gains && rx->rtl.current_gain < rx->rtl.gain_steps)
+            rtlsdr_set_tuner_gain(dev, rx->rtl.gains[rx->rtl.current_gain]);
+        rtlsdr_set_freq_correction(dev, rx->config.ppm_error);
+        rtlsdr_set_center_freq(dev, rx->config.freq);
+        rtlsdr_set_sample_rate(dev, (unsigned)rx->config.sample_rate);
+        rtlsdr_reset_buffer(dev);
+        rx->usb_error_count = 0;
+
+        fprintf(stderr, "rx[%d]: device reopened successfully, resuming\n", rx->id);
+
+        // Resume async read
+        rtlsdr_read_async(dev, rx_rtlsdr_callback, rx, 4, MODES_RTL_BUF_SIZE);
+    }
+
     if (!Modes.exit && rx->state != RX_STATE_STOPPING) {
         fprintf(stderr, "rx[%d]: rtlsdr_read_async returned unexpectedly, device may be lost\n", rx->id);
         rx->state = RX_STATE_ERROR;
     }
 
+done:
     fprintf(stderr, "rx[%d]: reader thread exiting\n", rx->id);
     return NULL;
 }
@@ -791,6 +897,79 @@ static void sonde_message_handler(const sonde_msg_t *msg, void *ctx)
     }
 }
 
+// POCSAG message callback → panelLogMessage
+static void pocsag_message_handler(const pocsag_msg_t *msg, void *ctx)
+{
+    (void)ctx;
+    if (!PocsagOutputEnabled) return;
+
+    const char *freq_str = "";
+    char freq_buf[32];
+    if (msg->channel_freq > 0) {
+        snprintf(freq_buf, sizeof(freq_buf), " %.3fMHz", msg->channel_freq / 1e6);
+        freq_str = freq_buf;
+    }
+
+    if (msg->is_tone_only) {
+        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d TONE-ONLY",
+                        freq_str, msg->baud_rate, msg->address, msg->function);
+    } else if (msg->is_alpha && msg->alpha_len > 0) {
+        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d \"%s\"",
+                        freq_str, msg->baud_rate, msg->address, msg->function,
+                        msg->alpha_msg);
+    } else if (msg->is_numeric && msg->numeric_len > 0) {
+        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d num=%s",
+                        freq_str, msg->baud_rate, msg->address, msg->function,
+                        msg->numeric_msg);
+    } else {
+        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d (empty)",
+                        freq_str, msg->baud_rate, msg->address, msg->function);
+    }
+}
+
+// GSM message callback → panelLogMessage + cell tracking
+static void gsm_message_handler(const gsm_cell_info_t *cell, const char *msg_type,
+                                 const uint8_t *l3_data, int l3_len, void *ctx)
+{
+    (void)l3_data; (void)l3_len;
+    if (!GsmOutputEnabled) return;
+
+    // Update tracker from the decoder that produced this message
+    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
+    if (rx && rx->decoder_state) {
+        gsm_stats_t stats;
+        gsm_get_stats((struct gsm_state *)rx->decoder_state, &stats);
+        gsm_sync_state_t sync = gsm_get_sync_state((struct gsm_state *)rx->decoder_state);
+        gsmTrackerUpdate(cell, &stats, sync);
+    }
+
+    panelLogMessage("[GSM] MCC=%d MNC=%d LAC=%u CID=%u ARFCN=%d BSIC=%02X %s",
+                    cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
+                    cell->arfcn, cell->bsic, msg_type);
+}
+
+// GSM Cell Broadcast callback
+static void gsm_cb_handler(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb, void *ctx)
+{
+    (void)ctx;
+    if (!GsmOutputEnabled) return;
+
+    gsmTrackerUpdateCB(cell, cb);
+
+    panelLogMessage("[GSM-CB] MCC=%d MNC=%d LAC=%u CID=%u serial=%u id=%u \"%s\"",
+                    cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
+                    cb->serial_nr, cb->msg_id, cb->text);
+}
+
+// LTE cell callback → tracker update + log
+static void lte_cell_handler(const lte_cell_info_t *cell, void *ctx)
+{
+    (void)ctx;
+    if (!LteOutputEnabled) return;
+
+    lteTrackerUpdate(cell);
+}
+
 bool rxDecoderCreate(sdr_receiver_t *rx)
 {
     switch (rx->config.role) {
@@ -856,6 +1035,69 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
                 rx->id, cfg.center_freq / 1e6);
         return true;
     }
+    case SDR_ROLE_POCSAG: {
+        pocsag_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.center_freq = rx->config.freq;
+        cfg.sample_rate = rx->config.sample_rate;
+        cfg.callback = pocsag_message_handler;
+        cfg.callback_ctx = rx;
+
+        // Multi-channel: German BOS POCSAG frequencies within the 2.4 MHz band
+        // Center at 466.150 MHz covers 466.0–466.3 MHz
+        // Default channels: 466.075, 466.175, 466.225 MHz
+        if (cfg.sample_rate >= 2000000) {
+            cfg.channel_freqs[0] = 466075000;  // BOS national (Feuerwehr, DRK, THW)
+            cfg.channel_freqs[1] = 466175000;  // BOS regional
+            cfg.channel_freqs[2] = 466225000;  // Baden-Württemberg
+            cfg.num_channels = 3;
+            // Adjust center frequency to cover all channels
+            cfg.center_freq = 466150000;
+            rx->config.freq = (unsigned)cfg.center_freq;  // retune SDR
+            fprintf(stderr, "rx[%d]: POCSAG multi-channel mode, center=%.3f MHz, %d channels\n",
+                    rx->id, cfg.center_freq / 1e6, cfg.num_channels);
+        }
+
+        rx->decoder_state = pocsag_create(&cfg);
+        if (!rx->decoder_state) return false;
+        fprintf(stderr, "rx[%d]: POCSAG decoder created, freq=%.3f MHz, sr=%.0f\n",
+                rx->id, cfg.center_freq / 1e6, cfg.sample_rate);
+        return true;
+    }
+    case SDR_ROLE_GSM: {
+        gsm_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.arfcn_freq = rx->config.freq;
+        cfg.center_freq = rx->config.freq - GSM_IF_OFFSET;
+        cfg.sample_rate = rx->config.sample_rate;
+        cfg.tsc = -1; // auto-detect
+        cfg.msg_cb = gsm_message_handler;
+        cfg.cb_cb = gsm_cb_handler;
+        cfg.callback_ctx = rx;
+
+        rx->decoder_state = gsm_create(&cfg);
+        if (!rx->decoder_state) return false;
+        /* Retune to IF-offset frequency to avoid DC spike */
+        rx->config.freq = (unsigned)cfg.center_freq;
+        fprintf(stderr, "rx[%d]: GSM decoder created, arfcn=%.3f MHz, tuned=%.3f MHz (IF offset %d Hz), sr=%.0f\n",
+                rx->id, cfg.arfcn_freq / 1e6, cfg.center_freq / 1e6, GSM_IF_OFFSET, cfg.sample_rate);
+        return true;
+    }
+    case SDR_ROLE_LTE: {
+        lte_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.center_freq = rx->config.freq;
+        cfg.sample_rate = rx->config.sample_rate;
+        cfg.callback = lte_cell_handler;
+        cfg.callback_ctx = rx;
+        cfg.hop_enabled = true;  // Enable Band 20 hopping (796/806/816 MHz)
+
+        rx->decoder_state = lte_create(&cfg);
+        if (!rx->decoder_state) return false;
+        fprintf(stderr, "rx[%d]: LTE decoder created, freq=%.3f MHz, sr=%.0f, hop=on\n",
+                rx->id, cfg.center_freq / 1e6, cfg.sample_rate);
+        return true;
+    }
     default:
         return false;
     }
@@ -874,6 +1116,15 @@ void rxDecoderDestroy(sdr_receiver_t *rx)
         break;
     case SDR_ROLE_RADIOSONDE:
         sonde_destroy((struct sonde_state *)rx->decoder_state);
+        break;
+    case SDR_ROLE_POCSAG:
+        pocsag_destroy((struct pocsag_state *)rx->decoder_state);
+        break;
+    case SDR_ROLE_GSM:
+        gsm_destroy((struct gsm_state *)rx->decoder_state);
+        break;
+    case SDR_ROLE_LTE:
+        lte_destroy((struct lte_state *)rx->decoder_state);
         break;
     default:
         break;
@@ -895,15 +1146,46 @@ void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, unsigned len)
     case SDR_ROLE_RADIOSONDE:
         sonde_process((struct sonde_state *)rx->decoder_state, iq_data, len);
         break;
+    case SDR_ROLE_POCSAG:
+        pocsag_process((struct pocsag_state *)rx->decoder_state, iq_data, len);
+        break;
+    case SDR_ROLE_GSM:
+        gsm_process((struct gsm_state *)rx->decoder_state, iq_data, len);
+        // Periodic FCCH-only tracker update (even without decoded SI)
+        {
+            static uint64_t gsm_tracker_last = 0;
+            gsm_stats_t gstats;
+            gsm_get_stats((struct gsm_state *)rx->decoder_state, &gstats);
+            if (gstats.fcch_detected > 0 && gstats.samples_processed - gsm_tracker_last >= 5000000) {
+                gsm_tracker_last = gstats.samples_processed;
+                gsm_cell_info_t gcell;
+                gsm_get_cell_info((struct gsm_state *)rx->decoder_state, &gcell);
+                gsm_sync_state_t gsync = gsm_get_sync_state((struct gsm_state *)rx->decoder_state);
+                if (gcell.si3.mcc == 0) {
+                    // No SI3 decoded yet — update with FCCH-only info
+                    gsmTrackerUpdateFCCH(gcell.arfcn, gcell.freq_mhz, &gstats, gsync);
+                }
+            }
+        }
+        break;
+    case SDR_ROLE_LTE:
+        lte_process((struct lte_state *)rx->decoder_state, iq_data, len);
+        // Check if decoder requests a frequency hop (deferred retune)
+        {
+            double hop_freq = lte_get_hop_freq((struct lte_state *)rx->decoder_state);
+            if (hop_freq > 0) {
+                rx->pending_freq = (uint32_t)hop_freq;
+                lte_set_freq((struct lte_state *)rx->decoder_state, hop_freq);
+            }
+        }
+        break;
     default:
         break;
     }
 }
-
-// ======================== decoder_ops implementations ========================
 //
 // Thin wrappers that adapt the existing decoder/FIFO code to the decoder_ops_t
-// plugin interface, so that all roles (ADSB, FLARM, ACARS, VDL2, Radiosonde)
+// plugin interface, so that all roles (ADSB, FLARM, ACARS, VDL2, Radiosonde, POCSAG)
 // can be managed uniformly by SdrManager.
 
 #include "flarm_reader.h"  // flarmDecoderInit/Process/Drain/Stop
@@ -952,6 +1234,51 @@ static const decoder_ops_t sonde_decoder_ops = {
     .process = sondeDecoderProcess,
     .drain   = sondeDecoderDrain,
     .stop    = sondeDecoderStop,
+};
+
+// ---- POCSAG decoder_ops ----
+
+static bool pocsagDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
+static void pocsagDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+static void pocsagDecoderDrain(sdr_receiver_t *rx)    { (void)rx; /* messages dispatched inline via callback */ }
+static void pocsagDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+
+static const decoder_ops_t pocsag_decoder_ops = {
+    .name    = "pocsag",
+    .init    = pocsagDecoderInit,
+    .process = pocsagDecoderProcess,
+    .drain   = pocsagDecoderDrain,
+    .stop    = pocsagDecoderStop,
+};
+
+// ---- GSM decoder_ops ----
+
+static bool gsmDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
+static void gsmDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+static void gsmDecoderDrain(sdr_receiver_t *rx)    { (void)rx; /* messages dispatched inline via callback */ }
+static void gsmDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+
+static const decoder_ops_t gsm_decoder_ops = {
+    .name    = "gsm",
+    .init    = gsmDecoderInit,
+    .process = gsmDecoderProcess,
+    .drain   = gsmDecoderDrain,
+    .stop    = gsmDecoderStop,
+};
+
+// ---- LTE decoder_ops ----
+
+static bool lteDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
+static void lteDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+static void lteDecoderDrain(sdr_receiver_t *rx)    { (void)rx; }
+static void lteDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+
+static const decoder_ops_t lte_decoder_ops = {
+    .name    = "lte",
+    .init    = lteDecoderInit,
+    .process = lteDecoderProcess,
+    .drain   = lteDecoderDrain,
+    .stop    = lteDecoderStop,
 };
 
 // ---- ADS-B decoder_ops ----
@@ -1094,6 +1421,9 @@ const decoder_ops_t *decoderOpsForRole(sdr_role_t role)
     case SDR_ROLE_ACARS:      return &acars_decoder_ops;
     case SDR_ROLE_VDL2:       return &vdl2_decoder_ops;
     case SDR_ROLE_RADIOSONDE: return &sonde_decoder_ops;
+    case SDR_ROLE_POCSAG:     return &pocsag_decoder_ops;
+    case SDR_ROLE_GSM:        return &gsm_decoder_ops;
+    case SDR_ROLE_LTE:        return &lte_decoder_ops;
     default:                  return NULL;
     }
 }
@@ -1250,6 +1580,19 @@ int sdrManagerFindBySerial(const char *serial)
     return -1;
 }
 
+void sdrManagerUpdateConfig(int index, const rx_config_t *config)
+{
+    if (index < 0 || index >= SdrManager.count) return;
+    pthread_mutex_lock(&SdrManager.lock);
+    sdr_receiver_t *rx = &SdrManager.receivers[index];
+    rx->config.role        = config->role;
+    rx->config.freq        = config->freq;
+    rx->config.sample_rate = config->sample_rate;
+    rx->config.gain        = config->gain;
+    rx->config.ppm_error   = config->ppm_error;
+    pthread_mutex_unlock(&SdrManager.lock);
+}
+
 sdr_receiver_t *sdrManagerGetReceiver(int index)
 {
     if (index < 0 || index >= SdrManager.count) return NULL;
@@ -1348,9 +1691,11 @@ int sdrManagerLoad(void)
         else if (!strcmp(role_str, "acars")) role = SDR_ROLE_ACARS;
         else if (!strcmp(role_str, "vdl2")) role = SDR_ROLE_VDL2;
         else if (!strcmp(role_str, "radiosonde")) role = SDR_ROLE_RADIOSONDE;
+        else if (!strcmp(role_str, "pocsag")) role = SDR_ROLE_POCSAG;
+        else if (!strcmp(role_str, "gsm")) role = SDR_ROLE_GSM;
 
         if (role != SDR_ROLE_NONE && serial[0]) {
-            // Only add if not already present (CLI args take priority)
+            // Skip duplicates within JSON itself
             if (sdrManagerFindBySerial(serial) < 0) {
                 rx_config_t cfg = {0};
                 snprintf(cfg.serial, sizeof(cfg.serial), "%.63s", serial);
@@ -1360,16 +1705,17 @@ int sdrManagerLoad(void)
                 // Set freq/sample_rate for role
                 switch (role) {
                     case SDR_ROLE_ADSB:       cfg.freq = 1090000000; cfg.sample_rate = 2400000; break;
-                    case SDR_ROLE_FLARM:      cfg.freq = 868400000;  cfg.sample_rate = 1600000; break;
+                    case SDR_ROLE_FLARM:      cfg.freq = 868300000;  cfg.sample_rate = 1600000; break;
                     case SDR_ROLE_ACARS:      cfg.freq = 131550000;  cfg.sample_rate = 2400000; break;
                     case SDR_ROLE_VDL2:       cfg.freq = 136975000;  cfg.sample_rate = 2400000; break;
                     case SDR_ROLE_RADIOSONDE: cfg.freq = 403000000;  cfg.sample_rate = 2400000; break;
+                    case SDR_ROLE_POCSAG:     cfg.freq = 466075000;  cfg.sample_rate = 1200000; break;
+                    case SDR_ROLE_GSM:        cfg.freq = 947000000;  cfg.sample_rate = 1000000; break;
+                    case SDR_ROLE_LTE:        cfg.freq = LTE_DEFAULT_FREQ; cfg.sample_rate = LTE_SAMPLE_RATE; break;
                     default: break;
                 }
                 if (sdrManagerAddReceiver(&cfg) >= 0) {
                     loaded++;
-                    fprintf(stderr, "sdr_manager: loaded receiver serial=%s role=%s gain=%.1f ppm=%d\n",
-                            serial, role_str, gain, ppm);
                     // Set FlarmConfig.enabled so OGN/feeder code knows FLARM is active
                     if (role == SDR_ROLE_FLARM) {
                         FlarmConfig.enabled = 1;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // piaware_client.h: Built-in FlightAware ADEPT client for dump1090-gg
 //
 // Connects directly to FlightAware servers over TLS using the ADEPT protocol,

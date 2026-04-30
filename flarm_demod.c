@@ -17,6 +17,7 @@
 // Free Software Foundation, either version 3 of the License, or (at your
 // option) any later version.
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -35,68 +36,85 @@
 #define SAMPLES_PER_HALF    (SAMPLES_PER_BIT / 2)
 
 // Total Manchester-encoded bit length for syncword + payload + CRC
-// Syncword: 8 bytes = 64 bits (already Manchester encoded in the syncword pattern)
-// Payload: 24 bytes = 192 bits → 384 Manchester bits
-// CRC: 2 bytes = 16 bits → 32 Manchester bits
-// But FLARM syncword is transmitted in Manchester. After sync detection,
-// we need: 24 + 2 = 26 bytes = 208 bits = 416 Manchester half-bits
+// After sync detection: 24 + 2 = 26 bytes = 208 bits = 416 Manchester half-bits
 #define PAYLOAD_MANCHESTER_BITS  (FLARM_PACKET_TOTAL * 8 * 2)
 
 // Syncword in Manchester-encoded bit pattern (64 bits = 8 bytes)
-// Each byte of FLARM_SYNCWORD is already the Manchester representation
 #define SYNCWORD_BITS       (FLARM_SYNCWORD_SIZE * 8)
-
-// FM discriminator output buffer size (ring buffer)
-#define FM_BUFFER_SIZE      65536
-
-// Minimum signal level to attempt decode (arbitrary, tune empirically)
-#define MIN_SIGNAL_LEVEL    0.02f
 
 // Syncword correlation threshold (out of 64 bits, allow up to 4 errors)
 #define SYNC_THRESHOLD      60
 
 // DC-blocking filter coefficient
-// At 1.6 MSPS: time constant = 1/(1-alpha)/Fs = 1/0.0001/1.6e6 = 6.25 ms
-// This tracks slow DC drift from frequency offset without tracking data
 #define DC_BLOCK_ALPHA      0.9999f
 
-// ======================== State structure ========================
+// ======================== Channelizer ========================
 
-struct flarm_state {
-    // Config
-    flarm_demod_config_t config;
+// FLARM uses two frequencies in EU; we process both simultaneously
+#define FLARM_NUM_CHANNELS   2
 
-    // FM discriminator state
-    int prev_i;     // Previous I sample (for FM discriminator)
-    int prev_q;     // Previous Q sample
-    float dc_avg;   // DC-blocking: running average of FM output
+static const uint32_t FLARM_CHANNEL_FREQS[FLARM_NUM_CHANNELS] = {
+    868200000,  // 868.2 MHz (EU freq 1)
+    868400000,  // 868.4 MHz (EU freq 2)
+};
 
-    // Bit-level demodulation
-    float fm_buffer[FM_BUFFER_SIZE];  // Ring buffer of FM discriminator output
-    unsigned fm_write_pos;            // Write position in ring buffer
+// LPF cutoff for channel isolation.
+// GFSK at 100 kbps with ±50 kHz deviation → BW ≈ 200 kHz.
+// Single-pole IIR at 100 kHz gives adequate selectivity.
+#define CHANNEL_LPF_CUTOFF   100000.0
+
+// ======================== Per-channel state ========================
+
+typedef struct {
+    // NCO (frequency shifter to move channel to baseband)
+    float nco_phase;
+    float nco_phase_inc;    // radians per sample
+
+    // Low-pass filter (single-pole IIR, separate I and Q)
+    float lpf_i, lpf_q;
+    float lpf_alpha;
+
+    // FM discriminator (float: after mixing/LPF the signal is float)
+    float prev_i, prev_q;
+
+    // DC-blocking
+    float dc_avg;
 
     // Bit clock recovery
-    float bit_accumulator;  // Accumulated FM output for current bit period
-    int bit_sample_count;   // Samples accumulated for current bit period
-    float clock_phase;      // Phase tracking for bit clock (0..SAMPLES_PER_BIT)
-
-    // Manchester bit stream buffer
-    uint8_t manchester_bits[1024]; // Circular buffer of raw (pre-Manchester) bits
-    unsigned mbit_write_pos;
+    float bit_accumulator;
+    int bit_sample_count;
 
     // Syncword detection
-    uint64_t shift_reg;     // 64-bit shift register for syncword matching
+    uint64_t shift_reg;
 
     // FLARM packet assembly
-    int      in_packet;     // Currently receiving a FLARM packet
-    unsigned packet_bits;   // Bits received since sync
-    uint8_t  packet_manchester[PAYLOAD_MANCHESTER_BITS]; // FLARM Manchester half-bits
+    int      in_packet;
+    uint8_t  packet_manchester[PAYLOAD_MANCHESTER_BITS];
     unsigned packet_mbit_count;
 
     // OGNTP packet assembly
     int      in_ogntp_packet;
-    uint8_t  ogntp_manchester[PAYLOAD_MANCHESTER_BITS]; // OGNTP Manchester half-bits
+    uint8_t  ogntp_manchester[PAYLOAD_MANCHESTER_BITS];
     unsigned ogntp_mbit_count;
+
+    // Per-channel diagnostics
+    int diag_best_flarm_match;
+    int diag_best_ogntp_match;
+    float diag_fm_sum;
+    unsigned diag_fm_count;
+} flarm_channel_t;
+
+// ======================== Overall state ========================
+
+struct flarm_state {
+    flarm_demod_config_t config;
+
+    // Channelized receivers
+    flarm_channel_t channels[FLARM_NUM_CHANNELS];
+
+    // Diagnostics timing
+    uint64_t diag_report_interval;
+    uint64_t diag_last_report;
 
     // Stats
     flarm_demod_stats_t stats;
@@ -121,19 +139,54 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
     if (!s) return NULL;
 
     s->config = *config;
-    s->prev_i = 0;
-    s->prev_q = 0;
-    s->dc_avg = 0;
-    s->fm_write_pos = 0;
-    s->bit_sample_count = 0;
-    s->bit_accumulator = 0;
-    s->clock_phase = 0;
-    s->mbit_write_pos = 0;
-    s->shift_reg = 0;
-    s->in_packet = 0;
-    s->packet_mbit_count = 0;
-    s->in_ogntp_packet = 0;
-    s->ogntp_mbit_count = 0;
+
+    // Default center frequency if not specified
+    uint32_t center = config->center_freq;
+    if (center == 0) center = FLARM_CENTER_FREQ;
+
+    // Initialize channelized receivers
+    for (int ch = 0; ch < FLARM_NUM_CHANNELS; ch++) {
+        flarm_channel_t *c = &s->channels[ch];
+
+        // NCO: shift channel frequency down to baseband
+        double offset_hz = (double)FLARM_CHANNEL_FREQS[ch] - (double)center;
+        c->nco_phase = 0;
+        c->nco_phase_inc = (float)(-2.0 * M_PI * offset_hz / FLARM_SAMPLE_RATE);
+
+        // LPF coefficient: single-pole IIR
+        c->lpf_alpha = 1.0f - expf((float)(-2.0 * M_PI * CHANNEL_LPF_CUTOFF / FLARM_SAMPLE_RATE));
+        c->lpf_i = 0;
+        c->lpf_q = 0;
+
+        // FM discriminator
+        c->prev_i = 0;
+        c->prev_q = 0;
+        c->dc_avg = 0;
+
+        // Bit clock
+        c->bit_accumulator = 0;
+        c->bit_sample_count = 0;
+
+        // Sync + packet
+        c->shift_reg = 0;
+        c->in_packet = 0;
+        c->packet_mbit_count = 0;
+        c->in_ogntp_packet = 0;
+        c->ogntp_mbit_count = 0;
+
+        // Diagnostics
+        c->diag_best_flarm_match = 0;
+        c->diag_best_ogntp_match = 0;
+        c->diag_fm_sum = 0;
+        c->diag_fm_count = 0;
+
+        fprintf(stderr, "flarm-ch%d: %.3f MHz, NCO offset %+.1f kHz, LPF %.0f kHz\n",
+                ch, FLARM_CHANNEL_FREQS[ch] / 1e6, offset_hz / 1e3, CHANNEL_LPF_CUTOFF / 1e3);
+    }
+
+    // Diagnostics: report every 5 seconds (5 * 1.6M = 8M samples)
+    s->diag_report_interval = 5 * FLARM_SAMPLE_RATE;
+    s->diag_last_report = 0;
 
     return s;
 }
@@ -206,14 +259,14 @@ static bool manchester_decode_payload(const uint8_t *manchester_bits, unsigned n
 
 // ======================== Try to decode a packet ========================
 
-static void try_decode_packet(struct flarm_state *state)
+static void try_decode_packet(struct flarm_state *state, flarm_channel_t *ch)
 {
     uint8_t payload[FLARM_PACKET_TOTAL];
     unsigned payload_len = 0;
 
     // Manchester-decode the collected half-bits into bytes
-    if (!manchester_decode_payload(state->packet_manchester,
-                                   state->packet_mbit_count,
+    if (!manchester_decode_payload(ch->packet_manchester,
+                                   ch->packet_mbit_count,
                                    payload, &payload_len)) {
         state->stats.packets_failed++;
         return;
@@ -284,14 +337,14 @@ static void try_decode_packet(struct flarm_state *state)
 
 // ======================== OGNTP try-decode ========================
 
-static void try_decode_ogntp_packet(struct flarm_state *state)
+static void try_decode_ogntp_packet(struct flarm_state *state, flarm_channel_t *ch)
 {
     uint8_t payload[OGNTP_PACKET_TOTAL];
     unsigned payload_len = 0;
 
     // Manchester-decode using same inverted convention as FLARM
-    if (!manchester_decode_payload(state->ogntp_manchester,
-                                   state->ogntp_mbit_count,
+    if (!manchester_decode_payload(ch->ogntp_manchester,
+                                   ch->ogntp_mbit_count,
                                    payload, &payload_len)) {
         state->stats.ogntp_packets_failed++;
         return;
@@ -323,22 +376,22 @@ static void try_decode_ogntp_packet(struct flarm_state *state)
     }
 }
 
-// ======================== Process one bit ========================
+// ======================== Process one bit (per channel) ========================
 
-static void process_bit(struct flarm_state *state, uint8_t bit)
+static void process_bit(struct flarm_state *state, flarm_channel_t *ch, uint8_t bit)
 {
     // Push into 64-bit shift register for syncword detection
-    state->shift_reg = (state->shift_reg << 1) | (bit & 1);
+    ch->shift_reg = (ch->shift_reg << 1) | (bit & 1);
 
     // ---- FLARM: collect bits or look for FLARM syncword ----
-    if (state->in_packet) {
+    if (ch->in_packet) {
         // Collecting FLARM payload Manchester bits
-        state->packet_manchester[state->packet_mbit_count++] = bit;
+        ch->packet_manchester[ch->packet_mbit_count++] = bit;
 
-        if (state->packet_mbit_count >= PAYLOAD_MANCHESTER_BITS) {
-            try_decode_packet(state);
-            state->in_packet = 0;
-            state->packet_mbit_count = 0;
+        if (ch->packet_mbit_count >= PAYLOAD_MANCHESTER_BITS) {
+            try_decode_packet(state, ch);
+            ch->in_packet = 0;
+            ch->packet_mbit_count = 0;
         }
     } else {
         static uint64_t sync_pattern = 0;
@@ -346,25 +399,30 @@ static void process_bit(struct flarm_state *state, uint8_t bit)
             sync_pattern = build_syncword_pattern();
         }
 
-        uint64_t diff = state->shift_reg ^ sync_pattern;
+        uint64_t diff = ch->shift_reg ^ sync_pattern;
         int errors = popcount64(diff);
+        int match = 64 - errors;
+
+        // Track best correlation for diagnostics
+        if (match > ch->diag_best_flarm_match)
+            ch->diag_best_flarm_match = match;
 
         if (errors <= (64 - SYNC_THRESHOLD)) {
             state->stats.packets_detected++;
-            state->in_packet = 1;
-            state->packet_mbit_count = 0;
+            ch->in_packet = 1;
+            ch->packet_mbit_count = 0;
         }
     }
 
     // ---- OGNTP: collect bits or look for OGNTP syncword (independent) ----
-    if (state->in_ogntp_packet) {
+    if (ch->in_ogntp_packet) {
         // Collecting OGNTP payload Manchester bits
-        state->ogntp_manchester[state->ogntp_mbit_count++] = bit;
+        ch->ogntp_manchester[ch->ogntp_mbit_count++] = bit;
 
-        if (state->ogntp_mbit_count >= PAYLOAD_MANCHESTER_BITS) {
-            try_decode_ogntp_packet(state);
-            state->in_ogntp_packet = 0;
-            state->ogntp_mbit_count = 0;
+        if (ch->ogntp_mbit_count >= PAYLOAD_MANCHESTER_BITS) {
+            try_decode_ogntp_packet(state, ch);
+            ch->in_ogntp_packet = 0;
+            ch->ogntp_mbit_count = 0;
         }
     } else {
         static uint64_t ogntp_sync_pattern = 0;
@@ -373,18 +431,23 @@ static void process_bit(struct flarm_state *state, uint8_t bit)
                 ogntp_sync_pattern = (ogntp_sync_pattern << 8) | OGNTP_SYNCWORD[i];
         }
 
-        uint64_t ogntp_diff = state->shift_reg ^ ogntp_sync_pattern;
+        uint64_t ogntp_diff = ch->shift_reg ^ ogntp_sync_pattern;
         int ogntp_errors = popcount64(ogntp_diff);
+        int ogntp_match = 64 - ogntp_errors;
+
+        // Track best correlation for diagnostics
+        if (ogntp_match > ch->diag_best_ogntp_match)
+            ch->diag_best_ogntp_match = ogntp_match;
 
         if (ogntp_errors <= (64 - SYNC_THRESHOLD)) {
             state->stats.ogntp_packets_detected++;
-            state->in_ogntp_packet = 1;
-            state->ogntp_mbit_count = 0;
+            ch->in_ogntp_packet = 1;
+            ch->ogntp_mbit_count = 0;
         }
     }
 }
 
-// ======================== Main IQ processing ========================
+// ======================== Main IQ processing (channelized) ========================
 
 void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsigned len)
 {
@@ -392,45 +455,85 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
     state->stats.samples_processed += n_samples;
 
     for (unsigned i = 0; i < n_samples; i++) {
-        // Get I/Q centered around 0 (RTL-SDR gives unsigned 0-255)
-        int cur_i = (int)iq_data[i * 2]     - 128;
-        int cur_q = (int)iq_data[i * 2 + 1] - 128;
+        // Raw IQ centered around 0 (RTL-SDR gives unsigned 0-255)
+        float raw_i = (float)((int)iq_data[i * 2]     - 128);
+        float raw_q = (float)((int)iq_data[i * 2 + 1] - 128);
 
-        // FM discriminator: phase difference between consecutive samples
-        // atan2(cross, dot) where cross = I[n]*Q[n-1] - Q[n]*I[n-1]
-        //                         dot   = I[n]*I[n-1] + Q[n]*Q[n-1]
-        int cross = cur_i * state->prev_q - cur_q * state->prev_i;
-        int dot   = cur_i * state->prev_i + cur_q * state->prev_q;
+        // Process each channel independently
+        for (int ch_idx = 0; ch_idx < FLARM_NUM_CHANNELS; ch_idx++) {
+            flarm_channel_t *ch = &state->channels[ch_idx];
 
-        state->prev_i = cur_i;
-        state->prev_q = cur_q;
+            // ---- NCO mixing: shift channel to baseband ----
+            float cos_p = cosf(ch->nco_phase);
+            float sin_p = sinf(ch->nco_phase);
+            float mix_i = raw_i * cos_p - raw_q * sin_p;
+            float mix_q = raw_i * sin_p + raw_q * cos_p;
 
-        // Fast atan2 approximation: just use cross/dot ratio
-        // For FSK, we only need the sign and rough magnitude
-        float fm_out;
-        if (dot == 0) {
-            fm_out = (cross > 0) ? 1.0f : ((cross < 0) ? -1.0f : 0.0f);
-        } else {
-            fm_out = (float)cross / (float)(abs(dot) + abs(cross));
+            ch->nco_phase += ch->nco_phase_inc;
+            // Keep phase in [-π, π] to avoid float precision loss
+            if (ch->nco_phase > (float)M_PI)  ch->nco_phase -= 2.0f * (float)M_PI;
+            if (ch->nco_phase < -(float)M_PI) ch->nco_phase += 2.0f * (float)M_PI;
+
+            // ---- Low-pass filter (single-pole IIR) ----
+            ch->lpf_i += ch->lpf_alpha * (mix_i - ch->lpf_i);
+            ch->lpf_q += ch->lpf_alpha * (mix_q - ch->lpf_q);
+
+            // ---- FM discriminator on filtered signal ----
+            float cross = ch->lpf_i * ch->prev_q - ch->lpf_q * ch->prev_i;
+            float dot   = ch->lpf_i * ch->prev_i + ch->lpf_q * ch->prev_q;
+
+            ch->prev_i = ch->lpf_i;
+            ch->prev_q = ch->lpf_q;
+
+            float fm_out;
+            float denom = fabsf(dot) + fabsf(cross);
+            if (denom < 1e-10f) {
+                fm_out = 0.0f;
+            } else {
+                fm_out = cross / denom;
+            }
+
+            // ---- DC-blocking filter ----
+            ch->dc_avg = DC_BLOCK_ALPHA * ch->dc_avg + (1.0f - DC_BLOCK_ALPHA) * fm_out;
+            float fm_corrected = fm_out - ch->dc_avg;
+
+            // ---- Diagnostics: FM amplitude ----
+            ch->diag_fm_sum += fabsf(fm_corrected);
+            ch->diag_fm_count++;
+
+            // ---- Bit clock: every SAMPLES_PER_HALF, output one Manchester half-bit ----
+            ch->bit_accumulator += fm_corrected;
+            ch->bit_sample_count++;
+
+            if (ch->bit_sample_count >= SAMPLES_PER_HALF) {
+                uint8_t half_bit = (ch->bit_accumulator > 0) ? 1 : 0;
+                process_bit(state, ch, half_bit);
+
+                ch->bit_accumulator = 0;
+                ch->bit_sample_count = 0;
+            }
         }
+    }
 
-        // DC-blocking filter: remove frequency offset bias
-        // Without this, RTL-SDR PPM error shifts the FM output baseline,
-        // causing the bit slicer to fail when offset exceeds FSK deviation
-        state->dc_avg = DC_BLOCK_ALPHA * state->dc_avg + (1.0f - DC_BLOCK_ALPHA) * fm_out;
-        float fm_corrected = fm_out - state->dc_avg;
-
-        // Accumulate for bit decision
-        state->bit_accumulator += fm_corrected;
-        state->bit_sample_count++;
-
-        // Bit clock: every SAMPLES_PER_HALF samples, output one Manchester half-bit
-        if (state->bit_sample_count >= SAMPLES_PER_HALF) {
-            uint8_t half_bit = (state->bit_accumulator > 0) ? 1 : 0;
-            process_bit(state, half_bit);
-
-            state->bit_accumulator = 0;
-            state->bit_sample_count = 0;
+    // Periodic diagnostic report (per-channel)
+    if (state->stats.samples_processed - state->diag_last_report >= state->diag_report_interval) {
+        for (int ch = 0; ch < FLARM_NUM_CHANNELS; ch++) {
+            flarm_channel_t *c = &state->channels[ch];
+            float avg_fm = (c->diag_fm_count > 0) ?
+                            c->diag_fm_sum / c->diag_fm_count : 0;
+            fprintf(stderr, "flarm-diag ch%d (%.1fMHz): best_sync FLARM=%d/64 OGNTP=%d/64 "
+                    "avg_fm=%.4f dc=%.4f detected=%llu\n",
+                    ch, FLARM_CHANNEL_FREQS[ch] / 1e6,
+                    c->diag_best_flarm_match,
+                    c->diag_best_ogntp_match,
+                    avg_fm,
+                    c->dc_avg,
+                    (unsigned long long)state->stats.packets_detected);
+            c->diag_best_flarm_match = 0;
+            c->diag_best_ogntp_match = 0;
+            c->diag_fm_sum = 0;
+            c->diag_fm_count = 0;
         }
+        state->diag_last_report = state->stats.samples_processed;
     }
 }

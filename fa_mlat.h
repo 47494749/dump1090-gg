@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // fa_mlat.h: Built-in FlightAware MLAT client for dump1090-gg
 //
 // Replaces the external fa-mlat-client Python program.

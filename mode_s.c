@@ -401,6 +401,11 @@ score_rank scoreModesMessage(const unsigned char *uncorrected)
         {
             if (!Modes.enable_df24)
                 return SR_UNCORRECTABLE;
+            // Reject DF24-31 if the DF field was corrected (fix-df).
+            // These frames use Address/Parity with no independent CRC,
+            // so bit-corrected frames are almost certainly misclassified.
+            if (corrections > 0)
+                return SR_UNCORRECTABLE;
             if (long_syndrome == UNCHECKED_SYNDROME)
                 long_syndrome = modesChecksum(corrected, MODES_LONG_MSG_BITS);
             bool recent = icaoFilterTest(long_syndrome);
@@ -763,8 +768,13 @@ int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
         // ND must be extracted before elmAddSegment uses it
         mm->ND = getbits(msg, 5, 8);
         memcpy(mm->MD, &msg[1], 10);
-        // Feed ELM reassembly
-        elmAddSegment(&Modes.elm, mm->addr, mm->ND, mm->KE, mm->MD, mm->sysTimestampMsg);
+        // Feed ELM reassembly — but only if the frame had zero corrected bits.
+        // DF24-31 uses Address/Parity so there's no independent CRC validation.
+        // Frames that needed bit correction to reach a DF24 are almost certainly
+        // misclassified DF17/DF20/DF21 and produce garbage ELM data.
+        if (mm->correctedbits == 0) {
+            elmAddSegment(&Modes.elm, mm->addr, mm->ND, mm->KE, mm->MD, mm->sysTimestampMsg);
+        }
     }
 
     // ME (message, extended squitter)
@@ -2460,6 +2470,18 @@ void displayModesMessage(struct modesMessage *mm) {
 // Log TIS-B/ADS-R messages when --tisb-verbose is active
 static void logTisbMessage(struct modesMessage *mm)
 {
+    // Filter out likely false positives: DF18 messages with no valid decoded
+    // data fields are almost certainly CRC-24 collisions (random noise that
+    // happens to have a valid checksum). Require at least one meaningful field.
+    if (mm->CF != 4) {  // CF=4 management messages have no data fields by design
+        int has_data = mm->callsign_valid || mm->altitude_baro_valid ||
+                       mm->altitude_geom_valid || mm->gs_valid ||
+                       mm->heading_valid || mm->cpr_valid ||
+                       mm->squawk_valid || mm->ias_valid || mm->tas_valid;
+        if (!has_data)
+            return;
+    }
+
     const char *cf_name;
     switch (mm->CF) {
     case 0: cf_name = "ADS-B (non-transponder)"; break;

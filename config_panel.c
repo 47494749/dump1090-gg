@@ -21,6 +21,10 @@
 #include "fifo.h"
 #include "opensky_client.h"
 #include "sondehub_client.h"
+#include "gsm_calibrate.h"
+#include "gsm_tracker.h"
+#include "lte_tracker.h"
+#include "pocsag_demod.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -46,6 +50,384 @@ panel_state_t PanelState;
 static bool RadiosondyEnabled = false;
 static bool WettersondeEnabled = false;
 
+// ============================= SDR Diagnostics ============================
+
+#define DIAG_MAX_DEVICES    8
+#define DIAG_MAX_FREQ_STEPS 20
+#define DIAG_MAX_SR_STEPS   12
+
+typedef struct {
+    int     freq_hz;
+    int     sample_rate;
+    bool    pll_locked;
+    float   noise_floor_db;     // average magnitude in dB
+    float   dc_offset;          // DC bias (deviation from 127.5)
+    float   iq_spread;          // std deviation of IQ samples
+} diag_measurement_t;
+
+typedef struct {
+    char    serial[64];
+    char    tuner[32];
+    char    freq_range[64];
+    int     tuner_type;
+    int     max_gain_steps;
+    float   max_gain_db;
+    int     gain_list[64];      // supported gain values in 0.1 dB
+    int     num_measurements;
+    diag_measurement_t measurements[DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS];
+    bool    complete;
+    char    error[128];
+} diag_device_result_t;
+
+typedef struct {
+    bool    running;
+    bool    complete;
+    int     device_count;
+    char    librtlsdr_version[64];
+    diag_device_result_t devices[DIAG_MAX_DEVICES];
+    pthread_mutex_t mutex;
+    pthread_t thread;
+} diag_state_t;
+
+static diag_state_t DiagState = {0};
+
+// Forward declarations
+static const char *tuner_name(int type);
+static const char *tuner_freq_range(int type);
+static void http_send(int fd, int code, const char *content_type, const char *body, int body_len);
+static void http_send_json(int fd, const char *json, int len);
+
+// Run a single diagnostic measurement on an opened RTL-SDR device
+#ifdef ENABLE_RTLSDR
+static void diag_measure(rtlsdr_dev_t *dev, int freq, int sample_rate,
+                         diag_measurement_t *out)
+{
+    out->freq_hz = freq;
+    out->sample_rate = sample_rate;
+    out->pll_locked = true;
+    out->noise_floor_db = -99.0f;
+    out->dc_offset = 0.0f;
+    out->iq_spread = 0.0f;
+
+    // Set sample rate
+    if (rtlsdr_set_sample_rate(dev, (uint32_t)sample_rate) < 0) {
+        out->pll_locked = false;
+        return;
+    }
+
+    // Set frequency — PLL lock check happens here
+    if (rtlsdr_set_center_freq(dev, (uint32_t)freq) < 0) {
+        out->pll_locked = false;
+        return;
+    }
+
+    usleep(50000);  // 50ms settle time
+
+    // Read a small buffer of IQ samples
+    uint8_t buf[16384];
+    int n_read = 0;
+    rtlsdr_reset_buffer(dev);
+    if (rtlsdr_read_sync(dev, buf, sizeof(buf), &n_read) < 0 || n_read < 1024) {
+        out->pll_locked = false;
+        return;
+    }
+
+    // Analyze IQ data
+    double sum_i = 0, sum_q = 0;
+    double sum_i2 = 0, sum_q2 = 0;
+    double sum_mag = 0;
+    int samples = n_read / 2;
+
+    for (int i = 0; i < n_read; i += 2) {
+        double vi = (double)buf[i] - 127.5;
+        double vq = (double)buf[i+1] - 127.5;
+        sum_i += buf[i];
+        sum_q += buf[i+1];
+        sum_i2 += vi * vi;
+        sum_q2 += vq * vq;
+        sum_mag += sqrt(vi * vi + vq * vq);
+    }
+
+    double mean_i = sum_i / samples;
+    double mean_q = sum_q / samples;
+    out->dc_offset = (float)(fabs(mean_i - 127.5) + fabs(mean_q - 127.5));
+
+    double variance = (sum_i2 + sum_q2) / samples;
+    out->iq_spread = (float)sqrt(variance);
+
+    // If IQ spread is very narrow (<3), the tuner is deaf (PLL not truly locked)
+    if (out->iq_spread < 3.0f) {
+        out->pll_locked = false;
+    }
+
+    // Noise floor in dB (relative to full scale 128)
+    double avg_mag = sum_mag / samples;
+    if (avg_mag > 0)
+        out->noise_floor_db = (float)(20.0 * log10(avg_mag / 128.0));
+    else
+        out->noise_floor_db = -99.0f;
+}
+
+static void *diag_thread_entry(void *arg)
+{
+    (void)arg;
+
+    // Test frequencies (Hz)
+    static const int test_freqs[] = {
+        24000000, 50000000, 100000000, 200000000, 300000000,
+        400000000, 404500000, 500000000, 600000000, 700000000,
+        800000000, 868800000, 935000000, 1000000000, 1090000000,
+        1200000000, 1400000000, 1600000000, 1766000000
+    };
+    static const int num_freqs = 19;
+
+    // Test sample rates (Hz)
+    static const int test_srs[] = {
+        250000, 1024000, 1600000, 2000000, 2400000, 3200000
+    };
+    static const int num_srs = 6;
+
+    // Get librtlsdr version info
+    pthread_mutex_lock(&DiagState.mutex);
+    snprintf(DiagState.librtlsdr_version, sizeof(DiagState.librtlsdr_version),
+             "librtlsdr 0.6 (system)");
+    pthread_mutex_unlock(&DiagState.mutex);
+
+    int dev_count = rtlsdr_get_device_count();
+    if (dev_count <= 0) {
+        pthread_mutex_lock(&DiagState.mutex);
+        DiagState.running = false;
+        DiagState.complete = true;
+        DiagState.device_count = 0;
+        pthread_mutex_unlock(&DiagState.mutex);
+        return NULL;
+    }
+    if (dev_count > DIAG_MAX_DEVICES) dev_count = DIAG_MAX_DEVICES;
+
+    pthread_mutex_lock(&DiagState.mutex);
+    DiagState.device_count = dev_count;
+    pthread_mutex_unlock(&DiagState.mutex);
+
+    for (int d = 0; d < dev_count; d++) {
+        diag_device_result_t *dr = &DiagState.devices[d];
+
+        // Get device info
+        char vendor[256] = {0}, product[256] = {0}, serial[256] = {0};
+        rtlsdr_get_device_usb_strings(d, vendor, product, serial);
+        serial[63] = '\0';  // ensure fits in dr->serial
+
+        pthread_mutex_lock(&DiagState.mutex);
+        memcpy(dr->serial, serial, 64);
+        dr->complete = false;
+        dr->num_measurements = 0;
+        dr->error[0] = '\0';
+        pthread_mutex_unlock(&DiagState.mutex);
+
+        // Check if this device is currently in use by SdrManager
+        int rx_idx = sdrManagerFindBySerial(serial);
+        sdr_receiver_t *managed_rx = NULL;
+        rx_state_t prev_state = RX_STATE_IDLE;
+        rx_config_t saved_config = {0};
+
+        if (rx_idx >= 0) {
+            managed_rx = &SdrManager.receivers[rx_idx];
+            prev_state = managed_rx->state;
+            saved_config = managed_rx->config;
+
+            // Stop the receiver to free the device
+            if (managed_rx->state == RX_STATE_RUNNING) rxStop(managed_rx);
+            if (managed_rx->state != RX_STATE_IDLE) rxClose(managed_rx);
+            usleep(300000);  // let OS release USB
+        }
+
+        // Open device directly for diagnostics
+        rtlsdr_dev_t *dev = NULL;
+        if (rtlsdr_open(&dev, d) < 0 || !dev) {
+            pthread_mutex_lock(&DiagState.mutex);
+            snprintf(dr->error, sizeof(dr->error), "Failed to open device %d", d);
+            dr->complete = true;
+            pthread_mutex_unlock(&DiagState.mutex);
+            goto restore;
+        }
+
+        // Get tuner info
+        int ttype = rtlsdr_get_tuner_type(dev);
+        pthread_mutex_lock(&DiagState.mutex);
+        dr->tuner_type = ttype;
+        snprintf(dr->tuner, sizeof(dr->tuner), "%s", tuner_name(ttype));
+        snprintf(dr->freq_range, sizeof(dr->freq_range), "%s", tuner_freq_range(ttype));
+        pthread_mutex_unlock(&DiagState.mutex);
+
+        // Get gain info
+        int gains[64];
+        int n_gains = rtlsdr_get_tuner_gains(dev, gains);
+        if (n_gains > 0) {
+            dr->max_gain_steps = n_gains;
+            dr->max_gain_db = gains[n_gains - 1] / 10.0f;
+            int copy = n_gains > 64 ? 64 : n_gains;
+            memcpy(dr->gain_list, gains, copy * sizeof(int));
+        }
+
+        // Set max gain for testing
+        if (n_gains > 0) {
+            rtlsdr_set_tuner_gain_mode(dev, 1);
+            rtlsdr_set_tuner_gain(dev, gains[n_gains - 1]);
+        }
+
+        // Run frequency sweep at default sample rate (2.4 MSPS)
+        int meas_idx = 0;
+        for (int f = 0; f < num_freqs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; f++) {
+            diag_measurement_t m = {0};
+            diag_measure(dev, test_freqs[f], 2400000, &m);
+
+            pthread_mutex_lock(&DiagState.mutex);
+            dr->measurements[meas_idx++] = m;
+            dr->num_measurements = meas_idx;
+            pthread_mutex_unlock(&DiagState.mutex);
+        }
+
+        // Run sample rate sweep at 404.5 MHz
+        for (int s = 0; s < num_srs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; s++) {
+            diag_measurement_t m = {0};
+            diag_measure(dev, 404500000, test_srs[s], &m);
+
+            pthread_mutex_lock(&DiagState.mutex);
+            dr->measurements[meas_idx++] = m;
+            dr->num_measurements = meas_idx;
+            pthread_mutex_unlock(&DiagState.mutex);
+        }
+
+        // Run sample rate sweep at 1090 MHz
+        for (int s = 0; s < num_srs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; s++) {
+            diag_measurement_t m = {0};
+            diag_measure(dev, 1090000000, test_srs[s], &m);
+
+            pthread_mutex_lock(&DiagState.mutex);
+            dr->measurements[meas_idx++] = m;
+            dr->num_measurements = meas_idx;
+            pthread_mutex_unlock(&DiagState.mutex);
+        }
+
+        rtlsdr_close(dev);
+
+        pthread_mutex_lock(&DiagState.mutex);
+        dr->complete = true;
+        pthread_mutex_unlock(&DiagState.mutex);
+
+restore:
+        // Restore the receiver if it was managed
+        if (managed_rx && prev_state >= RX_STATE_OPEN) {
+            usleep(200000);
+            bool ok = rxOpen(managed_rx);
+            if (ok && prev_state == RX_STATE_RUNNING) {
+                ok = rxStart(managed_rx);
+                if (ok && saved_config.role == SDR_ROLE_FLARM) {
+                    FlarmConfig.enabled = 1;
+                    ognClientInit();
+                }
+            }
+        }
+    }
+
+    pthread_mutex_lock(&DiagState.mutex);
+    DiagState.running = false;
+    DiagState.complete = true;
+    pthread_mutex_unlock(&DiagState.mutex);
+
+    return NULL;
+}
+#endif // ENABLE_RTLSDR
+
+static void api_get_diagnostics(int fd)
+{
+    char *buf = malloc(65536);
+    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
+    int pos = 0;
+
+    pthread_mutex_lock(&DiagState.mutex);
+
+    pos += snprintf(buf + pos, 65536 - pos,
+        "{\"running\":%s,\"complete\":%s,\"device_count\":%d,"
+        "\"librtlsdr_version\":\"%s\",\"devices\":[",
+        DiagState.running ? "true" : "false",
+        DiagState.complete ? "true" : "false",
+        DiagState.device_count,
+        DiagState.librtlsdr_version);
+
+    for (int d = 0; d < DiagState.device_count && d < DIAG_MAX_DEVICES; d++) {
+        diag_device_result_t *dr = &DiagState.devices[d];
+        if (d > 0) pos += snprintf(buf + pos, 65536 - pos, ",");
+        pos += snprintf(buf + pos, 65536 - pos,
+            "{\"serial\":\"%s\",\"tuner\":\"%s\",\"freq_range\":\"%s\","
+            "\"tuner_type\":%d,\"max_gain_db\":%.1f,\"max_gain_steps\":%d,"
+            "\"gain_list\":[",
+            dr->serial, dr->tuner, dr->freq_range,
+            dr->tuner_type, dr->max_gain_db, dr->max_gain_steps);
+
+        for (int g = 0; g < dr->max_gain_steps && g < 64; g++) {
+            if (g > 0) pos += snprintf(buf + pos, 65536 - pos, ",");
+            pos += snprintf(buf + pos, 65536 - pos, "%.1f", dr->gain_list[g] / 10.0f);
+        }
+
+        pos += snprintf(buf + pos, 65536 - pos,
+            "],\"complete\":%s,\"error\":\"%s\",\"measurements\":[",
+            dr->complete ? "true" : "false", dr->error);
+
+        for (int m = 0; m < dr->num_measurements; m++) {
+            diag_measurement_t *meas = &dr->measurements[m];
+            if (m > 0) pos += snprintf(buf + pos, 65536 - pos, ",");
+            pos += snprintf(buf + pos, 65536 - pos,
+                "{\"freq\":%d,\"sr\":%d,\"pll\":%s,"
+                "\"noise\":%.1f,\"dc_offset\":%.2f,\"iq_spread\":%.2f}",
+                meas->freq_hz, meas->sample_rate,
+                meas->pll_locked ? "true" : "false",
+                meas->noise_floor_db, meas->dc_offset, meas->iq_spread);
+        }
+
+        pos += snprintf(buf + pos, 65536 - pos, "]}");
+    }
+
+    pos += snprintf(buf + pos, 65536 - pos, "]}");
+
+    pthread_mutex_unlock(&DiagState.mutex);
+
+    http_send_json(fd, buf, pos);
+    free(buf);
+}
+
+static void api_post_diagnostics_start(int fd)
+{
+    pthread_mutex_lock(&DiagState.mutex);
+    if (DiagState.running) {
+        pthread_mutex_unlock(&DiagState.mutex);
+        http_send(fd, 409, "application/json",
+            "{\"ok\":false,\"error\":\"Diagnostics already running\"}", 51);
+        return;
+    }
+
+    // Reset state
+    memset(&DiagState.devices, 0, sizeof(DiagState.devices));
+    DiagState.running = true;
+    DiagState.complete = false;
+    DiagState.device_count = 0;
+    DiagState.librtlsdr_version[0] = '\0';
+    pthread_mutex_unlock(&DiagState.mutex);
+
+#ifdef ENABLE_RTLSDR
+    pthread_create(&DiagState.thread, NULL, diag_thread_entry, NULL);
+    pthread_detach(DiagState.thread);
+    http_send(fd, 200, "application/json",
+        "{\"ok\":true,\"message\":\"Diagnostics started\"}", 43);
+#else
+    pthread_mutex_lock(&DiagState.mutex);
+    DiagState.running = false;
+    DiagState.complete = true;
+    pthread_mutex_unlock(&DiagState.mutex);
+    http_send(fd, 200, "application/json",
+        "{\"ok\":false,\"error\":\"RTLSDR not enabled\"}", 41);
+#endif
+}
+
 // ============================= Initialization ============================
 
 void panelInitConfig(void)
@@ -56,6 +438,7 @@ void panelInitConfig(void)
     snprintf(PanelState.html_dir, sizeof(PanelState.html_dir), "%s", PANEL_HTML_DIR);
     pthread_mutex_init(&PanelState.log_mutex, NULL);
     pthread_mutex_init(&PanelState.msg_mutex, NULL);
+    pthread_mutex_init(&DiagState.mutex, NULL);
 }
 
 // ============================= CLI Options ================================
@@ -478,6 +861,20 @@ static void panelApplyConfig(const char *body)
         WettersondeEnabled = json_get_bool(wetter, "enabled", WettersondeEnabled);
     }
 
+    // POCSAG decoder output toggle
+    const char *pocsag = json_find_obj(body, "sdr_pocsag");
+    if (pocsag) {
+        PocsagOutputEnabled = json_get_bool(pocsag, "enabled", PocsagOutputEnabled) ? 1 : 0;
+        panelLog("Panel: POCSAG output %s", PocsagOutputEnabled ? "enabled" : "disabled");
+    }
+
+    // GSM decoder output toggle
+    const char *gsm = json_find_obj(body, "sdr_gsm");
+    if (gsm) {
+        GsmOutputEnabled = json_get_bool(gsm, "enabled", GsmOutputEnabled) ? 1 : 0;
+        panelLog("Panel: GSM output %s", GsmOutputEnabled ? "enabled" : "disabled");
+    }
+
     panelLog("Panel: configuration applied at runtime (no restart)");
 }
 
@@ -752,6 +1149,62 @@ static void api_get_config(int fd)
             sonde_active ? "true" : "false");
     }
 
+    // POCSAG SDR status (derived from SdrManager)
+    {
+        int pocsag_active = 0;
+        double pocsag_freq = 466.150;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_POCSAG) {
+                pocsag_active = 1;
+                pocsag_freq = SdrManager.receivers[i].config.freq / 1e6;
+                break;
+            }
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "\"sdr_pocsag\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\"},\n",
+            pocsag_active ? "true" : "false",
+            PocsagOutputEnabled ? "true" : "false",
+            pocsag_freq);
+    }
+
+    // GSM SDR status (derived from SdrManager)
+    {
+        int gsm_active = 0;
+        double gsm_freq = 935.200;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_GSM) {
+                gsm_active = 1;
+                gsm_freq = SdrManager.receivers[i].config.freq / 1e6;
+                break;
+            }
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "\"sdr_gsm\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\",\"cells\":%d},\n",
+            gsm_active ? "true" : "false",
+            GsmOutputEnabled ? "true" : "false",
+            gsm_freq,
+            gsmTrackerActiveCount());
+    }
+
+    // LTE SDR status
+    {
+        int lte_active = 0;
+        double lte_freq = 806.0;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_LTE) {
+                lte_active = 1;
+                lte_freq = SdrManager.receivers[i].config.freq / 1e6;
+                break;
+            }
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "\"sdr_lte\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\",\"hop\":true,\"cells\":%d},\n",
+            lte_active ? "true" : "false",
+            LteOutputEnabled ? "true" : "false",
+            lte_freq,
+            lteTrackerCount());
+    }
+
     // Sonde feeds
     p += snprintf(p, (size_t)(end - p),
         "\"sondehub\":{\"enabled\":%s,\"callsign\":\"%s\"},\n",
@@ -990,6 +1443,32 @@ static void api_get_aircraft(int fd)
 
     http_send_json(fd, data, (int)nread);
     free(data);
+}
+
+// ============================= API: GET /api/gsm =========================
+
+static void api_get_gsm(int fd)
+{
+    char *json = gsmTrackerToJSON();
+    if (!json) {
+        http_send(fd, 500, "text/plain", "OOM", 3);
+        return;
+    }
+    http_send_json(fd, json, (int)strlen(json));
+    free(json);
+}
+
+// ============================= API: GET /api/lte =========================
+
+static void api_get_lte(int fd)
+{
+    char *json = lteTrackerToJSON();
+    if (!json) {
+        http_send(fd, 500, "text/plain", "OOM", 3);
+        return;
+    }
+    http_send_json(fd, json, (int)strlen(json));
+    free(json);
 }
 
 // ============================= API: GET /api/connections ==================
@@ -1507,22 +1986,22 @@ static const char *tuner_freq_range(int type) {
 
 static void api_get_receivers(int fd)
 {
-    char *buf = malloc(16384);
+    char *buf = malloc(32768);
     if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
     int pos = 0;
 
-    pos += snprintf(buf + pos, 16384 - pos, "{\"receivers\":[");
+    pos += snprintf(buf + pos, 32768 - pos, "{\"receivers\":[");
 
     for (int i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
-        if (i > 0) pos += snprintf(buf + pos, 16384 - pos, ",");
-        pos += snprintf(buf + pos, 16384 - pos,
+        if (i > 0) pos += snprintf(buf + pos, 32768 - pos, ",");
+        pos += snprintf(buf + pos, 32768 - pos,
             "{\"id\":%d,\"serial\":\"%.63s\",\"serial_actual\":\"%.63s\","
             "\"role\":\"%s\",\"state\":\"%s\","
             "\"freq\":%d,\"gain\":%.1f,\"ppm\":%d,"
             "\"manufacturer\":\"%.63s\",\"product\":\"%.63s\","
             "\"tuner\":\"%s\",\"freq_range\":\"%s\","
-            "\"dev_index\":%d}",
+            "\"dev_index\":%d,\"gain_list\":[",
             rx->id, rx->config.serial, rx->serial_actual,
             sdrRoleName(rx->config.role), rxStateName(rx->state),
             rx->config.freq, rx->config.gain, rx->config.ppm_error,
@@ -1530,9 +2009,18 @@ static void api_get_receivers(int fd)
             rx->rtl.tuner_type >= 0 ? tuner_name(rx->rtl.tuner_type) : "unknown",
             rx->rtl.tuner_type >= 0 ? tuner_freq_range(rx->rtl.tuner_type) : "unknown",
             rx->dev_index);
+
+        // Emit supported gain values in dB
+        if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
+            for (int g = 0; g < rx->rtl.gain_steps; g++) {
+                if (g > 0) pos += snprintf(buf + pos, 32768 - pos, ",");
+                pos += snprintf(buf + pos, 32768 - pos, "%.1f", rx->rtl.gains[g] / 10.0);
+            }
+        }
+        pos += snprintf(buf + pos, 32768 - pos, "]}");
     }
 
-    pos += snprintf(buf + pos, 16384 - pos, "],\"count\":%d,\"max\":%d}",
+    pos += snprintf(buf + pos, 32768 - pos, "],\"count\":%d,\"max\":%d}",
                     SdrManager.count, MAX_SDR_RECEIVERS);
 
     http_send_json(fd, buf, pos);
@@ -1543,12 +2031,107 @@ static void rx_set_freq_for_role(rx_config_t *cfg)
 {
     switch (cfg->role) {
         case SDR_ROLE_ADSB:       cfg->freq = 1090000000; cfg->sample_rate = 2400000; break;
-        case SDR_ROLE_FLARM:      cfg->freq = 868400000;  cfg->sample_rate = 1600000; break;
+        case SDR_ROLE_FLARM:      cfg->freq = 868300000;  cfg->sample_rate = 1600000; break;
         case SDR_ROLE_ACARS:      cfg->freq = 131550000;  cfg->sample_rate = 2400000; break;
         case SDR_ROLE_VDL2:       cfg->freq = 136975000;  cfg->sample_rate = 2400000; break;
         case SDR_ROLE_RADIOSONDE: cfg->freq = 403000000;  cfg->sample_rate = 2400000; break;
+        case SDR_ROLE_POCSAG:     cfg->freq = 466150000;  cfg->sample_rate = POCSAG_SAMPLE_RATE; break;
+        case SDR_ROLE_GSM:        cfg->freq = 947000000;  cfg->sample_rate = 1000000;  break;
+        case SDR_ROLE_LTE:        cfg->freq = LTE_DEFAULT_FREQ; cfg->sample_rate = LTE_SAMPLE_RATE; break;
         default:                  cfg->freq = 0;          cfg->sample_rate = 0;       break;
     }
+}
+
+// ============================= API: GET /api/stats/quick =================
+// Returns a quick snapshot of demod counters + per-receiver IQ noise for auto-gain sweep.
+static void api_get_stats_quick(int fd)
+{
+    // Sum alltime + current for monotonically-increasing totals
+    uint32_t demod_total = 0;
+    for (int i = 0; i <= MODES_MAX_BITERRORS; i++) {
+        demod_total += Modes.stats_alltime.demod_accepted[i];
+        demod_total += Modes.stats_current.demod_accepted[i];
+    }
+    uint32_t strong = Modes.stats_alltime.strong_signal_count
+                    + Modes.stats_current.strong_signal_count;
+
+    char buf[2048];
+    char *p = buf;
+    char *end = buf + sizeof(buf);
+    p += snprintf(p, (size_t)(end - p),
+        "{\"demod_total\":%u,\"strong_signals\":%u,\"rx_noise\":[", demod_total, strong);
+
+    for (int i = 0; i < SdrManager.count && p < end - 128; i++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[i];
+        uint64_t sum = __atomic_load_n(&rx->ag_iq_sum, __ATOMIC_RELAXED);
+        uint64_t cnt = __atomic_load_n(&rx->ag_iq_count, __ATOMIC_RELAXED);
+        p += snprintf(p, (size_t)(end - p),
+            "%s{\"serial\":\"%s\",\"iq_sum\":%llu,\"iq_count\":%llu}",
+            i ? "," : "", rx->serial_actual,
+            (unsigned long long)sum, (unsigned long long)cnt);
+    }
+
+    p += snprintf(p, (size_t)(end - p), "]}");
+    http_send_json(fd, buf, (int)(p - buf));
+}
+
+// ============================= API: POST /api/receivers/setgain ==========
+// Fast gain change on a running receiver (no stop/restart).
+// Body: {"serial":"00000101","step":15}
+static void api_post_setgain(int fd, const char *body)
+{
+    char serial[64] = {0};
+    int step = -1;
+
+    const char *p;
+    if ((p = strstr(body, "\"serial\"")) != NULL) {
+        p = strchr(p + 8, '"'); if (p) { p++; const char *e = strchr(p, '"');
+        if (e && (e - p) < 63) { memcpy(serial, p, e - p); serial[e - p] = '\0'; }
+        }
+    }
+    if ((p = strstr(body, "\"step\"")) != NULL) {
+        p = strchr(p + 6, ':'); if (p) step = atoi(p + 1);
+    }
+
+    if (!serial[0] || step < 0) {
+        http_send(fd, 400, "application/json",
+            "{\"ok\":false,\"error\":\"missing serial or step\"}", 45);
+        return;
+    }
+
+    int idx = sdrManagerFindBySerial(serial);
+    if (idx < 0) {
+        http_send(fd, 404, "application/json",
+            "{\"ok\":false,\"error\":\"receiver not found\"}", 40);
+        return;
+    }
+
+    sdr_receiver_t *rx = &SdrManager.receivers[idx];
+    if (rx->state != RX_STATE_RUNNING) {
+        http_send(fd, 400, "application/json",
+            "{\"ok\":false,\"error\":\"receiver not running\"}", 43);
+        return;
+    }
+    if (!rx->rtl.gains || rx->rtl.gain_steps < 2) {
+        http_send(fd, 400, "application/json",
+            "{\"ok\":false,\"error\":\"no gain table\"}", 35);
+        return;
+    }
+
+    int result = rxSetGain(rx, step);
+    if (result < 0) {
+        http_send(fd, 500, "application/json",
+            "{\"ok\":false,\"error\":\"gain change failed\"}", 41);
+        return;
+    }
+
+    float gain_db = rx->rtl.gains[result] / 10.0f;
+    rx->config.gain = gain_db;
+
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"gain_db\":%.1f,\"step\":%d}", gain_db, result);
+    http_send_json(fd, buf, len);
 }
 
 static void api_post_receiver_assign(int fd, const char *body)
@@ -1591,6 +2174,9 @@ static void api_post_receiver_assign(int fd, const char *body)
     else if (!strcasecmp(role_str, "acars")) role = SDR_ROLE_ACARS;
     else if (!strcasecmp(role_str, "vdl2")) role = SDR_ROLE_VDL2;
     else if (!strcasecmp(role_str, "radiosonde")) role = SDR_ROLE_RADIOSONDE;
+    else if (!strcasecmp(role_str, "pocsag")) role = SDR_ROLE_POCSAG;
+    else if (!strcasecmp(role_str, "gsm")) role = SDR_ROLE_GSM;
+    else if (!strcasecmp(role_str, "lte")) role = SDR_ROLE_LTE;
 
     // Check if this serial is already managed
     int idx = sdrManagerFindBySerial(serial);
@@ -1750,17 +2336,364 @@ static void api_get_devices(int fd)
     free(buf);
 }
 
+// ============================= GSM Cells Page ============================
+
+static void serve_gsm_page(int fd)
+{
+    const char *html =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>GSM Cells - dump1090-gg</title>"
+        "<style>"
+        ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
+        "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
+        "nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}"
+        "nav h1{font-size:18px;color:var(--accent);white-space:nowrap;margin:0}"
+        ".tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}"
+        ".tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}"
+        ".tabs a:hover{background:var(--hover);color:var(--text)}"
+        ".tabs a.active{background:var(--accent);color:#000;font-weight:600}"
+        ".main{padding:20px;max-width:1600px;margin:0 auto}"
+        "h2{color:var(--accent);margin-top:0}"
+        "table{border-collapse:collapse;width:100%;font-size:13px}"
+        "th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:42px;z-index:10;cursor:pointer;user-select:none}"
+        "td{padding:6px 8px;border-bottom:1px solid var(--border)}"
+        "tr:hover td{background:var(--hover)}"
+        ".badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}"
+        ".badge-ok{background:#003322;color:var(--ok)}"
+        ".badge-warn{background:#332200;color:var(--warn)}"
+        ".badge-err{background:#330000;color:var(--danger)}"
+        ".badge-info{background:#002244;color:var(--link)}"
+        ".card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}"
+        ".stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px}"
+        ".stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}"
+        ".stat .val{font-size:24px;font-weight:700;color:var(--accent)}"
+        ".stat .lbl{font-size:11px;color:var(--dim);margin-top:4px}"
+        ".no-gsm{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:40px;text-align:center;color:var(--dim)}"
+        ".no-gsm h3{color:var(--accent);margin-bottom:8px}"
+        ".toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}"
+        ".btn{padding:6px 14px;border:1px solid var(--accent);border-radius:4px;cursor:pointer;font-size:13px;background:var(--head);color:var(--accent)}"
+        ".btn:hover{background:var(--accent);color:#000}"
+        "code{background:var(--input-bg);padding:1px 5px;border-radius:3px;font-size:12px}"
+        ".cb-text{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:12px}"
+        "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
+        "</style></head><body>"
+        "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
+        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/status.html'>&#x1f4e1; Status</a>"
+        "<a href='/connections.html'>&#x1f50c; Connections</a>"
+        "<a href='/logs.html'>&#x1f4cb; Logs</a>"
+        "<a href='/messages.html'>&#x1f4e8; Messages</a>"
+        "<a href='/aircraft.html'>&#x2708;&#xfe0f; Aircraft</a>"
+        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
+        "<a class='active' href='/gsm.html'>&#x1f4f6; GSM</a>"
+        "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
+        "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
+        "<div class='main'>"
+        "<h2>&#x1f4f6; GSM Cell Monitor</h2>"
+        "<div class='toolbar'>"
+        "<span id='cell-count' style='font-size:16px;font-weight:600;color:var(--accent)'></span>"
+        "<span id='update-time' style='color:var(--dim);margin-left:16px;font-size:12px'></span>"
+        "<button class='btn' onclick='load()' style='margin-left:auto'>&#x21bb; Refresh</button>"
+        "</div>"
+        "<div id='content'><p style='color:var(--dim)'>Loading...</p></div>"
+
+        "<script>"
+        "var sortKey='mcc',sortDir=1,cellData=[];"
+        ""
+        "function load(){"
+        "  fetch('/api/config').then(r=>r.json()).then(cfg=>{"
+        "    var gsm=cfg.sdr_gsm||{};"
+        "    if(!gsm.active){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-gsm\"><h3>&#x1f4f6; GSM Scanner Not Active</h3>'"
+        "        +'<p>No SDR device is configured for GSM reception.</p>'"
+        "        +'<p style=\"margin-top:12px\">Go to <a href=\"/devices.html\">Devices</a> and assign an RTL-SDR dongle to the <strong>GSM (935 MHz)</strong> role.</p></div>';"
+        "      document.getElementById('cell-count').textContent='';"
+        "      return;"
+        "    }"
+        "    fetch('/api/gsm').then(r=>r.json()).then(data=>render(data));"
+        "  });"
+        "}"
+        ""
+        "function render(data){"
+        "  cellData=data.cells||[];"
+        "  document.getElementById('cell-count').textContent=cellData.length+' cell'+(cellData.length!==1?'s':'');"
+        "  document.getElementById('update-time').textContent='Updated: '+new Date().toLocaleTimeString();"
+        "  if(!cellData.length){"
+        "    document.getElementById('content').innerHTML='<div class=\"no-gsm\"><h3>Scanning...</h3><p>GSM decoder is active but no cells have been detected yet.</p><p style=\"color:var(--dim);font-size:12px;margin-top:8px\">The decoder searches for an FCCH tone. Cells appear once FCCH is found.</p></div>';"
+        "    return;"
+        "  }"
+        ""
+        "  /* Stats summary */"
+        "  var totalFcch=0,totalCcch=0,totalCb=0,nIdentified=0,nFcchOnly=0;"
+        "  cellData.forEach(c=>{"
+        "    totalFcch+=c.bcch;totalCcch+=c.ccch;totalCb+=c.cb;"
+        "    if(c.mcc>0) nIdentified++; else nFcchOnly++;"
+        "  });"
+        "  var html='<div class=\"stats\">';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+cellData.length+'</div><div class=\"lbl\">Cells Found</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+nIdentified+' / '+nFcchOnly+'</div><div class=\"lbl\">Identified / FCCH-only</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+totalFcch+'</div><div class=\"lbl\">FCCH Detections</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+totalCb+'</div><div class=\"lbl\">Cell Broadcasts</div></div>';"
+        "  html+='</div>';"
+        ""
+        "  /* Sort */"
+        "  cellData.sort((a,b)=>{"
+        "    var va=a[sortKey],vb=b[sortKey];"
+        "    if(typeof va==='string') return sortDir*va.localeCompare(vb);"
+        "    return sortDir*((va||0)-(vb||0));"
+        "  });"
+        ""
+        "  /* Table */"
+        "  html+='<table><thead><tr>';"
+        "  var cols=[{k:'mcc',l:'MCC'},{k:'mnc',l:'MNC'},{k:'lac',l:'LAC'},{k:'cid',l:'Cell ID'},"
+        "    {k:'arfcn',l:'ARFCN'},{k:'freq_mhz',l:'Freq (MHz)'},{k:'bsic',l:'BSIC'},"
+        "    {k:'sync',l:'Sync'},{k:'t3212',l:'T3212'},{k:'cell_barred',l:'Barred'},"
+        "    {k:'bcch',l:'FCCH'},{k:'ccch',l:'CCCH'},{k:'cb',l:'CB'},"
+        "    {k:'freq_offset',l:'F.Offset'},{k:'last_cb_text',l:'Last CB Text'},"
+        "    {k:'age',l:'Age'}];"
+        "  cols.forEach(c=>{"
+        "    var arrow=sortKey===c.k?(sortDir>0?' &#x25b2;':' &#x25bc;'):'';"
+        "    html+='<th onclick=\"sortBy(\\''+c.k+'\\')\">' +c.l+arrow+'</th>';"
+        "  });"
+        "  html+='</tr></thead><tbody>';"
+        ""
+        "  cellData.forEach(c=>{"
+        "    var syncCls=c.sync==='locked'?'badge-ok':c.sync==='sch'?'badge-warn':'badge-info';"
+        "    var barCls=c.cell_barred?'badge-err':'badge-ok';"
+        "    var ageCls=c.age>60?'badge-warn':c.stale?'badge-err':'badge-ok';"
+        "    var fcchOnly=c.mcc===0;"
+        "    html+='<tr'+(c.stale?' style=\"opacity:0.5\"':'')+'>';"
+        "    html+='<td><strong>'+(fcchOnly?'&mdash;':c.mcc)+'</strong></td>';"
+        "    html+='<td>'+(fcchOnly?'&mdash;':(''+c.mnc).padStart(2,'0'))+'</td>';"
+        "    html+='<td>'+(fcchOnly?'&mdash;':c.lac)+'</td>';"
+        "    html+='<td>'+(fcchOnly?'&mdash;':'<code>'+c.cid+'</code>')+'</td>';"
+        "    html+='<td>'+c.arfcn+'</td>';"
+        "    html+='<td>'+c.freq_mhz.toFixed(3)+'</td>';"
+        "    html+='<td>'+(fcchOnly?'&mdash;':c.bsic)+'</td>';"
+        "    html+='<td><span class=\"badge '+syncCls+'\">'+c.sync+'</span></td>';"
+        "    html+='<td>'+(fcchOnly?'&mdash;':c.t3212)+'</td>';"
+        "    html+='<td>'+(fcchOnly?'&mdash;':'<span class=\"badge '+(c.cell_barred?'badge-err':'badge-ok')+'\">'+(c.cell_barred?'YES':'no')+'</span>')+'</td>';"
+        "    html+='<td>'+c.bcch+'</td>';"
+        "    html+='<td>'+c.ccch+'</td>';"
+        "    html+='<td>'+c.cb+'</td>';"
+        "    var ppm=c.freq_mhz>0?(c.freq_offset/(c.freq_mhz*1e6)*1e6).toFixed(2):'';"
+        "    html+='<td>'+(c.freq_offset>=0?'+':'')+c.freq_offset.toFixed(1)+' Hz'+(ppm?' ('+ppm+' ppm)':'')+'</td>';"
+        "    html+='<td class=\"cb-text\" title=\"'+(c.last_cb_text||'')+'\">'+(c.last_cb_text||'&mdash;')+'</td>';"
+        "    html+='<td><span class=\"badge '+ageCls+'\">'+c.age.toFixed(0)+'s</span></td>';"
+        "    html+='</tr>';"
+        "  });"
+        "  html+='</tbody></table>';"
+        "  document.getElementById('content').innerHTML=html;"
+        "}"
+        ""
+        "function sortBy(key){"
+        "  if(sortKey===key) sortDir=-sortDir;"
+        "  else{sortKey=key;sortDir=1;}"
+        "  if(cellData.length) render({cells:cellData});"
+        "}"
+        ""
+        "load();"
+        "setInterval(load,5000);"  // auto-refresh every 5s
+        ""
+        // Fetch version
+        "fetch('/api/status').then(r=>r.json()).then(s=>{"
+        "  var v=document.getElementById('ver-badge');"
+        "  if(v&&s.version) v.textContent='v'+s.version;"
+        "}).catch(()=>{});"
+        "</script></div></body></html>";
+
+    http_send(fd, 200, "text/html", html, (int)strlen(html));
+}
+
+static void serve_lte_page(int fd)
+{
+    const char *html =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>LTE Cells - dump1090-gg</title>"
+        "<style>"
+        ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
+        "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
+        "nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}"
+        "nav h1{font-size:18px;color:var(--accent);white-space:nowrap;margin:0}"
+        ".tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}"
+        ".tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}"
+        ".tabs a:hover{background:var(--hover);color:var(--text)}"
+        ".tabs a.active{background:var(--accent);color:#000;font-weight:600}"
+        ".main{padding:20px;max-width:1600px;margin:0 auto}"
+        "h2{color:var(--accent);margin-top:0}"
+        "table{border-collapse:collapse;width:100%;font-size:13px}"
+        "th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:42px;z-index:10;cursor:pointer;user-select:none}"
+        "td{padding:6px 8px;border-bottom:1px solid var(--border)}"
+        "tr:hover td{background:var(--hover)}"
+        ".badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}"
+        ".badge-ok{background:#003322;color:var(--ok)}"
+        ".badge-warn{background:#332200;color:var(--warn)}"
+        ".badge-err{background:#330000;color:var(--danger)}"
+        ".badge-info{background:#002244;color:var(--link)}"
+        ".card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}"
+        ".stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px}"
+        ".stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}"
+        ".stat .val{font-size:24px;font-weight:700;color:var(--accent)}"
+        ".stat .lbl{font-size:11px;color:var(--dim);margin-top:4px}"
+        ".no-lte{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:40px;text-align:center;color:var(--dim)}"
+        ".no-lte h3{color:var(--accent);margin-bottom:8px}"
+        ".toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}"
+        ".btn{padding:6px 14px;border:1px solid var(--accent);border-radius:4px;cursor:pointer;font-size:13px;background:var(--head);color:var(--accent)}"
+        ".btn:hover{background:var(--accent);color:#000}"
+        "code{background:var(--input-bg);padding:1px 5px;border-radius:3px;font-size:12px}"
+        "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
+        "</style></head><body>"
+        "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
+        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/status.html'>&#x1f4e1; Status</a>"
+        "<a href='/connections.html'>&#x1f50c; Connections</a>"
+        "<a href='/logs.html'>&#x1f4cb; Logs</a>"
+        "<a href='/messages.html'>&#x1f4e8; Messages</a>"
+        "<a href='/aircraft.html'>&#x2708;&#xfe0f; Aircraft</a>"
+        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
+        "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
+        "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
+        "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
+        "<div class='main'>"
+        "<h2>&#x1f4f6; LTE Cell Scanner</h2>"
+        "<div class='toolbar'>"
+        "<span id='cell-count' style='font-size:16px;font-weight:600;color:var(--accent)'></span>"
+        "<span id='update-time' style='color:var(--dim);margin-left:16px;font-size:12px'></span>"
+        "<button class='btn' onclick='load()' style='margin-left:auto'>&#x21bb; Refresh</button>"
+        "</div>"
+        "<div id='content'><p style='color:var(--dim)'>Loading...</p></div>"
+
+        "<script>"
+        "var sortKey='pci',sortDir=1,cellData=[];"
+        ""
+        "function load(){"
+        "  fetch('/api/config').then(r=>r.json()).then(cfg=>{"
+        "    var lte=cfg.sdr_lte||{};"
+        "    if(!lte.active){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-lte\"><h3>&#x1f4f6; LTE Scanner Not Active</h3>'"
+        "        +'<p>No SDR device is configured for LTE reception.</p>'"
+        "        +'<p style=\"margin-top:12px\">Go to <a href=\"/devices.html\">Devices</a> and assign an RTL-SDR dongle to the <strong>LTE (800 MHz)</strong> role.</p></div>';"
+        "      document.getElementById('cell-count').textContent='';"
+        "      return;"
+        "    }"
+        "    fetch('/api/lte').then(r=>r.json()).then(data=>render(data));"
+        "  });"
+        "}"
+        ""
+        "function render(data){"
+        "  cellData=data.cells||[];"
+        "  document.getElementById('cell-count').textContent=cellData.length+' cell'+(cellData.length!==1?'s':'');"
+        "  document.getElementById('update-time').textContent='Updated: '+new Date().toLocaleTimeString();"
+        "  if(!cellData.length){"
+        "    document.getElementById('content').innerHTML='<div class=\"no-lte\"><h3>Scanning...</h3><p>LTE decoder is active but no cells have been detected yet.</p><p style=\"color:var(--dim);font-size:12px;margin-top:8px\">The decoder correlates PSS (Zadoff-Chu) sequences. Cells appear once PSS/SSS are found.</p></div>';"
+        "    return;"
+        "  }"
+        ""
+        "  /* Stats summary */"
+        "  var nPss=0,nSss=0,nMib=0,nSib=0;"
+        "  cellData.forEach(c=>{"
+        "    nPss+=c.pss_count||0;nSss+=c.sss_count||0;nMib+=c.mib_count||0;nSib+=c.sib1_count||0;"
+        "  });"
+        "  var html='<div class=\"stats\">';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+cellData.length+'</div><div class=\"lbl\">Cells Found</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+nPss+'</div><div class=\"lbl\">PSS Detections</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+nMib+'</div><div class=\"lbl\">MIB Decoded</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+nSib+'</div><div class=\"lbl\">SIB1 Decoded</div></div>';"
+        "  html+='</div>';"
+        ""
+        "  /* Sort */"
+        "  cellData.sort((a,b)=>{"
+        "    var va=a[sortKey],vb=b[sortKey];"
+        "    if(typeof va==='string') return sortDir*va.localeCompare(vb);"
+        "    return sortDir*((va||0)-(vb||0));"
+        "  });"
+        ""
+        "  /* Table */"
+        "  html+='<table><thead><tr>';"
+        "  var cols=[{k:'pci',l:'PCI'},{k:'operator',l:'Operator'},{k:'band',l:'Band'},"
+        "    {k:'freq',l:'Freq (MHz)'},{k:'earfcn',l:'EARFCN'},"
+        "    {k:'rsrp',l:'RSRP (dBFS)'},{k:'snr',l:'SNR (dB)'},{k:'freq_offset',l:'F.Offset (Hz)'},"
+        "    {k:'sync',l:'Sync Level'},{k:'bw',l:'Bandwidth'},{k:'sfn',l:'SFN'},"
+        "    {k:'mcc',l:'MCC'},{k:'mnc',l:'MNC'},{k:'tac',l:'TAC'},{k:'cell_id',l:'Cell ID'},"
+        "    {k:'location',l:'Location'},{k:'age',l:'Age'}];"
+        "  cols.forEach(c=>{"
+        "    var arrow=sortKey===c.k?(sortDir>0?' &#x25b2;':' &#x25bc;'):'';"
+        "    html+='<th onclick=\"sortBy(\\''+c.k+'\\')\">' +c.l+arrow+'</th>';"
+        "  });"
+        "  html+='</tr></thead><tbody>';"
+        ""
+        "  cellData.forEach(c=>{"
+        "    var syncCls=c.sync==='SIB1'?'badge-ok':c.sync==='MIB'?'badge-ok':c.sync==='SSS'?'badge-warn':'badge-info';"
+        "    var mib=c.mib||{};"
+        "    var sib=c.sib1||{};"
+        "    var db=c.celldb||{};"
+        "    var mcc=sib.mcc||db.mcc||'';"
+        "    var mnc=sib.mnc||db.mnc||'';"
+        "    var tac=sib.tac||db.tac||'';"
+        "    var cid=sib.cell_id||db.cell_id||'';"
+        "    var eid=db.enodeb_id||'';"
+        "    var loc=(db.lat&&db.lon)?db.lat.toFixed(4)+', '+db.lon.toFixed(4):'';"
+        "    html+='<tr>';"
+        "    html+='<td><strong>'+c.pci+'</strong></td>';"
+        "    html+='<td>'+(c.operator||'&mdash;')+'</td>';"
+        "    html+='<td>'+c.band+'</td>';"
+        "    html+='<td>'+(c.freq/1e6).toFixed(3)+'</td>';"
+        "    html+='<td>'+c.earfcn+'</td>';"
+        "    html+='<td>'+c.rsrp.toFixed(1)+'</td>';"
+        "    html+='<td>'+c.snr.toFixed(1)+'</td>';"
+        "    html+='<td>'+(c.freq_offset>=0?'+':'')+c.freq_offset.toFixed(1)+'</td>';"
+        "    html+='<td><span class=\"badge '+syncCls+'\">'+c.sync+'</span></td>';"
+        "    html+='<td>'+(mib.bw||'&mdash;')+'</td>';"
+        "    html+='<td>'+(mib.sfn!==undefined?mib.sfn:'&mdash;')+'</td>';"
+        "    html+='<td>'+(mcc||'&mdash;')+'</td>';"
+        "    html+='<td>'+(mnc||'&mdash;')+'</td>';"
+        "    html+='<td>'+(tac?'0x'+tac.toString(16):'&mdash;')+'</td>';"
+        "    html+='<td>'+(cid?'<code>'+cid.toString(16).toUpperCase()+'</code> (eNB '+eid+')':'&mdash;')+'</td>';"
+        "    html+='<td>'+(loc?'<a href=\"https://www.google.com/maps?q='+db.lat+','+db.lon+'\" target=\"_blank\">'+loc+'</a>':'&mdash;')+'</td>';"
+        "    html+='<td><span class=\"badge '+(c.age>60?'badge-warn':'badge-ok')+'\">'+c.age+'s</span></td>';"
+        "    html+='</tr>';"
+        "  });"
+        "  html+='</tbody></table>';"
+        "  document.getElementById('content').innerHTML=html;"
+        "}"
+        ""
+        "function sortBy(key){"
+        "  if(sortKey===key) sortDir=-sortDir;"
+        "  else{sortKey=key;sortDir=1;}"
+        "  if(cellData.length) render({cells:cellData});"
+        "}"
+        ""
+        "load();"
+        "setInterval(load,5000);"
+        ""
+        "fetch('/api/status').then(r=>r.json()).then(s=>{"
+        "  var v=document.getElementById('ver-badge');"
+        "  if(v&&s.version) v.textContent='v'+s.version;"
+        "}).catch(()=>{});"
+        "</script></div></body></html>";
+
+    http_send(fd, 200, "text/html", html, (int)strlen(html));
+}
+
 static void serve_devices_page(int fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<title>SDR Devices - dump1090-gg</title>"
         "<style>"
-        ":root{--bg:#0a0a1a;--head:#0d0d1f;--border:#1a1a3a;--accent:#4fc3f7;--text:#e0e0e0;--dim:#888;--hover:rgba(79,195,247,0.1)}"
+        ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
         "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
         "nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}"
         "nav h1{font-size:18px;color:var(--accent);white-space:nowrap;margin:0}"
-        ".tabs{display:flex;gap:4px;flex-wrap:wrap}"
+        ".tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}"
         ".tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}"
         ".tabs a:hover{background:var(--hover);color:var(--text)}"
         ".tabs a.active{background:var(--accent);color:#000;font-weight:600}"
@@ -1788,9 +2721,11 @@ static void serve_devices_page(int fd)
         ".btn-apply{background:#1a3a1a;color:#66bb6a;border-color:#66bb6a}"
         ".btn-apply:hover{background:#66bb6a;color:#0a0a1a}"
         ".btn-apply:disabled{opacity:0.4;cursor:not-allowed}"
+        ".btn-auto{background:#2a1a0a;color:#ff9800;border-color:#ff9800}"
+        ".btn-auto:hover{background:#ff9800;color:#0a0a1a}"
         "select{background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:5px 8px;border-radius:4px;font-size:0.95em;min-width:100px}"
         "select:focus{border-color:#4fc3f7;outline:none}"
-        "input.gain{background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:5px 8px;border-radius:4px;width:60px;text-align:center}"
+        "select.gain{background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:5px 8px;border-radius:4px;min-width:70px;text-align:center}"
         ".status-msg{margin:10px 0;padding:10px;border-radius:4px;display:none}"
         ".status-ok{background:#1a3a1a;border:1px solid #66bb6a;color:#66bb6a;display:block}"
         ".status-err{background:#3a1a1a;border:1px solid #f44336;color:#f44336;display:block}"
@@ -1803,7 +2738,7 @@ static void serve_devices_page(int fd)
         ".state-error{color:#f44336}"
         ".state-stopping{color:#ff9800}"
         "</style></head><body>"
-        "<nav><h1>&#x2708; dump1090-gg</h1><div class='tabs'>"
+        "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
         "<a href='/'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
@@ -1811,7 +2746,12 @@ static void serve_devices_page(int fd)
         "<a href='/messages.html'>&#x1f4e8; Messages</a>"
         "<a href='/aircraft.html'>&#x2708;&#xfe0f; Aircraft</a>"
         "<a class='active' href='/devices.html'>&#x1f4fb; Devices</a>"
-        "</div></nav>"
+        "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
+        "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
+        "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
         "<div class='main'>"
         "<h2>&#x1f50c; SDR Devices</h2>"
         "<p style='color:#888;margin-bottom:15px'>Assign roles to RTL-SDR dongles &mdash; choose ADS-B, FLARM, or None</p>"
@@ -1836,6 +2776,79 @@ static void serve_devices_page(int fd)
         "showStatus(d.message||'Done',d.ok);"
         "setTimeout(load,500);"
         "}).catch(e=>showStatus('Error: '+e,false));"
+        "}"
+        ""
+        "var _agRunning=false;"
+        "function _rxNoise(stats,serial){"
+        "if(!stats.rx_noise)return null;"
+        "for(var i=0;i<stats.rx_noise.length;i++)"
+        "if(stats.rx_noise[i].serial==serial)return stats.rx_noise[i];"
+        "return null;}"
+        ""
+        "async function autoGain(serial){"
+        "if(_agRunning){showStatus('Auto-gain already running',false);return;}"
+        "var rx=getRxForSerial(serial);"
+        "if(!rx||!rx.gain_list||rx.gain_list.length<2){showStatus('No gain table for '+serial,false);return;}"
+        "_agRunning=true;"
+        "var isAdsb=(rx.role=='adsb');"
+        "var btn=document.getElementById('ag_'+serial);"
+        "if(btn)btn.disabled=true;"
+        "var steps=rx.gain_list.length;"
+        "var results=[];"
+        "var bestStep=0,bestScore=-999;"
+        "showStatus('Auto-gain: testing '+steps+' gain steps for '+serial+'... ('+(isAdsb?'msg count':'noise floor')+')',true);"
+        ""
+        "for(var i=0;i<steps;i++){"
+        "if(btn)btn.textContent='\\u23f3 '+(i+1)+'/'+steps;"
+        "try{"
+        "await fetch('/api/receivers/setgain',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({serial:serial,step:i})});"
+        "var s1=await fetch('/api/stats/quick').then(r=>r.json());"
+        "await new Promise(r=>setTimeout(r,2000));"
+        "var s2=await fetch('/api/stats/quick').then(r=>r.json());"
+        ""
+        "if(isAdsb){"
+        "var msgs=s2.demod_total-s1.demod_total;"
+        "results.push({step:i,gain:rx.gain_list[i],msgs:msgs,noise:0});"
+        "if(msgs>bestScore){bestScore=msgs;bestStep=i;}"
+        "}else{"
+        "var n1=_rxNoise(s1,rx.serial_actual||serial);"
+        "var n2=_rxNoise(s2,rx.serial_actual||serial);"
+        "var noiseDb=-99;"
+        "if(n1&&n2&&(n2.iq_count-n1.iq_count)>0){"
+        "var dSum=n2.iq_sum-n1.iq_sum;"
+        "var dCnt=n2.iq_count-n1.iq_count;"
+        "var pwr=dSum/dCnt;"
+        "noiseDb=10*Math.log10(pwr/32768);"
+        "}"
+        "results.push({step:i,gain:rx.gain_list[i],msgs:0,noise:noiseDb});"
+        "if(noiseDb<-8&&i>=bestStep){bestScore=noiseDb;bestStep=i;}"
+        "}"
+        "}catch(e){results.push({step:i,gain:rx.gain_list[i],msgs:-1,noise:-99});}"
+        "}"
+        ""
+        "await fetch('/api/receivers/setgain',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({serial:serial,step:bestStep})});"
+        ""
+        "var gainSel=document.getElementById('gain_'+serial);"
+        "if(gainSel){"
+        "for(var j=0;j<gainSel.options.length;j++){"
+        "if(Math.abs(parseFloat(gainSel.options[j].value)-rx.gain_list[bestStep])<0.05){"
+        "gainSel.selectedIndex=j;break;}}"
+        "}"
+        ""
+        "var summary='Best: '+rx.gain_list[bestStep].toFixed(1)+' dB. ';"
+        "results.forEach(function(r){"
+        "summary+=r.gain.toFixed(1)+'=';"
+        "if(isAdsb)summary+=r.msgs+'msg ';"
+        "else summary+=r.noise.toFixed(1)+'dB ';"
+        "});"
+        "var el=document.getElementById('status');"
+        "el.textContent=summary;el.className='status-msg status-ok';"
+        "el.style.display='block';"
+        ""
+        "if(btn){btn.textContent='\\ud83d\\udd0d Auto';btn.disabled=false;}"
+        "_agRunning=false;"
         "}"
         ""
         "function load(){"
@@ -1891,9 +2904,26 @@ static void serve_devices_page(int fd)
         "h+='<option value=acars'+(curRole=='acars'?' selected':'')+'>&#x1f4e1; ACARS (131 MHz)</option>';"
         "h+='<option value=vdl2'+(curRole=='vdl2'?' selected':'')+'>&#x1f4e1; VDL2 (136 MHz)</option>';"
         "h+='<option value=radiosonde'+(curRole=='radiosonde'?' selected':'')+'>&#x1f388; Radiosonde (403 MHz)</option>';"
+        "h+='<option value=pocsag'+(curRole=='pocsag'?' selected':'')+'>&#x1f4df; POCSAG (466 MHz)</option>';"
+        "h+='<option value=gsm'+(curRole=='gsm'?' selected':'')+'>&#x1f4f6; GSM (935 MHz)</option>';"
+        "h+='<option value=lte'+(curRole=='lte'?' selected':'')+'>&#x1f4f6; LTE (800 MHz)</option>';"
         "h+='</select></td>';"
-        // Gain input
-        "h+='<td><input type=number class=gain id=\"'+gainId+'\" value=\"'+curGain.toFixed(1)+'\" step=0.1 min=-10 max=50></td>';"
+        // Gain dropdown - populated from receiver's gain_list
+        "var gainOpts='';"
+        "var gList=(rx&&rx.gain_list&&rx.gain_list.length>0)?rx.gain_list:null;"
+        "if(gList){"
+        "gList.forEach(function(g){"
+        "var sel=(Math.abs(g-curGain)<0.05)?' selected':'';"
+        "gainOpts+='<option value=\"'+g.toFixed(1)+'\"'+sel+'>'+g.toFixed(1)+'</option>';"
+        "});"
+        "}else{"
+        "gainOpts='<option value=\"'+curGain.toFixed(1)+'\">'+curGain.toFixed(1)+'</option>';"
+        "}"
+        "h+='<td style=\"white-space:nowrap\"><select class=gain id=\"'+gainId+'\">'+gainOpts+'</select>';"
+        "if(rx&&s.state=='running'){"
+        "h+=' <button id=\"ag_'+s.serial+'\" class=\"btn btn-apply\" style=\"border-color:#ff9800;color:#ff9800;padding:5px 8px\" onclick=\"autoGain(\\''+s.serial+'\\')\" title=\"Sweep all gain steps and pick the best\">&#x1f50d;</button>';"
+        "}"
+        "h+='</td>';"
         // Apply button
         "h+='<td><button class=\"btn btn-apply\" onclick=\"assign(\\''+s.serial+'\\',document.getElementById(\\''+selId+'\\').value,document.getElementById(\\''+gainId+'\\'))\">&#x2714; Apply</button></td>';"
         "h+='<td>'+stateHtml+'</td>';"
@@ -1929,10 +2959,429 @@ static void serve_devices_page(int fd)
         "h+='</ul>';"
         "document.getElementById('content').innerHTML=h;"
         "}"
+        "fetch('/api/status').then(r=>r.json()).then(d=>{var vb=document.getElementById('ver-badge');if(vb&&d.version)vb.textContent='v'+d.version;}).catch(function(){});"
         "load();"
         "</script></div></body></html>";
 
     http_send(fd, 200, "text/html; charset=utf-8", html, (int)strlen(html));
+}
+
+// ============================= SDR Diagnostics Page ============================
+
+static void serve_diagnostics_page(int fd)
+{
+    const char *html =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>SDR Diagnostics - dump1090-gg</title>"
+        "<style>"
+        ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
+        "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
+        "nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}"
+        "nav h1{font-size:18px;color:var(--accent);white-space:nowrap;margin:0}"
+        ".tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}"
+        ".tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}"
+        ".tabs a:hover{background:var(--hover);color:var(--text)}"
+        ".tabs a.active{background:var(--accent);color:#000;font-weight:600}"
+        ".main{padding:20px;max-width:1400px;margin:0 auto}"
+        "h2{color:var(--accent);margin-top:20px}"
+        ".info-box{background:#111122;border:1px solid #333;border-radius:6px;padding:12px;margin:10px 0}"
+        ".btn{border:1px solid var(--accent);padding:8px 20px;cursor:pointer;border-radius:4px;font-size:1em;margin:4px}"
+        ".btn-start{background:#1a3a1a;color:#66bb6a;border-color:#66bb6a;font-size:1.1em;padding:10px 24px}"
+        ".btn-start:hover{background:#66bb6a;color:#0a0a1a}"
+        ".btn-start:disabled{opacity:0.4;cursor:not-allowed}"
+        ".status-run{color:#ff9800;font-weight:bold}"
+        ".status-done{color:#66bb6a;font-weight:bold}"
+        ".status-idle{color:#888}"
+        ".dev-card{background:#111122;border:1px solid #333;border-radius:8px;padding:16px;margin:16px 0}"
+        ".dev-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}"
+        ".dev-title{color:var(--accent);font-size:1.2em;font-weight:600}"
+        ".dev-info{color:#aaa;font-size:0.9em}"
+        ".chart-container{position:relative;width:100%;height:340px;background:#0a0a1a;border:1px solid #333;border-radius:4px;margin:10px 0;overflow:hidden}"
+        "canvas{width:100%;height:100%}"
+        ".legend{display:flex;gap:16px;flex-wrap:wrap;font-size:0.85em;color:#aaa;margin:8px 0}"
+        ".legend-item{display:flex;align-items:center;gap:4px}"
+        ".legend-dot{width:10px;height:10px;border-radius:50%}"
+        ".metric-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin:10px 0}"
+        ".metric{background:#0e0e22;border:1px solid #2a2a4a;border-radius:4px;padding:8px;text-align:center}"
+        ".metric-val{font-size:1.4em;font-weight:bold;color:var(--accent)}"
+        ".metric-label{font-size:0.8em;color:#888}"
+        ".pll-ok{color:#66bb6a}"
+        ".pll-fail{color:#ff4444}"
+        "</style></head><body>"
+        "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
+        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/status.html'>&#x1f4e1; Status</a>"
+        "<a href='/connections.html'>&#x1f50c; Connections</a>"
+        "<a href='/logs.html'>&#x1f4cb; Logs</a>"
+        "<a href='/messages.html'>&#x1f4e8; Messages</a>"
+        "<a href='/aircraft.html'>&#x2708;&#xfe0f; Aircraft</a>"
+        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
+        "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
+        "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a class='active' style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
+        "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
+        "<div class='main'>"
+        "<h2>&#x1f527; SDR Dongle Diagnostics</h2>"
+        "<p style='color:#888'>Test PLL lock, noise floor, and IQ quality across frequencies and sample rates for each connected RTL-SDR dongle.</p>"
+        "<div class='info-box'>"
+        "<strong>&#x26a0;&#xfe0f; Note:</strong> Running diagnostics will <em>temporarily stop</em> active receivers. "
+        "They will be automatically restarted after the test completes."
+        "</div>"
+        "<div style='margin:16px 0'>"
+        "<button id='btn-start' class='btn btn-start' onclick='startDiag()'>&#x25b6; Start Diagnostics</button>"
+        "<span id='status-text' class='status-idle' style='margin-left:16px'>Idle</span>"
+        "</div>"
+        "<div id='lib-info'></div>"
+        "<div id='results'></div>"
+        "<script>"
+        "var pollTimer=null;"
+        ""
+        "function startDiag(){"
+        "document.getElementById('btn-start').disabled=true;"
+        "document.getElementById('status-text').textContent='Starting...';"
+        "document.getElementById('status-text').className='status-run';"
+        "document.getElementById('results').innerHTML='';"
+        "fetch('/api/diagnostics/start',{method:'POST'})"
+        ".then(r=>r.json()).then(d=>{"
+        "if(d.ok){pollTimer=setInterval(pollResults,1500);}"
+        "else{document.getElementById('status-text').textContent='Error: '+d.error;"
+        "document.getElementById('btn-start').disabled=false;}"
+        "}).catch(e=>{document.getElementById('status-text').textContent='Error: '+e;"
+        "document.getElementById('btn-start').disabled=false;});"
+        "}"
+        ""
+        "function pollResults(){"
+        "fetch('/api/diagnostics').then(r=>r.json()).then(d=>{"
+        "renderResults(d);"
+        "if(d.complete){"
+        "clearInterval(pollTimer);pollTimer=null;"
+        "document.getElementById('btn-start').disabled=false;"
+        "document.getElementById('status-text').textContent='Complete';"
+        "document.getElementById('status-text').className='status-done';"
+        "}else{"
+        "document.getElementById('status-text').textContent='Running... ('+d.device_count+' devices)';"
+        "document.getElementById('status-text').className='status-run';"
+        "}"
+        "}).catch(e=>{});"
+        "}"
+        ""
+        "function renderResults(d){"
+        "var libHtml='<div class=info-box><strong>Library:</strong> '+d.librtlsdr_version+'</div>';"
+        "document.getElementById('lib-info').innerHTML=libHtml;"
+        ""
+        "var h='';"
+        "d.devices.forEach(function(dev,idx){"
+        "h+='<div class=dev-card>';"
+        "h+='<div class=dev-header>';"
+        "h+='<div><span class=dev-title>'+dev.serial+'</span> &mdash; '+dev.tuner+'</div>';"
+        "h+='<div class=dev-info>Range: '+dev.freq_range+' | Gain: '+(dev.gain_list&&dev.gain_list.length?dev.gain_list[0].toFixed(1)+'~'+dev.gain_list[dev.gain_list.length-1].toFixed(1)+' dB ('+dev.gain_list.length+' steps)':dev.max_gain_db.toFixed(1)+' dB')+'</div>';"
+        "h+='</div>';"
+        ""
+        "if(dev.error){h+='<p style=color:var(--danger)>Error: '+dev.error+'</p>';}"
+        "else if(dev.measurements.length==0){h+='<p style=color:var(--dim)>Waiting...</p>';}"
+        "else{"
+        // Metrics summary
+        "var pllOk=0,pllFail=0;"
+        "dev.measurements.forEach(function(m){if(m.pll)pllOk++;else pllFail++;});"
+        "h+='<div class=metric-grid>';"
+        "h+='<div class=metric><div class=\"metric-val pll-ok\">'+pllOk+'</div><div class=metric-label>PLL Locked</div></div>';"
+        "h+='<div class=metric><div class=\"metric-val pll-fail\">'+pllFail+'</div><div class=metric-label>PLL Failed</div></div>';"
+        "h+='<div class=metric><div class=metric-val>'+dev.max_gain_db.toFixed(1)+'</div><div class=metric-label>Max Gain (dB)</div></div>';"
+        "h+='</div>';"
+        // Gain list
+        "if(dev.gain_list&&dev.gain_list.length>0){"
+        "h+='<div style=\"margin:8px 0;padding:8px;background:#0e0e22;border:1px solid #2a2a4a;border-radius:4px\">';"
+        "h+='<span style=\"color:var(--accent);font-size:0.85em;font-weight:600\">Supported gains ('+dev.gain_list.length+' steps): </span>';"
+        "h+='<span style=\"color:#aaa;font-size:0.82em\">';"
+        "h+=dev.gain_list.map(function(g){return g.toFixed(1)+' dB'}).join(', ');"
+        "h+='</span></div>';}"
+        // Chart
+        "h+='<div class=chart-container><canvas id=chart'+idx+'></canvas></div>';"
+        "h+='<div class=legend>';"
+        "h+='<div class=legend-item><div class=legend-dot style=background:#66bb6a></div>PLL Locked</div>';"
+        "h+='<div class=legend-item><div class=legend-dot style=background:#ff4444></div>PLL Failed</div>';"
+        "h+='<div class=legend-item><div class=legend-dot style=background:#4fc3f7></div>IQ Spread</div>';"
+        "h+='<div class=legend-item><div class=legend-dot style=background:#ff9800></div>Noise Floor (dB)</div>';"
+        "h+='</div>';"
+        // Table
+        "h+='<details><summary style=cursor:pointer;color:var(--accent)>Detailed measurements ('+dev.measurements.length+')</summary>';"
+        "h+='<table style=font-size:0.85em;margin-top:8px><tr><th>Freq (MHz)</th><th>SR (kHz)</th><th>PLL</th><th>Noise (dB)</th><th>DC Offset</th><th>IQ Spread</th></tr>';"
+        "dev.measurements.forEach(function(m){"
+        "var pllC=m.pll?'pll-ok':'pll-fail';"
+        "h+='<tr><td>'+(m.freq/1e6).toFixed(1)+'</td><td>'+(m.sr/1000)+'</td>';"
+        "h+='<td class='+pllC+'>'+(m.pll?'OK':'FAIL')+'</td>';"
+        "h+='<td>'+m.noise.toFixed(1)+'</td><td>'+m.dc_offset.toFixed(2)+'</td><td>'+m.iq_spread.toFixed(2)+'</td></tr>';"
+        "});"
+        "h+='</table></details>';"
+        "}"
+        "h+='</div>';"
+        "});"
+        "document.getElementById('results').innerHTML=h;"
+        ""
+        // Draw charts
+        "setTimeout(function(){d.devices.forEach(function(dev,idx){drawChart(idx,dev);});},50);"
+        "}"
+        ""
+        "function drawChart(idx,dev){"
+        "var canvas=document.getElementById('chart'+idx);"
+        "if(!canvas||dev.measurements.length==0)return;"
+        "var ctx=canvas.getContext('2d');"
+        "var W=canvas.parentElement.clientWidth;"
+        "var H=canvas.parentElement.clientHeight;"
+        "canvas.width=W;canvas.height=H;"
+        "var pad={t:36,r:70,b:52,l:70};"
+        "var cw=W-pad.l-pad.r;"
+        "var ch=H-pad.t-pad.b;"
+        "var n=dev.measurements.length;"
+        ""
+        // Background
+        "ctx.fillStyle='#0a0a1a';ctx.fillRect(0,0,W,H);"
+        ""
+        // Find section boundaries (19 freq sweep, then SR sweeps)
+        "var secFreq=Math.min(19,n);"
+        "var secSR1=Math.min(secFreq+6,n);"
+        ""
+        // Find ranges
+        "var maxSpread=0,minNoise=0,maxNoise=-99;"
+        "dev.measurements.forEach(function(m){"
+        "if(m.iq_spread>maxSpread)maxSpread=m.iq_spread;"
+        "if(m.noise>maxNoise)maxNoise=m.noise;"
+        "if(m.noise<minNoise)minNoise=m.noise;"
+        "});"
+        "if(maxSpread<10)maxSpread=10;"
+        "if(maxNoise-minNoise<1){minNoise=-50;maxNoise=0;}"
+        ""
+        // Grid lines + Y-axis scale
+        "ctx.strokeStyle='#1a1a2e';ctx.lineWidth=1;"
+        "ctx.font='10px sans-serif';"
+        "for(var i=0;i<=4;i++){"
+        "var y=pad.t+ch*i/4;"
+        "ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();"
+        // Left Y axis: IQ Spread
+        "ctx.fillStyle='#4fc3f7';ctx.textAlign='right';"
+        "var sv=maxSpread*(1-i/4);"
+        "ctx.fillText(sv.toFixed(0),pad.l-6,y+4);"
+        // Right Y axis: Noise dB
+        "var nRange=maxNoise-minNoise;"
+        "var nv=maxNoise-nRange*i/4;"
+        "ctx.fillStyle='#ff9800';ctx.textAlign='left';"
+        "ctx.fillText(nv.toFixed(0)+' dB',W-pad.r+6,y+4);"
+        "}"
+        ""
+        // Section separators (vertical dashed lines)
+        "ctx.setLineDash([4,3]);ctx.strokeStyle='#444';ctx.lineWidth=1;"
+        "if(secFreq<n){"
+        "var sx=pad.l+secFreq*(cw/n);"
+        "ctx.beginPath();ctx.moveTo(sx,pad.t);ctx.lineTo(sx,pad.t+ch);ctx.stroke();"
+        "}"
+        "if(secSR1<n){"
+        "var sx2=pad.l+secSR1*(cw/n);"
+        "ctx.beginPath();ctx.moveTo(sx2,pad.t);ctx.lineTo(sx2,pad.t+ch);ctx.stroke();"
+        "}"
+        "ctx.setLineDash([]);"
+        ""
+        // Section titles at top
+        "ctx.font='bold 11px sans-serif';ctx.textAlign='center';"
+        "ctx.fillStyle='#aaa';"
+        "if(secFreq>0)ctx.fillText('Frequency Sweep (2.4 MSPS)',pad.l+secFreq*(cw/n)/2,pad.t-8);"
+        "if(secSR1>secFreq)ctx.fillText('SR @404.5',pad.l+(secFreq+secSR1)/2*(cw/n),pad.t-8);"
+        "if(n>secSR1)ctx.fillText('SR @1090',pad.l+(secSR1+n)/2*(cw/n),pad.t-8);"
+        ""
+        // PLL status bars (background color per measurement)
+        "var barW=Math.max(2,cw/n-2);"
+        "dev.measurements.forEach(function(m,i){"
+        "var x=pad.l+i*(cw/n)+1;"
+        "ctx.fillStyle=m.pll?'rgba(102,187,106,0.15)':'rgba(255,68,68,0.25)';"
+        "ctx.fillRect(x,pad.t,barW,ch);"
+        "});"
+        ""
+        // PLL status dots at bottom
+        "dev.measurements.forEach(function(m,i){"
+        "var x=pad.l+i*(cw/n)+barW/2;"
+        "ctx.beginPath();ctx.arc(x,pad.t+ch+8,3,0,6.28);"
+        "ctx.fillStyle=m.pll?'#66bb6a':'#ff4444';ctx.fill();"
+        "});"
+        ""
+        // IQ Spread line (cyan) — higher = tuner is receiving signal
+        "ctx.strokeStyle='#4fc3f7';ctx.lineWidth=2.5;ctx.beginPath();"
+        "dev.measurements.forEach(function(m,i){"
+        "var x=pad.l+i*(cw/n)+barW/2;"
+        "var y=pad.t+ch-(m.iq_spread/maxSpread)*ch;"
+        "if(i==0)ctx.moveTo(x,y);else ctx.lineTo(x,y);"
+        "});ctx.stroke();"
+        ""
+        // IQ Spread threshold line (spread < 3 = deaf)
+        "var threshY=pad.t+ch-(3.0/maxSpread)*ch;"
+        "if(threshY<pad.t+ch&&threshY>pad.t){"
+        "ctx.strokeStyle='rgba(255,68,68,0.6)';ctx.lineWidth=1;ctx.setLineDash([6,4]);"
+        "ctx.beginPath();ctx.moveTo(pad.l,threshY);ctx.lineTo(W-pad.r,threshY);ctx.stroke();"
+        "ctx.setLineDash([]);"
+        "ctx.fillStyle='#ff6666';ctx.font='9px sans-serif';ctx.textAlign='left';"
+        "ctx.fillText('DEAF threshold (IQ<3)',pad.l+4,threshY-4);"
+        "}"
+        ""
+        // Noise floor line (orange) — higher = more signal/noise received
+        "ctx.strokeStyle='#ff9800';ctx.lineWidth=2;ctx.setLineDash([5,3]);ctx.beginPath();"
+        "dev.measurements.forEach(function(m,i){"
+        "var x=pad.l+i*(cw/n)+barW/2;"
+        "var nRange=maxNoise-minNoise;"
+        "var y=pad.t+ch-((m.noise-minNoise)/nRange)*ch;"
+        "if(i==0)ctx.moveTo(x,y);else ctx.lineTo(x,y);"
+        "});ctx.stroke();ctx.setLineDash([]);"
+        ""
+        // X-axis labels
+        "ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='center';"
+        "for(var i=0;i<n;i++){"
+        "var m=dev.measurements[i];"
+        "var x=pad.l+i*(cw/n)+barW/2;"
+        "var label;"
+        "if(i<secFreq){label=(m.freq/1e6).toFixed(0);}"
+        "else{label=(m.sr/1e6).toFixed(1)+'M';}"
+        // Show every label for SR, skip some for freq
+        "if(i<secFreq&&n>15){if(i%2!=0&&i!=secFreq-1)continue;}"
+        "ctx.save();ctx.translate(x,pad.t+ch+20);"
+        "if(i<secFreq)ctx.rotate(-0.5);"
+        "ctx.fillText(label,0,0);ctx.restore();"
+        "}"
+        ""
+        // X-axis unit labels
+        "ctx.font='10px sans-serif';ctx.fillStyle='#888';ctx.textAlign='center';"
+        "if(secFreq>0)ctx.fillText('MHz',pad.l+secFreq*(cw/n)/2,H-4);"
+        "if(secSR1>secFreq)ctx.fillText('MSPS',pad.l+(secFreq+secSR1)/2*(cw/n),H-4);"
+        "if(n>secSR1)ctx.fillText('MSPS',pad.l+(secSR1+n)/2*(cw/n),H-4);"
+        ""
+        // Y-axis titles (rotated)
+        "ctx.save();ctx.translate(12,pad.t+ch/2);ctx.rotate(-Math.PI/2);"
+        "ctx.fillStyle='#4fc3f7';ctx.font='bold 10px sans-serif';ctx.textAlign='center';"
+        "ctx.fillText('IQ Spread (signal strength)',0,0);ctx.restore();"
+        "ctx.save();ctx.translate(W-8,pad.t+ch/2);ctx.rotate(Math.PI/2);"
+        "ctx.fillStyle='#ff9800';ctx.font='bold 10px sans-serif';ctx.textAlign='center';"
+        "ctx.fillText('Noise Floor (dB)',0,0);ctx.restore();"
+        ""
+        // Inline legend box
+        "ctx.fillStyle='rgba(10,10,26,0.85)';ctx.fillRect(pad.l+8,pad.t+4,220,52);ctx.strokeStyle='#333';ctx.strokeRect(pad.l+8,pad.t+4,220,52);"
+        "ctx.font='10px sans-serif';var lx=pad.l+16,ly=pad.t+18;"
+        "ctx.fillStyle='#4fc3f7';ctx.fillRect(lx,ly-4,14,3);ctx.fillText('IQ Spread (solid) \u2014 tuner sensitivity',lx+20,ly);"
+        "ctx.fillStyle='#ff9800';ctx.setLineDash([4,2]);ctx.strokeStyle='#ff9800';ctx.beginPath();ctx.moveTo(lx,ly+12);ctx.lineTo(lx+14,ly+12);ctx.stroke();ctx.setLineDash([]);"
+        "ctx.fillText('Noise Floor (dashed) \u2014 signal received dB',lx+20,ly+14);"
+        "ctx.beginPath();ctx.arc(lx+4,ly+27,3,0,6.28);ctx.fillStyle='#66bb6a';ctx.fill();"
+        "ctx.fillStyle='#aaa';ctx.fillText('= PLL locked (tuner working)',lx+20,ly+30);"
+        "ctx.beginPath();ctx.arc(lx+4,ly+41,3,0,6.28);ctx.fillStyle='#ff4444';ctx.fill();"
+        "ctx.fillStyle='#aaa';ctx.fillText('= PLL FAIL (tuner deaf, no signal)',lx+20,ly+44);"
+        "}"
+        ""
+        // Auto-load previous results if available
+        "fetch('/api/diagnostics').then(r=>r.json()).then(d=>{"
+        "if(d.complete&&d.device_count>0)renderResults(d);"
+        "if(d.running){pollTimer=setInterval(pollResults,1500);"
+        "document.getElementById('btn-start').disabled=true;"
+        "document.getElementById('status-text').textContent='Running...';"
+        "document.getElementById('status-text').className='status-run';}"
+        "}).catch(function(){});"
+        "</script></div></body></html>";
+
+    http_send(fd, 200, "text/html; charset=utf-8", html, (int)strlen(html));
+}
+
+// ============================= GSM PPM Calibration API ============================
+
+static void api_post_calibrate_ppm(int fd, const char *body)
+{
+    char serial[64] = {0};
+    const char *p;
+
+    if ((p = strstr(body, "\"serial\"")) != NULL) {
+        p = strchr(p + 8, '"'); if (p) { p++; const char *e = strchr(p, '"');
+        if (e && (e - p) < 63) { memcpy(serial, p, e - p); serial[e - p] = '\0'; }
+        }
+    }
+
+    if (!serial[0]) {
+        char resp[256];
+        int rlen = snprintf(resp, sizeof(resp),
+            "{\"error\":\"missing serial\"}");
+        http_send(fd, 400, "application/json", resp, rlen);
+        return;
+    }
+
+    // Find the receiver in SdrManager
+    int idx = sdrManagerFindBySerial(serial);
+    if (idx < 0) {
+        char resp[256];
+        int rlen = snprintf(resp, sizeof(resp),
+            "{\"error\":\"No receiver with serial %s\"}", serial);
+        http_send(fd, 404, "application/json", resp, rlen);
+        return;
+    }
+
+    sdr_receiver_t *rx = &SdrManager.receivers[idx];
+    int current_ppm = rx->config.ppm_error;
+    float gain = rx->config.gain;
+    sdr_role_t role = rx->config.role;
+
+    panelLog("PPM calibration: stopping receiver %s (ppm=%d, gain=%.1f)",
+             serial, current_ppm, gain);
+
+    // Stop and close the receiver to free the USB device
+    if (rx->state == RX_STATE_RUNNING) rxStop(rx);
+    if (rx->state != RX_STATE_IDLE) rxClose(rx);
+    usleep(300000);  // let OS release USB
+
+    // Run GSM calibration
+    gsm_cal_result_t cal = gsm_calibrate(serial, current_ppm, gain);
+
+    if (cal.success) {
+        int new_ppm = (int)round(cal.corrected_ppm);
+        int apply = (cal.rms < 5.0f);  // only auto-apply if RMS < 5 ppm
+
+        if (apply) {
+            rx->config.ppm_error = new_ppm;
+            panelLog("PPM calibration OK: %d -> %d ppm (offset %+.1f, RMS %.3f, %d samples)",
+                     current_ppm, new_ppm, cal.measured_offset, cal.rms, cal.samples);
+        } else {
+            panelLog("PPM calibration noisy: %d ppm suggested but RMS=%.1f too high, keeping %d ppm",
+                     new_ppm, cal.rms, current_ppm);
+        }
+
+        // Restart receiver
+        bool ok = rxOpen(rx);
+        if (ok) ok = rxStart(rx);
+        if (ok && role == SDR_ROLE_FLARM) {
+            FlarmConfig.enabled = 1;
+            ognClientInit();
+        }
+        if (apply) sdrManagerSave();
+
+        char resp[512];
+        int rlen = snprintf(resp, sizeof(resp),
+            "{\"ok\":true,\"ppm\":%d,\"old_ppm\":%d,"
+            "\"applied\":%s,"
+            "\"offset\":%.3f,\"rms\":%.3f,\"samples\":%d%s%s%s}",
+            new_ppm, current_ppm,
+            apply ? "true" : "false",
+            cal.measured_offset, cal.rms, cal.samples,
+            cal.error[0] ? ",\"warning\":\"" : "",
+            cal.error[0] ? cal.error : "",
+            cal.error[0] ? "\"" : "");
+        http_send(fd, 200, "application/json", resp, rlen);
+    } else {
+        panelLog("PPM calibration FAILED: %s", cal.error);
+
+        // Restart receiver anyway (unchanged PPM)
+        bool ok = rxOpen(rx);
+        if (ok) ok = rxStart(rx);
+        if (ok && role == SDR_ROLE_FLARM) {
+            FlarmConfig.enabled = 1;
+            ognClientInit();
+        }
+
+        char resp[512];
+        int rlen = snprintf(resp, sizeof(resp),
+            "{\"ok\":false,\"error\":\"%s\"}", cal.error);
+        http_send(fd, 200, "application/json", resp, rlen);
+    }
 }
 
 // ============================= Request Router ============================
@@ -1962,6 +3411,10 @@ static void handle_request(int fd, const char *request, int reqlen)
             api_get_status(fd);
         } else if (strcmp(path, "/api/aircraft") == 0) {
             api_get_aircraft(fd);
+        } else if (strcmp(path, "/api/gsm") == 0) {
+            api_get_gsm(fd);
+        } else if (strcmp(path, "/api/lte") == 0) {
+            api_get_lte(fd);
         } else if (strcmp(path, "/api/stats") == 0) {
             api_get_stats(fd);
         } else if (strcmp(path, "/api/connections") == 0) {
@@ -1976,6 +3429,16 @@ static void handle_request(int fd, const char *request, int reqlen)
             api_get_receivers(fd);
         } else if (strcmp(path, "/devices.html") == 0 || strcmp(path, "/devices") == 0) {
             serve_devices_page(fd);
+        } else if (strcmp(path, "/gsm.html") == 0 || strcmp(path, "/gsm") == 0) {
+            serve_gsm_page(fd);
+        } else if (strcmp(path, "/lte.html") == 0 || strcmp(path, "/lte") == 0) {
+            serve_lte_page(fd);
+        } else if (strcmp(path, "/diagnostics.html") == 0 || strcmp(path, "/diagnostics") == 0) {
+            serve_diagnostics_page(fd);
+        } else if (strcmp(path, "/api/diagnostics") == 0) {
+            api_get_diagnostics(fd);
+        } else if (strcmp(path, "/api/stats/quick") == 0) {
+            api_get_stats_quick(fd);
         } else if (path[0] == '/') {
             serve_file(fd, path + 1);
         } else {
@@ -1996,6 +3459,24 @@ static void handle_request(int fd, const char *request, int reqlen)
             if (body) {
                 body += 4;
                 api_post_receiver_assign(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
+        } else if (strcmp(path, "/api/calibrate-ppm") == 0) {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_calibrate_ppm(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
+        } else if (strcmp(path, "/api/diagnostics/start") == 0) {
+            api_post_diagnostics_start(fd);
+        } else if (strcmp(path, "/api/receivers/setgain") == 0) {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_setgain(fd, body);
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }

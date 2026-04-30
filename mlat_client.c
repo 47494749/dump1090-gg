@@ -8,6 +8,8 @@
 //
 // Reference: mlat-client by Oliver Jowett (GPL-3+)
 // Server: https://github.com/adsbexchange/mlat-server
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "dump1090.h"
 #include "mlat_client.h"

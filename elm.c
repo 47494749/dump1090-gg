@@ -20,6 +20,7 @@
 #include <inttypes.h>
 #include "elm.h"
 #include "cpdlc_decode.h"
+#include "config_panel.h"
 
 // ========== Hash table helpers ==========
 
@@ -215,6 +216,36 @@ static void *elm_decode_worker(void *arg) {
 
         if (msg) {
             elm_decode_acars(msg->addr, msg->payload, msg->payload_len);
+
+            // Log to panel if >50% reassembled AND meaningful text content
+            int pct = msg->complete_ke ? 100
+                      : (msg->segments_received * 100 / ELM_MAX_SEGMENTS);
+            if (pct > 50 && msg->segments_received >= ELM_MIN_SEGMENTS) {
+                // Build ASCII summary of payload (printable chars only)
+                char ascii[ELM_MAX_PAYLOAD + 1];
+                int alen = 0;
+                int printable = 0;
+                for (int i = 0; i < msg->payload_len && alen < (int)sizeof(ascii) - 1; i++) {
+                    unsigned char c = msg->payload[i];
+                    if (c >= 0x20 && c < 0x7f) {
+                        ascii[alen++] = (char)c;
+                        printable++;
+                    } else if (c == 0x0a || c == 0x0d) {
+                        ascii[alen++] = ' ';
+                    }
+                }
+                ascii[alen] = '\0';
+
+                // Only log if at least 25% of payload is printable ASCII
+                // (filters out binary garbage from misclassified frames)
+                if (printable * 4 >= msg->payload_len) {
+                    panelLogMessage("[ELM] %06X reassembled %d%% (%d/%d seg): %s",
+                                    msg->addr, pct, msg->segments_received,
+                                    msg->complete_ke ? msg->segments_received : ELM_MAX_SEGMENTS,
+                                    alen > 0 ? ascii : "(binary)");
+                }
+            }
+
             free(msg);
         }
     }
@@ -231,9 +262,68 @@ static void *elm_decode_worker(void *arg) {
     return NULL;
 }
 
+// ========== Content validation ==========
+
+// Check if payload looks like valid ACARS or CPDLC content.
+// Returns 1 if content passes validation, 0 if it looks like garbage.
+static int elm_validate_content(const unsigned char *payload, int len) {
+    if (len < 10)
+        return 0;
+
+    // Check 1: ACARS framing — SOH (0x01) present
+    for (int i = 0; i < len; i++) {
+        if (payload[i] == 0x01) {
+            // Found SOH — likely real ACARS
+            return 1;
+        }
+    }
+
+    // Check 2: CPDLC/ASN.1 — first byte often has recognizable tag patterns
+    // FANS-1/A CPDLC uses UPER encoding; first bits are typically small tag values
+    // Accept if first byte has high bit clear (tag < 128)
+    if ((payload[0] & 0x80) == 0) {
+        // Could be ASN.1 UPER, accept provisionally if enough printable content
+        int printable = 0;
+        for (int i = 0; i < len; i++) {
+            if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
+                payload[i] == 0x0a || payload[i] == 0x0d)
+                printable++;
+        }
+        if (printable * 3 >= len)  // >= 33% printable
+            return 1;
+    }
+
+    // Check 3: Plain text content — at least 40% printable ASCII
+    int printable = 0;
+    for (int i = 0; i < len; i++) {
+        if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
+            payload[i] == 0x0a || payload[i] == 0x0d)
+            printable++;
+    }
+    if (printable * 5 >= len * 2)  // >= 40% printable
+        return 1;
+
+    return 0;
+}
+
+// ========== Segment timing validation ==========
+
+// Check if consecutive segments arrived within reasonable time gaps.
+// Real ELM segments arrive in rapid succession (< 5 seconds apart).
+static int elm_validate_timing(struct elm_entry *entry, int num_segments) {
+    for (int i = 1; i < num_segments; i++) {
+        if (entry->seg_time[i] == 0 || entry->seg_time[i - 1] == 0)
+            return 0;
+        uint64_t gap = entry->seg_time[i] - entry->seg_time[i - 1];
+        if (gap > ELM_SEG_GAP_MS)
+            return 0;  // gap too large — probably unrelated false DF24 frames
+    }
+    return 1;
+}
+
 // ========== Queue a complete message for decode ==========
 
-static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry) {
+static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry, int complete_ke) {
     // Find the highest consecutive segment from 0
     int max_seg = -1;
     for (int i = 0; i < ELM_MAX_SEGMENTS; i++) {
@@ -246,7 +336,39 @@ static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry)
     if (max_seg < 0)
         return; // nothing usable
 
-    int payload_len = (max_seg + 1) * ELM_SEGMENT_SIZE;
+    int num_segments = max_seg + 1;
+
+    // Require minimum number of consecutive segments
+    if (num_segments < ELM_MIN_SEGMENTS) {
+        state->messages_rejected++;
+        fprintf(stderr, "ELM reject %06X: only %d consecutive segments (need %d)\n",
+                entry->addr, num_segments, ELM_MIN_SEGMENTS);
+        return;
+    }
+
+    // Validate timing between segments
+    if (!elm_validate_timing(entry, num_segments)) {
+        state->messages_rejected++;
+        fprintf(stderr, "ELM reject %06X: segment timing too slow (>%ds gap)\n",
+                entry->addr, (int)(ELM_SEG_GAP_MS / 1000));
+        return;
+    }
+
+    int payload_len = num_segments * ELM_SEGMENT_SIZE;
+
+    // Assemble payload temporarily for content validation
+    unsigned char payload[ELM_MAX_PAYLOAD];
+    for (int i = 0; i < num_segments; i++) {
+        memcpy(payload + i * ELM_SEGMENT_SIZE, entry->data[i], ELM_SEGMENT_SIZE);
+    }
+
+    // Validate content — must look like ACARS, CPDLC, or structured text
+    if (!elm_validate_content(payload, payload_len)) {
+        state->messages_rejected++;
+        fprintf(stderr, "ELM reject %06X: content validation failed (%d bytes, no ACARS/CPDLC/text)\n",
+                entry->addr, payload_len);
+        return;
+    }
 
     struct elm_complete *msg = malloc(sizeof(struct elm_complete));
     if (!msg)
@@ -254,13 +376,11 @@ static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry)
 
     msg->addr = entry->addr;
     msg->payload_len = payload_len;
+    msg->segments_received = num_segments;
+    msg->complete_ke = complete_ke;
     msg->timestamp = entry->last_seen;
     msg->next = NULL;
-
-    // Assemble payload from segments in order
-    for (int i = 0; i <= max_seg; i++) {
-        memcpy(msg->payload + i * ELM_SEGMENT_SIZE, entry->data[i], ELM_SEGMENT_SIZE);
-    }
+    memcpy(msg->payload, payload, payload_len);
 
     // Push to decode queue
     pthread_mutex_lock(&state->queue_mutex);
@@ -326,16 +446,38 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
     struct elm_entry *entry = elm_find(state, addr);
 
     if (!entry) {
+        // First segment for this aircraft: only accept ND=0 to start a sequence.
+        // Real ELM always starts from segment 0. Random ND values are false positives.
+        if (nd != 0)
+            return;
         entry = elm_create(state, addr, timestamp);
         if (!entry)
             return;
         state->active_entries++;
+    } else {
+        // Existing entry: only accept segments that extend the sequence.
+        // Find the highest consecutive segment we have so far.
+        int next_expected = 0;
+        for (int i = 0; i < ELM_MAX_SEGMENTS; i++) {
+            if (entry->segments_mask & (1 << i))
+                next_expected = i + 1;
+            else
+                break;
+        }
+        // Accept only the next expected segment or a re-delivery of one we have.
+        // This filters random ND values from misclassified frames.
+        if (nd > (unsigned)next_expected) {
+            // Segment too far ahead — not sequential, likely garbage.
+            // If KE=1 on a non-sequential segment, just ignore it.
+            return;
+        }
     }
 
     // Store the segment
     int is_new = !(entry->segments_mask & (1 << nd));
     memcpy(entry->data[nd], md, ELM_SEGMENT_SIZE);
     entry->segments_mask |= (1 << nd);
+    entry->seg_time[nd] = timestamp;
     entry->last_seen = timestamp;
     state->segments_received++;
 
@@ -367,14 +509,14 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
             break;
     }
 
-    // Complete if: KE=1 or we have at least 2 consecutive segments and
-    // a gap (meaning the aircraft has moved on) or we've received segment 15
+    // Complete if: KE=1 or we have enough consecutive segments.
+    // All validation (min segments, timing, content) happens in elm_queue_complete.
     int complete = 0;
-    if (ke == 1 && consecutive >= 1) {
+    if (ke == 1 && consecutive >= ELM_MIN_SEGMENTS) {
         complete = 1;
-    } else if (consecutive >= 2 && consecutive == ELM_MAX_SEGMENTS) {
+    } else if (consecutive >= ELM_MIN_SEGMENTS && consecutive == ELM_MAX_SEGMENTS) {
         complete = 1; // all 16 segments
-    } else if (consecutive >= 2) {
+    } else if (consecutive >= ELM_MIN_SEGMENTS) {
         // Check if there's a gap after our consecutive run — this means
         // we likely have everything before the gap
         int has_later = 0;
@@ -391,7 +533,7 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
     }
 
     if (complete) {
-        elm_queue_complete(state, entry);
+        elm_queue_complete(state, entry, (ke == 1) ? 1 : 0);
         elm_remove(state, addr);
         state->messages_completed++;
         state->active_entries--;
@@ -404,9 +546,17 @@ void elmCleanupStale(struct elm_state *state, uint64_t now) {
         while (*pp) {
             struct elm_entry *e = *pp;
             if (now - e->last_seen > ELM_TTL_MS) {
-                // TTL expired. If we have any data, try to decode what we have.
-                if (e->segments_mask & 1) {
-                    elm_queue_complete(state, e);
+                // TTL expired. If we have enough consecutive segments from 0,
+                // try to decode what we have.
+                int consec = 0;
+                for (int s = 0; s < ELM_MAX_SEGMENTS; s++) {
+                    if (e->segments_mask & (1 << s))
+                        consec = s + 1;
+                    else
+                        break;
+                }
+                if (consec >= ELM_MIN_SEGMENTS) {
+                    elm_queue_complete(state, e, 0);
                     state->messages_completed++;
                 }
                 state->messages_expired++;
@@ -423,9 +573,9 @@ void elmCleanupStale(struct elm_state *state, uint64_t now) {
     #define ELM_STATS_INTERVAL_MS  300000
     if (state->segments_received > 0 &&
         (state->last_stats_time == 0 || now - state->last_stats_time >= ELM_STATS_INTERVAL_MS)) {
-        fprintf(stderr, "ELM stats: %" PRIu64 " segments, %" PRIu64 " complete, %" PRIu64 " expired, %d active\n",
+        fprintf(stderr, "ELM stats: %" PRIu64 " segments, %" PRIu64 " complete, %" PRIu64 " expired, %" PRIu64 " rejected, %d active\n",
                 state->segments_received, state->messages_completed,
-                state->messages_expired, state->active_entries);
+                state->messages_expired, state->messages_rejected, state->active_entries);
         state->last_stats_time = now;
     }
 

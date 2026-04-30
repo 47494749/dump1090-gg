@@ -12,7 +12,7 @@
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
 nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
 nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
-.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}
 .tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
 .tabs a:hover{background:var(--hover);color:var(--text)}
 .tabs a.active{background:var(--accent);color:#000;font-weight:600}
@@ -54,6 +54,9 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 <a href="/messages.html">📨 Messages</a>
 <a href="/aircraft.html">✈️ Aircraft</a>
 <a href="/devices.html">📻 Devices</a>
+<a href="/gsm.html">📶 GSM</a>
+<a href="/lte.html">📶 LTE</a>
+<a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>

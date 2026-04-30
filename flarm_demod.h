@@ -29,6 +29,7 @@ typedef struct {
     double   ref_lat;           // Receiver latitude
     double   ref_lon;           // Receiver longitude
     float    ref_alt_geoid;     // Receiver geoid separation (meters)
+    uint32_t center_freq;       // SDR center frequency in Hz (e.g. 868300000)
     flarm_packet_cb callback;   // FLARM packet callback
     void    *callback_ctx;      // User context for FLARM callback
     ogntp_packet_cb ogntp_callback;     // OGNTP packet callback

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
 // opensky_client.h: OpenSky Network feeder client (native protocol)

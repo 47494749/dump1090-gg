@@ -8,6 +8,7 @@ pthread_rwlock_t aircraft_lock = PTHREAD_RWLOCK_INITIALIZER;
 struct feeder_msg_queue mlat_inject_queue;
 struct feeder_msg_queue fa_mlat_queue;
 atomic_int feeders_running;
+atomic_int net_available = 1;
 
 void feederDispatchMessage(struct modesMessage *mm) {
     (void)mm;
