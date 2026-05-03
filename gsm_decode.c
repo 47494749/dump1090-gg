@@ -613,7 +613,8 @@ bool gsm_sch_decode(const float *soft_input, uint8_t *info_out)
         bool ok = gsm_sch_decode(test_soft, test_dec);
         int match = 1;
         if (ok) { for (int i = 0; i < 25; i++) if (test_dec[i] != test_info[i]) match = 0; }
-        fprintf(stderr, "GSM SCH self-test: encode/decode %s, match=%d\n", ok ? "PASS" : "FAIL", match);
+        if (!ok || !match)
+            fprintf(stderr, "GSM SCH self-test: encode/decode %s, match=%d\n", ok ? "PASS" : "FAIL", match);
     }
 
     // Viterbi decode: 78 soft bits -> 39 pre-conv bits

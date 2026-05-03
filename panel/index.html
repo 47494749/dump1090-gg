@@ -57,6 +57,7 @@ tr:hover td{background:var(--hover)}
 <a href="/devices.html">📻 Devices</a>
 <a href="/gsm.html">📶 GSM</a>
 <a href="/lte.html">📶 LTE</a>
+<a href="/iot868.html">🌡️ IoT 868</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -81,17 +82,7 @@ const configSchema=[
     {k:'station.max_range',l:'Max Range (NM)',t:'number',s:'1'},
     {k:'mlat.alt',l:'Altitude (m)',t:'number',s:'1',h:'Station altitude — also used for MLAT'},
 ]},
-{title:'🌐 OGN',id:'ogn',fields:[
-    {k:'ogn.server',l:'Server',t:'text'},
-    {k:'ogn.port',l:'Port',t:'number',s:'1'},
-]},
-{title:'🔑 Encryption Keys',id:'keys',fields:[
-    {k:'keys.flarm_key_table',l:'FLARM key_table (12×hex)',t:'text',h:'12 hex values separated by comma for the XXTEA table. E.g.: a1b2c3d4,5e6f7a8b,...'},
-    {k:'keys.flarm_key2',l:'FLARM key2',t:'text',h:'FLARM V6 key (hex 32bit)'},
-    {k:'keys.flarm_key3',l:'FLARM key3',t:'text',h:'FLARM V6 key (hex 32bit)'},
-    {k:'keys.flarm_key4',l:'FLARM key4',t:'text',h:'FLARM V7 key (hex 32bit)'},
-    {k:'keys.flarm_key5',l:'FLARM key5 (4×hex)',t:'text',h:'4 hex values separated by comma for V7'},
-]},
+
 {title:'📊 Network',id:'network',fields:[
     {k:'network.raw_out',l:'Raw output ports',t:'text',h:'Ports for raw output (default: 30002)'},
     {k:'network.raw_in',l:'Raw input ports',t:'text',h:'Ports for raw input (default: 30001)'},
@@ -153,15 +144,16 @@ function renderConfigForm(){
         <div class="field"><label>Feeder ID</label><input type="text" data-key="piaware.feeder_id" value="${cfg.piaware&&cfg.piaware.feeder_id||''}" style="font-family:monospace"></div>
     </div>`;
 
-    // FLARM / OGN
-    {const flarmOn=cfg.sdr_flarm&&cfg.sdr_flarm.enabled;
+    // FLARM / OGN — derive enabled from decoders dongles
+    {const flarmOn=decoderCfg.dongles&&decoderCfg.dongles.some(d=>d.decoder==='flarm');
+    const flarmCfg=decoderCfg.flarm||{};
     html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
         <span style="font-size:20px;width:20px;text-align:center">${flarmOn?'🟢':'🔴'}</span>
         <div style="flex:1"><strong style="color:var(--accent)">FLARM / Open Glider Network</strong><br><span style="color:var(--dim);font-size:12px">${flarmOn?'Active — managed from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page':'Inactive — assign a dongle from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
-        <a href="https://ognrange.glidernet.org/?station=${encodeURIComponent((cfg.ogn&&cfg.ogn.station)||(cfg.station&&cfg.station.name)||'')}&lat=${(cfg.station&&cfg.station.lat)||''}&lng=${(cfg.station&&cfg.station.lon)||''}&zoom=10" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
+        <a href="https://ognrange.glidernet.org/?station=${encodeURIComponent(flarmCfg.ogn_station||(cfg.station&&cfg.station.name)||'')}&lat=${(cfg.station&&cfg.station.lat)||''}&lng=${(cfg.station&&cfg.station.lon)||''}&zoom=10" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
     </div>`;}
     html+=`<div style="padding:8px 0 8px 32px">
-        <div class="field"><label>Solo OGN</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${cfg.sdr_flarm&&cfg.sdr_flarm.ogn_only?'checked':''}></div>
+        <div class="field"><label>Solo OGN</label><input type="checkbox" data-dkey="flarm.ogn_only" ${(decoderCfg.flarm&&decoderCfg.flarm.ogn_only)?'checked':''}></div>
     </div>`;
 
     // Beast feeds
@@ -311,33 +303,59 @@ function renderConfigForm(){
 
     // Dynamic SDR Receivers section
     html+=`<div id="sdr-receivers-config"></div>`;
+    // Decoder configs section (loaded from /api/decoders)
+    html+=`<div id="decoder-configs"></div>`;
     document.getElementById('config-form').innerHTML=html;
     loadSdrReceiverConfig();
 }
 
-const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)'};
-const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟'};
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)',gsm:'GSM (935 MHz)',lte:'LTE (800 MHz)',iot868:'IoT 868 MHz'};
+const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟',gsm:'📶',lte:'📶',iot868:'🌡️'};
+
+let decoderCfg={};  // loaded from /api/decoders
 
 async function loadSdrReceiverConfig(){
     try{
-        const [devRes,rxRes]=await Promise.all([fetch('/api/devices').then(r=>r.json()),fetch('/api/receivers').then(r=>r.json())]);
+        const [devRes,rxRes,decRes]=await Promise.all([
+            fetch('/api/devices').then(r=>r.json()),
+            fetch('/api/receivers').then(r=>r.json()),
+            fetch('/api/decoders').then(r=>r.json())
+        ]);
+        decoderCfg=decRes;
+
+        // Determine which decoder types are active (have a dongle assigned)
+        const activeDecoders=new Set();
+        if(decRes.dongles){
+            for(const d of decRes.dongles){
+                if(d.decoder&&d.decoder!=='none') activeDecoders.add(d.decoder);
+            }
+        }
+
+        // ===== USB Dongles section =====
         let html='';
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🔌 USB Dongles</h3><div>`;
         const assigned=devRes.sdr_devices.filter(d=>d.role&&d.role!=='none');
         if(assigned.length===0&&rxRes.count===0){
-            html+=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--dim)">No SDR dongles assigned. Use the <a href="/devices.html" style="color:var(--accent)">Devices</a> page to assign roles to dongles.</p></div>`;
+            html+=`<p style="color:var(--dim)">No SDR dongles assigned. Use the <a href="/devices.html" style="color:var(--accent)">Devices</a> page to assign roles.</p>`;
         }else{
             for(const dev of assigned){
                 const rx=rxRes.receivers.find(r=>r.serial===dev.serial||r.serial_actual===dev.serial);
                 const role=rx?rx.role:dev.role;
                 const gain=rx?rx.gain:40.0;
                 const ppm=rx?rx.ppm:0;
-                const state=rx?rx.state:'legacy';
+                const state=rx?rx.state:'?';
                 const stCls=state==='running'?'ok':state==='error'?'err':'info';
                 const icon=roleIcons[role]||'📡';
                 const label=roleLabels[role]||role.toUpperCase();
-                html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${icon} ${label} — SN: ${dev.serial}</h3><div>`;
-                html+=`<div class="field"><label>Tuner</label><span style="color:var(--accent)">${dev.tuner} (${dev.freq_range})</span></div>`;
-                html+=`<div class="field"><label>State</label><span class="badge ${stCls}">${state.toUpperCase()}</span></div>`;
+                html+=`<div style="padding:10px 0;border-bottom:1px solid var(--border)">`;
+                html+=`<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">`;
+                html+=`<span style="font-size:18px">${icon}</span>`;
+                html+=`<strong style="color:var(--accent)">${dev.serial}</strong>`;
+                html+=`<span class="badge ${stCls}" style="margin-left:4px">${state}</span>`;
+                html+=`<span style="color:var(--dim);font-size:12px">→ ${label}</span>`;
+                html+=`<span style="color:var(--dim);font-size:11px;margin-left:auto">${dev.tuner} (${dev.freq_range})</span>`;
+                html+=`</div>`;
+                // Gain selector
                 let gainHtml='';
                 const gList=(rx&&rx.gain_list&&rx.gain_list.length>0)?rx.gain_list:null;
                 if(gList){
@@ -355,29 +373,114 @@ async function loadSdrReceiverConfig(){
                     html+=`<button id="ag_${dev.serial}" onclick="autoGain('${dev.serial}')" style="font-size:12px;padding:4px 12px;background:#2a1a0a;border:1px solid #ff9800;color:#ff9800;border-radius:4px;cursor:pointer;white-space:nowrap" title="Sweep all gain steps and pick the best">🔍 Auto</button>`;
                 }
                 html+=`</div></div>`;
-                const calBtn=role==='flarm'?`<button onclick="calibratePPM('${dev.serial}')" id="cal_btn_${dev.serial}" style="font-size:12px;padding:4px 12px;background:var(--card);border:1px solid var(--border);color:var(--accent);border-radius:4px;cursor:pointer;white-space:nowrap" title="Calibrate crystal frequency using GSM base station signals (takes ~10s, receiver stops briefly)">📡 Calibrate</button>`:'';
-                html+=`<div class="field"><label>PPM Correction</label><div style="display:flex;gap:8px;align-items:center"><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}" style="width:100px">${calBtn}</div></div>`;
-                html+=`<div style="grid-column:1/-1;min-height:16px;font-size:11px;padding:0 0 4px 0" id="cal_status_${dev.serial}"></div>`;
-                if(role==='adsb'){
-                    const ac=cfg.sdr_adsb||{};
-                    html+=`<div class="field"><label>Adaptive Range</label><input type="checkbox" data-key="sdr_adsb.adaptive_range" ${ac.adaptive_range?'checked':''}></div>`;
-                    html+=`<div class="field"><label>Adaptive Burst</label><input type="checkbox" data-key="sdr_adsb.adaptive_burst" ${ac.adaptive_burst?'checked':''}></div>`;
-                    html+=`<div class="field"><label>Min Gain (dB)</label><input type="number" step="0.1" data-key="sdr_adsb.adaptive_min_gain" value="${ac.adaptive_min_gain||0}"></div>`;
-                    html+=`<div class="field"><label>Max Gain (dB)</label><input type="number" step="0.1" data-key="sdr_adsb.adaptive_max_gain" value="${ac.adaptive_max_gain||99999}"></div>`;
-                    html+=`<div class="field"><label>CRC Rescue</label><input type="checkbox" data-key="sdr_adsb.crc_rescue" ${ac.crc_rescue?'checked':''}></div>`;
-                    html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Attempts to recover messages with corrupted preamble but valid CRC</div>`;
-                    html+=`<div class="field"><label>Error Correction</label><input type="number" step="1" data-key="sdr_adsb.fix_crc" value="${ac.fix_crc!=null?ac.fix_crc:1}" min="0" max="2"></div>`;
-                    html+=`<div class="field"><label>Mode A/C</label><input type="checkbox" data-key="sdr_adsb.mode_ac" ${ac.mode_ac?'checked':''}></div>`;
-                }
-                if(role==='flarm'){
-                    const fc=cfg.sdr_flarm||{};
-                    html+=`<div class="field"><label>Solo OGN</label><input type="checkbox" data-key="sdr_flarm.ogn_only" ${fc.ogn_only?'checked':''}></div>`;
-                    html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">If enabled, FLARM data is sent only to OGN</div>`;
-                }
-                html+=`</div></div>`;
+                const calBtn=role==='flarm'?`<button onclick="calibratePPM('${dev.serial}')" id="cal_btn_${dev.serial}" style="font-size:12px;padding:4px 12px;background:var(--card);border:1px solid var(--border);color:var(--accent);border-radius:4px;cursor:pointer;white-space:nowrap" title="Calibrate PPM">📡 Calibrate</button>`:'';
+                html+=`<div class="field"><label>PPM</label><div style="display:flex;gap:8px;align-items:center"><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}" style="width:100px">${calBtn}</div></div>`;
+                html+=`<div style="min-height:12px;font-size:11px" id="cal_status_${dev.serial}"></div>`;
+                html+=`</div>`;
             }
         }
+        html+=`</div></div>`;
         document.getElementById('sdr-receivers-config').innerHTML=html;
+
+        // ===== Decoder configs section =====
+        let dhtml='';
+
+        // ADS-B decoder
+        {const active=activeDecoders.has('adsb');
+        const dc=decRes.adsb||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">✈️ ADS-B Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div style="margin-bottom:12px"><strong style="color:var(--dim);font-size:12px">Decode Options</strong></div>`;
+        dhtml+=`<div class="field"><label>Error Correction</label><input type="number" step="1" data-dkey="adsb.fix_crc" value="${dc.fix_crc!=null?dc.fix_crc:1}" min="0" max="2"></div>`;
+        dhtml+=`<div class="field"><label>CRC check</label><input type="checkbox" data-dkey="adsb.check_crc" ${dc.check_crc?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Fix DF</label><input type="checkbox" data-dkey="adsb.fix_df" ${dc.fix_df?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>DF24 (Comm-D)</label><input type="checkbox" data-dkey="adsb.enable_df24" ${dc.enable_df24?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Mode A/C</label><input type="checkbox" data-dkey="adsb.mode_ac" ${dc.mode_ac?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Mode A/C auto</label><input type="checkbox" data-dkey="adsb.mode_ac_auto" ${dc.mode_ac_auto?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>CRC Rescue</label><input type="checkbox" data-dkey="adsb.crc_rescue" ${dc.crc_rescue?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Use GNSS alt</label><input type="checkbox" data-dkey="adsb.use_gnss" ${dc.use_gnss?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>MLAT timestamps</label><input type="checkbox" data-dkey="adsb.mlat" ${dc.mlat?'checked':''}></div>`;
+        dhtml+=`<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)"><strong style="color:var(--dim);font-size:12px">Adaptive Gain</strong></div>`;
+        dhtml+=`<div class="field"><label>Adaptive Range</label><input type="checkbox" data-dkey="adsb.adaptive_range" ${dc.adaptive_range?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Adaptive Burst</label><input type="checkbox" data-dkey="adsb.adaptive_burst" ${dc.adaptive_burst?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Min Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_min_gain" value="${dc.adaptive_min_gain||0}"></div>`;
+        dhtml+=`<div class="field"><label>Max Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_max_gain" value="${dc.adaptive_max_gain||99999}"></div>`;
+        dhtml+=`<div class="field"><label>Duty cycle</label><input type="number" step="0.01" data-dkey="adsb.adaptive_duty_cycle" value="${dc.adaptive_duty_cycle||0.5}"></div>`;
+        dhtml+=`</div></div>`;}
+
+        // FLARM decoder (includes keys)
+        {const active=activeDecoders.has('flarm');
+        const dc=decRes.flarm||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🚩 FLARM Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Solo OGN</label><input type="checkbox" data-dkey="flarm.ogn_only" ${dc.ogn_only?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>OGN Server</label><input type="text" data-dkey="flarm.ogn_server" value="${dc.ogn_server||''}"></div>`;
+        dhtml+=`<div class="field"><label>OGN Port</label><input type="number" data-dkey="flarm.ogn_port" value="${dc.ogn_port||14580}"></div>`;
+        dhtml+=`<div class="field"><label>OGN Station</label><input type="text" data-dkey="flarm.ogn_station" value="${dc.ogn_station||''}"></div>`;
+        dhtml+=`<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)"><strong style="color:var(--accent);font-size:13px">🔑 Encryption Keys</strong>
+            <span class="badge ${dc.keys_loaded?'ok':'err'}" style="margin-left:8px">${dc.keys_loaded?'Loaded':'Not loaded'}</span></div>`;
+        dhtml+=`<div class="field"><label>key_table (12×hex)</label><input type="text" data-dkey="flarm.key_table" value="${dc.key_table||''}" style="font-family:monospace;font-size:11px;letter-spacing:0.5px"></div>`;
+        dhtml+=`<div class="field"><label>key2</label><input type="text" data-dkey="flarm.key2" value="${dc.key2||''}" style="font-family:monospace"></div>`;
+        dhtml+=`<div class="field"><label>key3</label><input type="text" data-dkey="flarm.key3" value="${dc.key3||''}" style="font-family:monospace"></div>`;
+        dhtml+=`<div class="field"><label>key4</label><input type="text" data-dkey="flarm.key4" value="${dc.key4||''}" style="font-family:monospace"></div>`;
+        dhtml+=`<div class="field"><label>key5 (4×hex)</label><input type="text" data-dkey="flarm.key5" value="${dc.key5||''}" style="font-family:monospace"></div>`;
+        dhtml+=`</div></div>`;}
+
+        // ACARS decoder
+        {const active=activeDecoders.has('acars');
+        const dc=decRes.acars||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 ACARS Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Channels</label><span style="color:var(--dim);font-size:12px">${(dc.channels||[]).map(f=>(f/1e6).toFixed(3)+' MHz').join(', ')}</span></div>`;
+        dhtml+=`</div></div>`;}
+
+        // VDL2 decoder
+        {const active=activeDecoders.has('vdl2');
+        const dc=decRes.vdl2||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 VDL2 Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Squelch (dBFS)</label><input type="number" step="1" data-dkey="vdl2.squelch_level" value="${dc.squelch_level||-32}"></div>`;
+        dhtml+=`<div class="field"><label>Channels</label><span style="color:var(--dim);font-size:12px">${(dc.channels||[]).map(f=>(f/1e6).toFixed(3)+' MHz').join(', ')}</span></div>`;
+        dhtml+=`</div></div>`;}
+
+        // Radiosonde decoder
+        {const active=activeDecoders.has('radiosonde');
+        const dc=decRes.radiosonde||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🎈 Radiosonde Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>SondeHub upload</label><input type="checkbox" data-dkey="radiosonde.sondehub_upload" ${dc.sondehub_upload?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>radiosondy.info</label><input type="checkbox" data-dkey="radiosonde.radiosondy_upload" ${dc.radiosondy_upload?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>wettersonde.net</label><input type="checkbox" data-dkey="radiosonde.wettersonde_upload" ${dc.wettersonde_upload?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Callsign</label><input type="text" data-dkey="radiosonde.callsign" value="${dc.callsign||''}"></div>`;
+        dhtml+=`</div></div>`;}
+
+        // POCSAG decoder
+        {const active=activeDecoders.has('pocsag');
+        const dc=decRes.pocsag||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📟 POCSAG Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="pocsag.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Channels</label><span style="color:var(--dim);font-size:12px">${(dc.channels||[]).map(f=>(f/1e6).toFixed(3)+' MHz').join(', ')}</span></div>`;
+        dhtml+=`</div></div>`;}
+
+        // GSM decoder
+        {const active=activeDecoders.has('gsm');
+        const dc=decRes.gsm||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📶 GSM Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="gsm.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>ARFCN Freq (Hz)</label><input type="number" data-dkey="gsm.arfcn_freq" value="${dc.arfcn_freq||947000000}"></div>`;
+        dhtml+=`</div></div>`;}
+
+        // LTE decoder
+        {const active=activeDecoders.has('lte');
+        const dc=decRes.lte||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📶 LTE Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="lte.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label>Hop enabled</label><input type="checkbox" data-dkey="lte.hop_enabled" ${dc.hop_enabled?'checked':''}></div>`;
+        dhtml+=`</div></div>`;}
+
+        // IoT 868 decoder
+        {const active=activeDecoders.has('iot868');
+        const dc=decRes.iot868||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🌡️ IoT 868 Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="iot868.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
+        dhtml+=`</div></div>`;}
+
+        document.getElementById('decoder-configs').innerHTML=dhtml;
     }catch(e){
         document.getElementById('sdr-receivers-config').innerHTML=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--danger)">Error: ${e}</p></div>`;
     }
@@ -385,8 +488,12 @@ async function loadSdrReceiverConfig(){
 
 async function loadConfig(){
     try{
-        const r=await fetch('/api/config');
-        cfg=await r.json();
+        const [cfgRes,decRes]=await Promise.all([
+            fetch('/api/config').then(r=>r.json()),
+            fetch('/api/decoders').then(r=>r.json())
+        ]);
+        cfg=cfgRes;
+        decoderCfg=decRes;
         renderConfigForm();
     }catch(e){document.getElementById('config-form').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
 }
@@ -496,6 +603,16 @@ async function saveConfig(){
             }
         }
     });
+    // Collect decoder config changes (data-dkey attributes)
+    let dcUpdate={};
+    document.querySelectorAll('[data-dkey]').forEach(el=>{
+        const keys=el.dataset.dkey.split('.');
+        let obj=dcUpdate;
+        for(let i=0;i<keys.length-1;i++){if(!obj[keys[i]])obj[keys[i]]={};obj=obj[keys[i]];}
+        if(el.type==='checkbox'){obj[keys[keys.length-1]]=el.checked;}
+        else if(el.type==='number'){obj[keys[keys.length-1]]=parseFloat(el.value)||0;}
+        else{obj[keys[keys.length-1]]=el.value;}
+    });
     if(hasError){
         document.getElementById('save-status').textContent='❌ Forbidden characters in highlighted fields';
         document.getElementById('save-status').style.color='var(--danger)';
@@ -511,7 +628,6 @@ async function saveConfig(){
             const ppmEl=document.getElementById('rx_ppm_'+serial);
             const gain=parseFloat(gel.value)||40.0;
             const ppm=ppmEl?parseInt(ppmEl.value)||0:0;
-            // Find current role from rxData
             let role='none';
             try{const rxRes=await fetch('/api/receivers').then(r=>r.json());
             const rx=rxRes.receivers.find(r=>r.serial===serial||r.serial_actual===serial);
@@ -520,6 +636,11 @@ async function saveConfig(){
                 await fetch('/api/receivers/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({serial:serial,role:role,gain:gain,ppm:ppm})});
             }
         }
+        // Save decoder configs
+        if(Object.keys(dcUpdate).length>0){
+            await fetch('/api/decoders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(dcUpdate)});
+        }
+        // Save general config
         const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
         const j=await r.json();
         if(j.error){document.getElementById('save-status').textContent='❌ '+j.error;document.getElementById('save-status').style.color='var(--danger)';return;}

@@ -312,6 +312,12 @@ typedef enum {
 #include "sondehub_client.h"
 #include "config_panel.h"
 #include "sdr_receiver.h"
+#include "decoder_config.h"
+#include "station_config.h"
+#include "network_config.h"
+#include "display_config.h"
+#include "json_config.h"
+#include "app_config.h"
 
 //======================== structure declarations =========================
 

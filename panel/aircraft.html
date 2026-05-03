@@ -59,6 +59,7 @@ tr:hover td{background:var(--hover)}
 <a href="/devices.html">📻 Devices</a>
 <a href="/gsm.html">📶 GSM</a>
 <a href="/lte.html">📶 LTE</a>
+<a href="/iot868.html">🌡️ IoT 868</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -82,6 +83,7 @@ tr:hover td{background:var(--hover)}
 <th onclick="sortAC('track')">Hdg</th>
 <th onclick="sortAC('lat')">Lat</th>
 <th onclick="sortAC('lon')">Lon</th>
+<th onclick="sortAC('dist')">Dist</th>
 <th onclick="sortAC('baro_rate')">VS</th>
 <th onclick="sortAC('category')">Cat</th>
 <th onclick="sortAC('rssi')">RSSI</th>
@@ -102,7 +104,22 @@ tr:hover td{background:var(--hover)}
 
 <script>
 let acData=[], sortKey='hex', sortDir=1, selectedIcao=null;
+let stationLat=null, stationLon=null;
 const icaoCache={};
+
+function calcDist(lat,lon){
+    if(stationLat==null||stationLon==null||lat==null||lon==null)return null;
+    const R=6371000;
+    const dLat=(lat-stationLat)*Math.PI/180;
+    const dLon=(lon-stationLon)*Math.PI/180;
+    const a=Math.sin(dLat/2)**2+Math.cos(stationLat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
+    return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function fmtDist(m){
+    if(m==null)return '';
+    if(m<1000)return Math.round(m)+'m';
+    return Math.round(m/1000)+'km';
+}
 
 function escapeHtml(s){
     if(typeof s!=='string')return s;
@@ -233,6 +250,7 @@ function getSquawkTitle(sq){
 }
 function sortAC(key){if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=1;}renderAC();}
 
+
 function getSource(a){
     const cs=(a.flight||'').trim().toUpperCase();
     if(cs.startsWith('FLR'))return{label:'FLARM',bg:'rgba(0,200,100,0.18)',col:'#00cc66',title:'FLARM 868 MHz legacy'};
@@ -270,8 +288,10 @@ function isMilitary(a){
 
 function renderAC(){
     acData.sort((a,b)=>{
-        let va=a[sortKey],vb=b[sortKey];
-        if(va==null)va='';if(vb==null)vb='';
+        let va,vb;
+        if(sortKey==='dist'){va=calcDist(a.lat,a.lon);vb=calcDist(b.lat,b.lon);}
+        else{va=a[sortKey];vb=b[sortKey];}
+        if(va==null)va=Infinity;if(vb==null)vb=Infinity;
         if(typeof va==='number'&&typeof vb==='number')return(va-vb)*sortDir;
         return String(va).localeCompare(String(vb))*sortDir;
     });
@@ -306,6 +326,7 @@ function renderAC(){
             <td>${a.track!=null?Math.round(a.track)+'°':''}</td>
             <td>${a.lat!=null?a.lat.toFixed(4):''}</td>
             <td>${a.lon!=null?a.lon.toFixed(4):''}</td>
+            <td>${fmtDist(calcDist(a.lat,a.lon))}</td>
             <td>${a.baro_rate!=null?a.baro_rate:''}</td>
             <td>${safeCat}</td>
             <td>${a.rssi!=null?a.rssi.toFixed(1):''}</td>
@@ -454,6 +475,7 @@ async function loadAircraft(){
 
 loadAircraft();
 setInterval(loadAircraft,1000);
+fetch('/api/config').then(r=>r.json()).then(d=>{if(d.station){stationLat=d.station.lat;stationLon=d.station.lon;}}).catch(()=>{});
 fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
 </script>
 </body>

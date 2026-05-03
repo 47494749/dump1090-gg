@@ -31,6 +31,7 @@ typedef struct {
 
     // Virtual IQ file input (--flarm-ifile)
     char   ifile_path[512];    // Path to raw IQ file (uint8 I/Q pairs, 1.6 MSPS)
+    uint32_t ifile_time;       // Unix timestamp of file (mtime), used for XXTEA decrypt
 } flarm_reader_config_t;
 
 extern flarm_reader_config_t FlarmConfig;

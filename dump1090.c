@@ -53,6 +53,7 @@
 #include "pocsag_demod.h"
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
+#include "iot_tracker.h"
 
 #include <stdarg.h>
 
@@ -756,11 +757,21 @@ int main(int argc, char **argv) {
     // Initialize multi-SDR receiver manager
     sdrManagerInit();
 
+    // Initialize decoder configs with defaults, then load from file
+    decoderConfigInit();
+    if (!decoderConfigLoad()) {
+        // JSON config doesn't exist yet - still try to load FLARM keys
+        decoderConfigLoadFlarmKeys(DecoderConfigs.flarm.keys_file);
+    }
+
     // Initialize GSM cell tracker
     gsmTrackerInit();
 
     // Initialize LTE cell tracker
     lteTrackerInit();
+
+    // Initialize IoT 868 MHz device tracker
+    iotTrackerInit();
 
     // signal handlers:
     signal(SIGINT, sigintHandler);
@@ -1288,6 +1299,9 @@ int main(int argc, char **argv) {
     // Initialization
     log_with_timestamp("%s %s starting up.", MODES_DUMP1090_VARIANT, MODES_DUMP1090_VERSION);
     modesInit();
+
+    // Sync new config structs from Modes (migration step)
+    appConfigSyncFromModes();
 
     // Probe all RTL-SDR tuner types before any device is opened
     panelProbeAllTuners();

@@ -49,6 +49,9 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
 // Update receiver position (can be called at any time)
 void flarm_demod_set_position(struct flarm_state *state, double lat, double lon, float alt_geoid);
 
+// Override time used for XXTEA decryption (0 = use real time)
+void flarm_demod_set_time_override(struct flarm_state *state, uint32_t base_time);
+
 // Get stats
 typedef struct {
     uint64_t samples_processed;

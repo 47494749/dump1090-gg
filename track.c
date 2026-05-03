@@ -1251,10 +1251,10 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
                     const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
                     if (mm->squawk == 0x7500 || mm->squawk == 0x7600 || mm->squawk == 0x7700) {
                         const char *desc = mm->squawk == 0x7500 ? "HIJACK" : mm->squawk == 0x7600 ? "NORDO" : "EMERGENCY";
-                        panelLogMessage("\xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 SQUAWK %04x %s (was %04x)",
+                        panelLogMessage("[ADSB] \xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 SQUAWK %04x %s (was %04x)",
                                         a->addr, cs, mm->squawk, desc, old_squawk);
                     } else {
-                        panelLogMessage("%06X [%s] \xe2\x86\x92 SQUAWK %04x (was %04x)",
+                        panelLogMessage("[ADSB] %06X [%s] \xe2\x86\x92 SQUAWK %04x (was %04x)",
                                         a->addr, cs, mm->squawk, old_squawk);
                     }
                 }
@@ -1299,7 +1299,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
             };
             const char *ename = (mm->emergency < 8) ? emerg_names[mm->emergency] : "UNKNOWN";
             const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
-            panelLogMessage("\xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 EMERGENCY %s",
+            panelLogMessage("[ADSB] \xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 EMERGENCY %s",
                             a->addr, cs, ename);
         }
         a->emergency = mm->emergency;
@@ -1383,7 +1383,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
             a->callsign_matched = 0;
 
             if (PanelState.enabled && mm->callsign[0]) {
-                panelLogMessage("%06X \xe2\x86\x92 IDENT %s", a->addr, mm->callsign);
+                panelLogMessage("[ADSB] %06X \xe2\x86\x92 IDENT %s", a->addr, mm->callsign);
             }
         }
         memcpy(a->callsign, mm->callsign, sizeof(a->callsign));

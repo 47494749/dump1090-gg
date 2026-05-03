@@ -31,9 +31,9 @@
 #define FLARM_CRC_SIZE          2           // CCITT-FFFF CRC16
 #define FLARM_PACKET_TOTAL      (FLARM_PAYLOAD_SIZE + FLARM_CRC_SIZE)
 
-// Manchester-encoded preamble/syncword
+// Manchester-encoded syncword (same as OGN: pre-Manchester = 0x0AF3656C)
 static const uint8_t FLARM_SYNCWORD[FLARM_SYNCWORD_SIZE] = {
-    0x55, 0x99, 0xA5, 0xA9, 0x55, 0x66, 0x65, 0x96
+    0xAA, 0x66, 0x55, 0xA5, 0x96, 0x99, 0x96, 0x5A
 };
 
 // Aircraft type codes (same as OGN)

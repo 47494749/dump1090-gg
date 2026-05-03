@@ -17,12 +17,15 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <math.h>
 #include "config_panel.h"
 #include "pocsag_demod.h"
 #include "gsm_decode.h"
 #include "gsm_tracker.h"
 #include "lte_decode.h"
 #include "lte_tracker.h"
+#include "iot_decode.h"
+#include "iot_tracker.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -34,6 +37,7 @@ sdr_manager_t SdrManager;
 int PocsagOutputEnabled = 1;  // toggled from panel; 1 = decode & show messages
 int GsmOutputEnabled = 1;     // toggled from panel; 1 = decode & show GSM cells
 int LteOutputEnabled = 1;     // toggled from panel; 1 = decode & show LTE cells
+int IotOutputEnabled = 1;     // toggled from panel; 1 = decode & show IoT devices
 
 // ======================== Utility ========================
 
@@ -48,6 +52,7 @@ const char *sdrRoleName(sdr_role_t role)
         case SDR_ROLE_POCSAG:     return "pocsag";
         case SDR_ROLE_GSM:        return "gsm";
         case SDR_ROLE_LTE:        return "lte";
+        case SDR_ROLE_IOT868:     return "iot868";
         default:                  return "none";
     }
 }
@@ -128,8 +133,12 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
         config->role = SDR_ROLE_LTE;
         config->freq = LTE_DEFAULT_FREQ;
         config->sample_rate = LTE_SAMPLE_RATE;
+    } else if (!strcasecmp(token, "iot868")) {
+        config->role = SDR_ROLE_IOT868;
+        config->freq = IOT_CENTER_FREQ;
+        config->sample_rate = IOT_SAMPLE_RATE;
     } else {
-        fprintf(stderr, "sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte)\n", token);
+        fprintf(stderr, "sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte/iot868)\n", token);
         return false;
     }
 
@@ -145,6 +154,8 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
             config->freq = (int)strtol(token + 5, NULL, 10);
         } else if (!strncasecmp(token, "rate=", 5)) {
             config->sample_rate = strtod(token + 5, NULL);
+        } else if (!strncasecmp(token, "path=", 5)) {
+            strncpy(config->ifile_path, token + 5, sizeof(config->ifile_path) - 1);
         } else {
             fprintf(stderr, "sdr_receiver: unknown option '%s'\n", token);
             return false;
@@ -526,6 +537,40 @@ bool rxOpen(sdr_receiver_t *rx)
         return false;
     }
 
+    // ---- Virtual file device (--receiver FILE:role:path=/path/to/file.raw) ----
+    if (rx->config.ifile_path[0] != '\0') {
+        FILE *fp = fopen(rx->config.ifile_path, "rb");
+        if (!fp) {
+            fprintf(stderr, "rx[%d]: cannot open file '%s': %s\n",
+                    rx->id, rx->config.ifile_path, strerror(errno));
+            rx->state = RX_STATE_ERROR;
+            return false;
+        }
+        fclose(fp);
+
+        snprintf(rx->serial_actual, sizeof(rx->serial_actual), "FILE_%d", rx->id);
+        snprintf(rx->manufacturer, sizeof(rx->manufacturer), "Virtual");
+        snprintf(rx->product, sizeof(rx->product), "IQ File Replay");
+
+        rx->decoder_ops = decoderOpsForRole(rx->config.role);
+        if (rx->decoder_ops) {
+            if (!rx->decoder_ops->init(rx)) {
+                fprintf(stderr, "rx[%d]: can't init decoder for virtual device (role %s)\n",
+                        rx->id, sdrRoleName(rx->config.role));
+                rx->state = RX_STATE_ERROR;
+                return false;
+            }
+        }
+
+        rx->dropped = 0;
+        rx->sample_counter = 0;
+        rx->state = RX_STATE_OPEN;
+
+        fprintf(stderr, "rx[%d]: virtual file device opened (role=%s, file=%s)\n",
+                rx->id, sdrRoleName(rx->config.role), rx->config.ifile_path);
+        return true;
+    }
+
     // All roles (ADSB, FLARM, ACARS, VDL2, Radiosonde) open the RTL-SDR device
     // Decoder roles skip converter/FIFO setup (handled after RTL-SDR configuration below)
 
@@ -740,6 +785,65 @@ done:
     return NULL;
 }
 
+// File replay reader thread — reads IQ file in loop at real-time pace
+static void *rx_file_reader_thread(void *arg)
+{
+    sdr_receiver_t *rx = (sdr_receiver_t *)arg;
+    const char *path = rx->config.ifile_path;
+    const unsigned buf_size = 262144;  // 256 KB per read
+    uint8_t *buf = malloc(buf_size);
+    if (!buf) {
+        fprintf(stderr, "rx[%d]: file reader: failed to allocate buffer\n", rx->id);
+        return NULL;
+    }
+
+    fprintf(stderr, "rx[%d]: file reader thread started (role=%s, file=%s)\n",
+            rx->id, sdrRoleName(rx->config.role), path);
+
+    unsigned loop_count = 0;
+
+    while (!Modes.exit && rx->state == RX_STATE_RUNNING) {
+        FILE *fp = fopen(path, "rb");
+        if (!fp) {
+            fprintf(stderr, "rx[%d]: file reader: cannot open '%s': %s\n",
+                    rx->id, path, strerror(errno));
+            break;
+        }
+
+        if (loop_count > 0) {
+            fprintf(stderr, "rx[%d]: file reader: replaying (loop %u)\n", rx->id, loop_count);
+        }
+        loop_count++;
+
+        while (!Modes.exit && rx->state == RX_STATE_RUNNING) {
+            size_t nread = fread(buf, 1, buf_size, fp);
+            if (nread == 0) break;  // EOF → loop
+            nread &= ~(size_t)1;    // ensure even (IQ pairs)
+
+            if (nread > 0 && rx->decoder_ops && rx->decoder_ops->process) {
+                rx->decoder_ops->process(rx, buf, (uint32_t)nread);
+            }
+            rx->sample_counter += nread / 2;
+
+            // Throttle to real-time pace
+            double samples = nread / 2.0;
+            double sleep_us = (samples / rx->config.sample_rate) * 1e6;
+            if (sleep_us > 0) {
+                struct timespec ts;
+                ts.tv_sec = (time_t)(sleep_us / 1e6);
+                ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+                nanosleep(&ts, NULL);
+            }
+        }
+
+        fclose(fp);
+    }
+
+    free(buf);
+    fprintf(stderr, "rx[%d]: file reader thread exiting (loops=%u)\n", rx->id, loop_count);
+    return NULL;
+}
+
 bool rxStart(sdr_receiver_t *rx)
 {
     if (rx->state != RX_STATE_OPEN) {
@@ -747,12 +851,12 @@ bool rxStart(sdr_receiver_t *rx)
         return false;
     }
 
-    // External decoder: spawn process
-    // Decoder roles use the same reader thread, no special start needed
-
     rx->state = RX_STATE_RUNNING;
 
-    if (pthread_create(&rx->thread, NULL, rx_reader_thread, rx)) {
+    // Virtual file device: use file reader thread
+    void *(*thread_fn)(void *) = rx->config.ifile_path[0] ? rx_file_reader_thread : rx_reader_thread;
+
+    if (pthread_create(&rx->thread, NULL, thread_fn, rx)) {
         fprintf(stderr, "rx[%d]: failed to create reader thread: %s\n", rx->id, strerror(errno));
         rx->state = RX_STATE_ERROR;
         return false;
@@ -847,9 +951,9 @@ int sdrEnumerateDevices(char serials[][64], int max_devices) { MODES_NOTUSED(ser
 // ACARS message callback → panelLogMessage
 static void acars_message_handler(const acars_msg_t *msg, void *ctx)
 {
-    (void)ctx;
-    panelLogMessage("[ACARS] %.3f MHz %s %s (reg:%s) [%s] %s",
-                    msg->freq / 1e6,
+    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
+    panelLogMessage("[ACARS rx%d] %.3f MHz %s %s (reg:%s) [%s] %s",
+                    rx ? rx->id : -1, msg->freq / 1e6,
                     msg->flight[0] ? msg->flight : "???",
                     msg->label,
                     msg->reg[0] ? msg->reg : "?",
@@ -860,10 +964,10 @@ static void acars_message_handler(const acars_msg_t *msg, void *ctx)
 // VDL2 message callback → panelLogMessage
 static void vdl2_message_handler(const vdl2_msg_t *msg, void *ctx)
 {
-    (void)ctx;
+    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
     if (msg->has_acars) {
-        panelLogMessage("[VDL2] %.3f MHz %s %s (reg:%s) [%s] SNR=%.0fdB %s",
-                        msg->freq / 1e6,
+        panelLogMessage("[VDL2 rx%d] %.3f MHz %s %s (reg:%s) [%s] SNR=%.0fdB %s",
+                        rx ? rx->id : -1, msg->freq / 1e6,
                         msg->frame_type,
                         msg->flight[0] ? msg->flight : "???",
                         msg->reg[0] ? msg->reg : "?",
@@ -871,8 +975,8 @@ static void vdl2_message_handler(const vdl2_msg_t *msg, void *ctx)
                         msg->snr,
                         msg->text[0] ? msg->text : "(no text)");
     } else {
-        panelLogMessage("[VDL2] %.3f MHz %s src=%06X dst=%06X SNR=%.0fdB [%d bytes]",
-                        msg->freq / 1e6,
+        panelLogMessage("[VDL2 rx%d] %.3f MHz %s src=%06X dst=%06X SNR=%.0fdB [%d bytes]",
+                        rx ? rx->id : -1, msg->freq / 1e6,
                         msg->frame_type,
                         msg->src.addr,
                         msg->dst.addr,
@@ -884,23 +988,23 @@ static void vdl2_message_handler(const vdl2_msg_t *msg, void *ctx)
 // Sonde message callback → panelLogMessage + SondeHub upload
 static void sonde_message_handler(const sonde_msg_t *msg, void *ctx)
 {
-    (void)ctx;
+    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
     if (msg->valid_pos) {
-        panelLogMessage("[SONDE] %s %s pos=%.4f,%.4f alt=%.0fm vel=%.1fm/s frame=%d",
-                        msg->type, msg->serial,
+        panelLogMessage("[SONDE rx%d] %s %s pos=%.4f,%.4f alt=%.0fm vel=%.1fm/s frame=%d",
+                        rx ? rx->id : -1, msg->type, msg->serial,
                         msg->lat, msg->lon, msg->alt,
                         msg->vel_h, msg->frame_num);
         sondehubClientSubmit(msg);
     } else {
-        panelLogMessage("[SONDE] %s %s frame=%d (no GPS fix)",
-                        msg->type, msg->serial, msg->frame_num);
+        panelLogMessage("[SONDE rx%d] %s %s frame=%d (no GPS fix)",
+                        rx ? rx->id : -1, msg->type, msg->serial, msg->frame_num);
     }
 }
 
 // POCSAG message callback → panelLogMessage
 static void pocsag_message_handler(const pocsag_msg_t *msg, void *ctx)
 {
-    (void)ctx;
+    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
     if (!PocsagOutputEnabled) return;
 
     const char *freq_str = "";
@@ -911,19 +1015,19 @@ static void pocsag_message_handler(const pocsag_msg_t *msg, void *ctx)
     }
 
     if (msg->is_tone_only) {
-        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d TONE-ONLY",
-                        freq_str, msg->baud_rate, msg->address, msg->function);
+        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d TONE-ONLY",
+                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function);
     } else if (msg->is_alpha && msg->alpha_len > 0) {
-        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d \"%s\"",
-                        freq_str, msg->baud_rate, msg->address, msg->function,
+        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d \"%s\"",
+                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function,
                         msg->alpha_msg);
     } else if (msg->is_numeric && msg->numeric_len > 0) {
-        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d num=%s",
-                        freq_str, msg->baud_rate, msg->address, msg->function,
+        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d num=%s",
+                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function,
                         msg->numeric_msg);
     } else {
-        panelLogMessage("[POCSAG]%s %d baud addr=%07u func=%d (empty)",
-                        freq_str, msg->baud_rate, msg->address, msg->function);
+        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d (empty)",
+                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function);
     }
 }
 
@@ -943,21 +1047,21 @@ static void gsm_message_handler(const gsm_cell_info_t *cell, const char *msg_typ
         gsmTrackerUpdate(cell, &stats, sync);
     }
 
-    panelLogMessage("[GSM] MCC=%d MNC=%d LAC=%u CID=%u ARFCN=%d BSIC=%02X %s",
-                    cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
+    panelLogMessage("[GSM rx%d] MCC=%d MNC=%d LAC=%u CID=%u ARFCN=%d BSIC=%02X %s",
+                    rx ? rx->id : -1, cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
                     cell->arfcn, cell->bsic, msg_type);
 }
 
 // GSM Cell Broadcast callback
 static void gsm_cb_handler(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb, void *ctx)
 {
-    (void)ctx;
+    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
     if (!GsmOutputEnabled) return;
 
     gsmTrackerUpdateCB(cell, cb);
 
-    panelLogMessage("[GSM-CB] MCC=%d MNC=%d LAC=%u CID=%u serial=%u id=%u \"%s\"",
-                    cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
+    panelLogMessage("[GSM-CB rx%d] MCC=%d MNC=%d LAC=%u CID=%u serial=%u id=%u \"%s\"",
+                    rx ? rx->id : -1, cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
                     cb->serial_nr, cb->msg_id, cb->text);
 }
 
@@ -1098,6 +1202,13 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
                 rx->id, cfg.center_freq / 1e6, cfg.sample_rate);
         return true;
     }
+    case SDR_ROLE_IOT868: {
+        rx->decoder_state = iotDecoderCreate((uint32_t)rx->config.sample_rate);
+        if (!rx->decoder_state) return false;
+        fprintf(stderr, "rx[%d]: IoT 868 MHz decoder created, freq=%.3f MHz, sr=%.0f\n",
+                rx->id, rx->config.freq / 1e6, rx->config.sample_rate);
+        return true;
+    }
     default:
         return false;
     }
@@ -1125,6 +1236,9 @@ void rxDecoderDestroy(sdr_receiver_t *rx)
         break;
     case SDR_ROLE_LTE:
         lte_destroy((struct lte_state *)rx->decoder_state);
+        break;
+    case SDR_ROLE_IOT868:
+        iotDecoderDestroy((iot_decoder_state_t *)rx->decoder_state);
         break;
     default:
         break;
@@ -1178,6 +1292,9 @@ void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, unsigned len)
                 lte_set_freq((struct lte_state *)rx->decoder_state, hop_freq);
             }
         }
+        break;
+    case SDR_ROLE_IOT868:
+        iotDecoderProcess((iot_decoder_state_t *)rx->decoder_state, iq_data, len);
         break;
     default:
         break;
@@ -1279,6 +1396,21 @@ static const decoder_ops_t lte_decoder_ops = {
     .process = lteDecoderProcess,
     .drain   = lteDecoderDrain,
     .stop    = lteDecoderStop,
+};
+
+// ---- IoT 868 MHz decoder_ops ----
+
+static bool iot868_decoder_init(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
+static void iot868_decoder_process(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+static void iot868_decoder_drain(sdr_receiver_t *rx)    { (void)rx; }
+static void iot868_decoder_stop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+
+static const decoder_ops_t iot868_decoder_ops = {
+    .name    = "iot868",
+    .init    = iot868_decoder_init,
+    .process = iot868_decoder_process,
+    .drain   = iot868_decoder_drain,
+    .stop    = iot868_decoder_stop,
 };
 
 // ---- ADS-B decoder_ops ----
@@ -1424,6 +1556,7 @@ const decoder_ops_t *decoderOpsForRole(sdr_role_t role)
     case SDR_ROLE_POCSAG:     return &pocsag_decoder_ops;
     case SDR_ROLE_GSM:        return &gsm_decoder_ops;
     case SDR_ROLE_LTE:        return &lte_decoder_ops;
+    case SDR_ROLE_IOT868:     return &iot868_decoder_ops;
     default:                  return NULL;
     }
 }
@@ -1446,12 +1579,14 @@ int sdrManagerAddReceiver(const rx_config_t *config)
 {
     pthread_mutex_lock(&SdrManager.lock);
 
-    // Reject duplicate serials
-    for (int i = 0; i < SdrManager.count; i++) {
-        if (!strcmp(SdrManager.receivers[i].config.serial, config->serial)) {
-            fprintf(stderr, "sdr_manager: serial %s already managed (index %d)\n", config->serial, i);
-            pthread_mutex_unlock(&SdrManager.lock);
-            return -1;
+    // Reject duplicate serials (skip check for virtual file devices)
+    if (config->ifile_path[0] == '\0') {
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (!strcmp(SdrManager.receivers[i].config.serial, config->serial)) {
+                fprintf(stderr, "sdr_manager: serial %s already managed (index %d)\n", config->serial, i);
+                pthread_mutex_unlock(&SdrManager.lock);
+                return -1;
+            }
         }
     }
 
@@ -1612,16 +1747,20 @@ bool sdrManagerSave(void)
     }
 
     fprintf(f, "{\"receivers\":[\n");
+    int written = 0;
     for (int i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
-        if (i > 0) fprintf(f, ",\n");
+        // Don't persist virtual file devices
+        if (rx->config.ifile_path[0] != '\0') continue;
+        if (written > 0) fprintf(f, ",\n");
         fprintf(f, "  {\"serial\":\"%s\",\"role\":\"%s\",\"gain\":%.1f,\"ppm\":%d}",
                 rx->config.serial, sdrRoleName(rx->config.role),
                 rx->config.gain, rx->config.ppm_error);
+        written++;
     }
     fprintf(f, "\n]}\n");
     fclose(f);
-    fprintf(stderr, "sdr_manager: saved %d receivers to %s\n", SdrManager.count, RECEIVERS_JSON_PATH);
+    fprintf(stderr, "sdr_manager: saved %d receivers to %s\n", written, RECEIVERS_JSON_PATH);
     return true;
 }
 
@@ -1693,8 +1832,12 @@ int sdrManagerLoad(void)
         else if (!strcmp(role_str, "radiosonde")) role = SDR_ROLE_RADIOSONDE;
         else if (!strcmp(role_str, "pocsag")) role = SDR_ROLE_POCSAG;
         else if (!strcmp(role_str, "gsm")) role = SDR_ROLE_GSM;
+        else if (!strcmp(role_str, "lte")) role = SDR_ROLE_LTE;
+        else if (!strcmp(role_str, "iot868")) role = SDR_ROLE_IOT868;
 
         if (role != SDR_ROLE_NONE && serial[0]) {
+            // Skip FILE (virtual) entries — they are only valid via --receiver FILE:...
+            if (!strcmp(serial, "FILE")) { p = e + 1; continue; }
             // Skip duplicates within JSON itself
             if (sdrManagerFindBySerial(serial) < 0) {
                 rx_config_t cfg = {0};
@@ -1712,6 +1855,7 @@ int sdrManagerLoad(void)
                     case SDR_ROLE_POCSAG:     cfg.freq = 466075000;  cfg.sample_rate = 1200000; break;
                     case SDR_ROLE_GSM:        cfg.freq = 947000000;  cfg.sample_rate = 1000000; break;
                     case SDR_ROLE_LTE:        cfg.freq = LTE_DEFAULT_FREQ; cfg.sample_rate = LTE_SAMPLE_RATE; break;
+                    case SDR_ROLE_IOT868:     cfg.freq = IOT_CENTER_FREQ;  cfg.sample_rate = IOT_SAMPLE_RATE; break;
                     default: break;
                 }
                 if (sdrManagerAddReceiver(&cfg) >= 0) {

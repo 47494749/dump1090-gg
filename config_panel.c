@@ -24,7 +24,9 @@
 #include "gsm_calibrate.h"
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
+#include "iot_tracker.h"
 #include "pocsag_demod.h"
+#include "decoder_config.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -507,7 +509,8 @@ void panelLogMessage(const char *fmt, ...)
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
     gmtime_r(&ts.tv_sec, &tm);
-    int off = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d ",
+    int off = snprintf(line, sizeof(line), "%02d/%02d %02d:%02d:%02d.%03d ",
+                       tm.tm_mday, tm.tm_mon + 1,
                        tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts.tv_nsec / 1000000));
 
     va_start(ap, fmt);
@@ -875,6 +878,13 @@ static void panelApplyConfig(const char *body)
         panelLog("Panel: GSM output %s", GsmOutputEnabled ? "enabled" : "disabled");
     }
 
+    // IoT 868 decoder output toggle
+    const char *iot = json_find_obj(body, "sdr_iot868");
+    if (iot) {
+        IotOutputEnabled = json_get_bool(iot, "enabled", IotOutputEnabled) ? 1 : 0;
+        panelLog("Panel: IoT 868 output %s", IotOutputEnabled ? "enabled" : "disabled");
+    }
+
     panelLog("Panel: configuration applied at runtime (no restart)");
 }
 
@@ -1055,50 +1065,7 @@ static void api_get_config(int fd)
         Modes.fUserLat, Modes.fUserLon, Modes.maxRange / 1852.0,
         MlatConfig.user ? json_escape(esc, sizeof(esc), MlatConfig.user) : "");
 
-    // SDR ADS-B
-    p += snprintf(p, (size_t)(end - p),
-        "\"sdr_adsb\":{\"device\":\"%s\",\"gain\":%.1f,"
-        "\"adaptive_range\":%s,\"adaptive_burst\":%s,"
-        "\"adaptive_min_gain\":%.1f,\"adaptive_max_gain\":%.1f,"
-        "\"crc_rescue\":%s,\"fix_crc\":%d,\"mode_ac\":%s,\"mode_ac_auto\":%s},\n",
-        Modes.dev_name ? json_escape(esc, sizeof(esc), Modes.dev_name) : "",
-        Modes.gain == 999999 ? -10.0f : Modes.gain,  // -10 = auto
-        Modes.adaptive_range_control ? "true" : "false",
-        Modes.adaptive_burst_control ? "true" : "false",
-        Modes.adaptive_min_gain_db, Modes.adaptive_max_gain_db,
-        Modes.crc_rescue ? "true" : "false",
-        Modes.nfix_crc,
-        Modes.mode_ac ? "true" : "false",
-        Modes.mode_ac_auto ? "true" : "false");
-
-    // SDR FLARM — derive enabled from SdrManager
-    {
-        char esc2[256];
-        int flarm_active = 0;
-        char flarm_serial[64] = {0};
-        float flarm_gain = FlarmConfig.gain / 10.0f;
-        int flarm_ppm = FlarmConfig.ppm_error;
-        for (int i = 0; i < SdrManager.count; i++) {
-            if (SdrManager.receivers[i].config.role == SDR_ROLE_FLARM) {
-                flarm_active = 1;
-                snprintf(flarm_serial, sizeof(flarm_serial), "%.63s", SdrManager.receivers[i].config.serial);
-                flarm_gain = SdrManager.receivers[i].config.gain;
-                flarm_ppm = SdrManager.receivers[i].config.ppm_error;
-                break;
-            }
-        }
-        if (!flarm_serial[0])
-            snprintf(flarm_serial, sizeof(flarm_serial), "%.63s", FlarmConfig.device_serial);
-        p += snprintf(p, (size_t)(end - p),
-            "\"sdr_flarm\":{\"enabled\":%s,\"device\":\"%s\","
-            "\"gain\":%.1f,\"ppm\":%d,\"keys_file\":\"%s\","
-            "\"ogn_only\":%s},\n",
-            flarm_active ? "true" : "false",
-            json_escape(esc, sizeof(esc), flarm_serial),
-            flarm_gain, flarm_ppm,
-            json_escape(esc2, sizeof(esc2), FlarmConfig.keys_file),
-            FlarmConfig.flarm_ogn_only ? "true" : "false");
-    }
+    // SDR ADS-B and FLARM hardware details moved to /api/receivers and /api/decoders
 
     // Beast feeds
     p += snprintf(p, (size_t)(end - p), "\"beast_feeds\":[\n");
@@ -1205,6 +1172,25 @@ static void api_get_config(int fd)
             lteTrackerCount());
     }
 
+    // IoT 868 MHz SDR status
+    {
+        int iot_active = 0;
+        double iot_freq = 868.300;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_IOT868) {
+                iot_active = 1;
+                iot_freq = SdrManager.receivers[i].config.freq / 1e6;
+                break;
+            }
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "\"sdr_iot868\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\",\"devices\":%d},\n",
+            iot_active ? "true" : "false",
+            IotOutputEnabled ? "true" : "false",
+            iot_freq,
+            iotTrackerActiveCount());
+    }
+
     // Sonde feeds
     p += snprintf(p, (size_t)(end - p),
         "\"sondehub\":{\"enabled\":%s,\"callsign\":\"%s\"},\n",
@@ -1243,44 +1229,7 @@ static void api_get_config(int fd)
         "\"adsbhub\":{\"ckey\":\"%s\"},\n",
         Modes.adsbhub_ckey ? json_escape(esc, sizeof(esc), Modes.adsbhub_ckey) : "");
 
-    // Keys — actual values from loaded key files
-    {
-        char kt_str[256] = "";
-        char k5_str[64] = "";
-        char rb_key_str[48] = "";
-        char rb_nonce_str[24] = "";
-        uint32_t rb_c2_val = 0;
-
-        if (flarm_keys_are_loaded()) {
-            uint32_t kt[12], k5v[4];
-            flarm_get_key_table(kt);
-            flarm_get_key5(k5v);
-            snprintf(kt_str, sizeof(kt_str),
-                "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x",
-                kt[0],kt[1],kt[2],kt[3],kt[4],kt[5],kt[6],kt[7],kt[8],kt[9],kt[10],kt[11]);
-            snprintf(k5_str, sizeof(k5_str), "%08x,%08x,%08x,%08x", k5v[0],k5v[1],k5v[2],k5v[3]);
-        }
-
-        // RadarBox keys removed in light version
-
-        p += snprintf(p, (size_t)(end - p),
-            "\"keys\":{\"flarm_key_table\":\"%s\","
-            "\"flarm_key2\":\"%08x\","
-            "\"flarm_key3\":\"%08x\","
-            "\"flarm_key4\":\"%08x\","
-            "\"flarm_key5\":\"%s\","
-            "\"rb_key\":\"%s\","
-            "\"rb_nonce\":\"%s\","
-            "\"rb_c2\":\"%08x\"},\n",
-            kt_str,
-            flarm_keys_are_loaded() ? flarm_get_key2() : 0,
-            flarm_keys_are_loaded() ? flarm_get_key3() : 0,
-            flarm_keys_are_loaded() ? flarm_get_key4() : 0,
-            k5_str,
-            rb_key_str,
-            rb_nonce_str,
-            rb_c2_val);
-    }
+    // Keys moved to /api/decoders
 
     // Network ports
     p += snprintf(p, (size_t)(end - p),
@@ -1463,6 +1412,19 @@ static void api_get_gsm(int fd)
 static void api_get_lte(int fd)
 {
     char *json = lteTrackerToJSON();
+    if (!json) {
+        http_send(fd, 500, "text/plain", "OOM", 3);
+        return;
+    }
+    http_send_json(fd, json, (int)strlen(json));
+    free(json);
+}
+
+// ============================= API: GET /api/iot868 =======================
+
+static void api_get_iot868(int fd)
+{
+    char *json = iotTrackerToJSON();
     if (!json) {
         http_send(fd, 500, "text/plain", "OOM", 3);
         return;
@@ -2038,6 +2000,7 @@ static void rx_set_freq_for_role(rx_config_t *cfg)
         case SDR_ROLE_POCSAG:     cfg->freq = 466150000;  cfg->sample_rate = POCSAG_SAMPLE_RATE; break;
         case SDR_ROLE_GSM:        cfg->freq = 947000000;  cfg->sample_rate = 1000000;  break;
         case SDR_ROLE_LTE:        cfg->freq = LTE_DEFAULT_FREQ; cfg->sample_rate = LTE_SAMPLE_RATE; break;
+        case SDR_ROLE_IOT868:     cfg->freq = IOT_CENTER_FREQ;  cfg->sample_rate = IOT_SAMPLE_RATE; break;
         default:                  cfg->freq = 0;          cfg->sample_rate = 0;       break;
     }
 }
@@ -2177,6 +2140,7 @@ static void api_post_receiver_assign(int fd, const char *body)
     else if (!strcasecmp(role_str, "pocsag")) role = SDR_ROLE_POCSAG;
     else if (!strcasecmp(role_str, "gsm")) role = SDR_ROLE_GSM;
     else if (!strcasecmp(role_str, "lte")) role = SDR_ROLE_LTE;
+    else if (!strcasecmp(role_str, "iot868")) role = SDR_ROLE_IOT868;
 
     // Check if this serial is already managed
     int idx = sdrManagerFindBySerial(serial);
@@ -2258,6 +2222,213 @@ static void api_post_receiver_assign(int fd, const char *body)
     }
 }
 
+// ============================= API: GET /api/decoders =====================
+
+static void api_get_decoders(int fd)
+{
+    char *buf = malloc(32768);
+    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
+
+    char *p = buf;
+    char *end = buf + 32768;
+
+    p += snprintf(p, (size_t)(end - p), "{\n");
+
+    // ADS-B decoder config — full adsb_decoder_config_t
+    p += snprintf(p, (size_t)(end - p),
+        "\"adsb\":{"
+        "\"fix_crc\":%d,\"check_crc\":%s,\"fix_df\":%s,"
+        "\"enable_df24\":%s,\"mode_ac\":%s,\"mode_ac_auto\":%s,"
+        "\"crc_rescue\":%s,\"use_gnss\":%s,\"mlat\":%s,"
+        "\"adaptive_range\":%s,\"adaptive_burst\":%s,"
+        "\"adaptive_min_gain\":%.1f,\"adaptive_max_gain\":%.1f,"
+        "\"adaptive_duty_cycle\":%.2f,"
+        "\"adaptive_burst_alpha\":%.4f,\"adaptive_burst_change_delay\":%u,"
+        "\"adaptive_burst_loud_rate\":%.4f,\"adaptive_burst_loud_runlength\":%u,"
+        "\"adaptive_burst_quiet_rate\":%.4f,\"adaptive_burst_quiet_runlength\":%u,"
+        "\"adaptive_range_alpha\":%.4f,\"adaptive_range_percentile\":%u,"
+        "\"adaptive_range_target\":%.2f,\"adaptive_range_change_delay\":%u,"
+        "\"adaptive_range_scan_delay\":%u,\"adaptive_range_rescan_delay\":%u},\n",
+        DecoderConfigs.adsb.fix_crc,
+        DecoderConfigs.adsb.check_crc ? "true" : "false",
+        DecoderConfigs.adsb.fix_df ? "true" : "false",
+        DecoderConfigs.adsb.enable_df24 ? "true" : "false",
+        DecoderConfigs.adsb.mode_ac ? "true" : "false",
+        DecoderConfigs.adsb.mode_ac_auto ? "true" : "false",
+        DecoderConfigs.adsb.crc_rescue ? "true" : "false",
+        DecoderConfigs.adsb.use_gnss ? "true" : "false",
+        DecoderConfigs.adsb.mlat ? "true" : "false",
+        DecoderConfigs.adsb.adaptive_range ? "true" : "false",
+        DecoderConfigs.adsb.adaptive_burst ? "true" : "false",
+        DecoderConfigs.adsb.adaptive_min_gain,
+        DecoderConfigs.adsb.adaptive_max_gain,
+        DecoderConfigs.adsb.adaptive_duty_cycle,
+        DecoderConfigs.adsb.adaptive_burst_alpha,
+        DecoderConfigs.adsb.adaptive_burst_change_delay,
+        DecoderConfigs.adsb.adaptive_burst_loud_rate,
+        DecoderConfigs.adsb.adaptive_burst_loud_runlength,
+        DecoderConfigs.adsb.adaptive_burst_quiet_rate,
+        DecoderConfigs.adsb.adaptive_burst_quiet_runlength,
+        DecoderConfigs.adsb.adaptive_range_alpha,
+        DecoderConfigs.adsb.adaptive_range_percentile,
+        DecoderConfigs.adsb.adaptive_range_target,
+        DecoderConfigs.adsb.adaptive_range_change_delay,
+        DecoderConfigs.adsb.adaptive_range_scan_delay,
+        DecoderConfigs.adsb.adaptive_range_rescan_delay);
+
+    // FLARM decoder config (includes keys)
+    {
+        char kt[256] = "";
+        char k5s[64] = "";
+        if (DecoderConfigs.flarm.keys_loaded) {
+            snprintf(kt, sizeof(kt),
+                "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x",
+                DecoderConfigs.flarm.key_table[0], DecoderConfigs.flarm.key_table[1],
+                DecoderConfigs.flarm.key_table[2], DecoderConfigs.flarm.key_table[3],
+                DecoderConfigs.flarm.key_table[4], DecoderConfigs.flarm.key_table[5],
+                DecoderConfigs.flarm.key_table[6], DecoderConfigs.flarm.key_table[7],
+                DecoderConfigs.flarm.key_table[8], DecoderConfigs.flarm.key_table[9],
+                DecoderConfigs.flarm.key_table[10], DecoderConfigs.flarm.key_table[11]);
+            snprintf(k5s, sizeof(k5s), "%08x,%08x,%08x,%08x",
+                DecoderConfigs.flarm.key5[0], DecoderConfigs.flarm.key5[1],
+                DecoderConfigs.flarm.key5[2], DecoderConfigs.flarm.key5[3]);
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "\"flarm\":{\"enabled\":%s,\"ogn_only\":%s,"
+            "\"ogn_server\":\"%s\",\"ogn_port\":%d,\"ogn_station\":\"%s\","
+            "\"keys_file\":\"%s\",\"keys_loaded\":%s,\"key_table\":\"%s\","
+            "\"key2\":\"%08x\",\"key3\":\"%08x\",\"key4\":\"%08x\","
+            "\"key5\":\"%s\"},\n",
+            DecoderConfigs.flarm.enabled ? "true" : "false",
+            DecoderConfigs.flarm.ogn_only ? "true" : "false",
+            DecoderConfigs.flarm.ogn_server,
+            DecoderConfigs.flarm.ogn_port,
+            DecoderConfigs.flarm.ogn_station,
+            DecoderConfigs.flarm.keys_file,
+            DecoderConfigs.flarm.keys_loaded ? "true" : "false",
+            kt,
+            DecoderConfigs.flarm.key2, DecoderConfigs.flarm.key3, DecoderConfigs.flarm.key4,
+            k5s);
+    }
+
+    // ACARS decoder config
+    p += snprintf(p, (size_t)(end - p), "\"acars\":{\"enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
+        DecoderConfigs.acars.enabled ? "true" : "false", DecoderConfigs.acars.center_freq);
+    for (int i = 0; i < DecoderConfigs.acars.num_channels; i++)
+        p += snprintf(p, (size_t)(end - p), "%s%.0f", i ? "," : "", DecoderConfigs.acars.channel_freqs[i]);
+    p += snprintf(p, (size_t)(end - p), "]},\n");
+
+    // VDL2 decoder config
+    p += snprintf(p, (size_t)(end - p), "\"vdl2\":{\"enabled\":%s,\"center_freq\":%.0f,\"squelch_level\":%.1f,\"channels\":[",
+        DecoderConfigs.vdl2.enabled ? "true" : "false", DecoderConfigs.vdl2.center_freq, DecoderConfigs.vdl2.squelch_level);
+    for (int i = 0; i < DecoderConfigs.vdl2.num_channels; i++)
+        p += snprintf(p, (size_t)(end - p), "%s%.0f", i ? "," : "", DecoderConfigs.vdl2.channel_freqs[i]);
+    p += snprintf(p, (size_t)(end - p), "]},\n");
+
+    // Radiosonde decoder config
+    p += snprintf(p, (size_t)(end - p),
+        "\"radiosonde\":{\"enabled\":%s,\"sondehub_upload\":%s,"
+        "\"radiosondy_upload\":%s,\"wettersonde_upload\":%s,"
+        "\"callsign\":\"%s\",\"center_freq\":%.0f},\n",
+        DecoderConfigs.radiosonde.enabled ? "true" : "false",
+        DecoderConfigs.radiosonde.sondehub_upload ? "true" : "false",
+        DecoderConfigs.radiosonde.radiosondy_upload ? "true" : "false",
+        DecoderConfigs.radiosonde.wettersonde_upload ? "true" : "false",
+        DecoderConfigs.radiosonde.callsign,
+        DecoderConfigs.radiosonde.center_freq);
+
+    // POCSAG decoder config
+    p += snprintf(p, (size_t)(end - p), "\"pocsag\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
+        DecoderConfigs.pocsag.enabled ? "true" : "false",
+        DecoderConfigs.pocsag.output_enabled ? "true" : "false",
+        DecoderConfigs.pocsag.center_freq);
+    for (int i = 0; i < DecoderConfigs.pocsag.num_channels; i++)
+        p += snprintf(p, (size_t)(end - p), "%s%.0f", i ? "," : "", DecoderConfigs.pocsag.channel_freqs[i]);
+    p += snprintf(p, (size_t)(end - p), "]},\n");
+
+    // GSM decoder config
+    p += snprintf(p, (size_t)(end - p),
+        "\"gsm\":{\"enabled\":%s,\"output_enabled\":%s,\"arfcn_freq\":%.0f,\"tsc\":%d},\n",
+        DecoderConfigs.gsm.enabled ? "true" : "false",
+        DecoderConfigs.gsm.output_enabled ? "true" : "false",
+        DecoderConfigs.gsm.arfcn_freq, DecoderConfigs.gsm.tsc);
+
+    // LTE decoder config
+    p += snprintf(p, (size_t)(end - p),
+        "\"lte\":{\"enabled\":%s,\"output_enabled\":%s,\"hop_enabled\":%s,\"center_freq\":%.0f},\n",
+        DecoderConfigs.lte.enabled ? "true" : "false",
+        DecoderConfigs.lte.output_enabled ? "true" : "false",
+        DecoderConfigs.lte.hop_enabled ? "true" : "false",
+        DecoderConfigs.lte.center_freq);
+
+    // IoT 868 decoder config
+    p += snprintf(p, (size_t)(end - p),
+        "\"iot868\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f},\n",
+        DecoderConfigs.iot868.enabled ? "true" : "false",
+        DecoderConfigs.iot868.output_enabled ? "true" : "false",
+        DecoderConfigs.iot868.center_freq);
+
+    // Dongles (from SDR Manager)
+    p += snprintf(p, (size_t)(end - p), "\"dongles\":[\n");
+    pthread_mutex_lock(&SdrManager.lock);
+    for (int i = 0; i < SdrManager.count; i++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[i];
+        const char *role_str = "none";
+        switch (rx->config.role) {
+            case SDR_ROLE_ADSB: role_str = "adsb"; break;
+            case SDR_ROLE_FLARM: role_str = "flarm"; break;
+            case SDR_ROLE_ACARS: role_str = "acars"; break;
+            case SDR_ROLE_VDL2: role_str = "vdl2"; break;
+            case SDR_ROLE_RADIOSONDE: role_str = "radiosonde"; break;
+            case SDR_ROLE_POCSAG: role_str = "pocsag"; break;
+            case SDR_ROLE_GSM: role_str = "gsm"; break;
+            case SDR_ROLE_LTE: role_str = "lte"; break;
+            case SDR_ROLE_IOT868: role_str = "iot868"; break;
+            default: role_str = "none"; break;
+        }
+        p += snprintf(p, (size_t)(end - p),
+            "%s{\"id\":%d,\"serial\":\"%s\",\"gain\":%.1f,\"ppm\":%d,\"decoder\":\"%s\"}",
+            i ? ",\n" : "",
+            rx->id, rx->config.serial, rx->config.gain, rx->config.ppm_error, role_str);
+    }
+    pthread_mutex_unlock(&SdrManager.lock);
+    p += snprintf(p, (size_t)(end - p), "\n]\n}\n");
+
+    http_send_json(fd, buf, (int)(p - buf));
+    free(buf);
+}
+
+// ============================= API: POST /api/decoders ====================
+
+static void api_post_decoders(int fd, const char *body)
+{
+    if (!body || !is_valid_json_object(body, 32768)) {
+        http_send(fd, 400, "application/json", "{\"error\":\"invalid JSON\"}", 23);
+        return;
+    }
+
+    if (!decoderConfigParseJson(body)) {
+        http_send(fd, 400, "application/json", "{\"error\":\"parse error\"}", 22);
+        return;
+    }
+
+    // Apply runtime changes
+    PocsagOutputEnabled = DecoderConfigs.pocsag.output_enabled ? 1 : 0;
+    GsmOutputEnabled = DecoderConfigs.gsm.output_enabled ? 1 : 0;
+    LteOutputEnabled = DecoderConfigs.lte.output_enabled ? 1 : 0;
+    IotOutputEnabled = DecoderConfigs.iot868.output_enabled ? 1 : 0;
+
+    // Save
+    decoderConfigSave();
+
+    // Also save FLARM keys if they were updated
+    if (DecoderConfigs.flarm.keys_loaded && DecoderConfigs.flarm.keys_file[0]) {
+        decoderConfigSaveFlarmKeys(DecoderConfigs.flarm.keys_file);
+    }
+
+    http_send(fd, 200, "application/json", "{\"ok\":true}", 11);
+}
+
 static void api_get_devices(int fd)
 {
     char *buf = malloc(16384);
@@ -2305,6 +2476,29 @@ static void api_get_devices(int fd)
             tuner_type >= 0 ? tuner_freq_range(tuner_type) : "unknown");
     }
 #endif
+
+    // Append virtual (file) devices from SdrManager
+    {
+        int need_comma = 0;
+#ifdef ENABLE_RTLSDR
+        need_comma = (rtlsdr_get_device_count() > 0);
+#endif
+        for (int r = 0; r < SdrManager.count; r++) {
+            sdr_receiver_t *rx = &SdrManager.receivers[r];
+            if (rx->config.ifile_path[0] == '\0') continue;  // skip real SDR
+            if (need_comma) pos += snprintf(buf + pos, 16384 - pos, ",");
+            need_comma = 1;
+            pos += snprintf(buf + pos, 16384 - pos,
+                "{\"index\":%d,\"name\":\"Virtual IQ Replay\",\"vendor\":\"Virtual\","
+                "\"product\":\"IQ File\",\"serial\":\"%s\","
+                "\"role\":\"%s\",\"state\":\"%s\","
+                "\"tuner\":\"file\",\"freq_range\":\"any\","
+                "\"file\":\"%s\"}",
+                rx->id, rx->serial_actual,
+                sdrRoleName(rx->config.role), rxStateName(rx->state),
+                rx->config.ifile_path);
+        }
+    }
 
     pos += snprintf(buf + pos, 16384 - pos, "],\"usb_devices\":[");
 
@@ -2387,6 +2581,7 @@ static void serve_gsm_page(int fd)
         "<a href='/devices.html'>&#x1f4fb; Devices</a>"
         "<a class='active' href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -2414,8 +2609,16 @@ static void serve_gsm_page(int fd)
         "      document.getElementById('cell-count').textContent='';"
         "      return;"
         "    }"
+        "    if(!gsm.enabled){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-gsm\"><h3>&#x1f4f6; GSM Scanner Disabled</h3>'"
+        "        +'<p>The GSM decoder is currently disabled.</p>'"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "      document.getElementById('cell-count').textContent='';"
+        "      return;"
+        "    }"
         "    fetch('/api/gsm').then(r=>r.json()).then(data=>render(data));"
-        "  });"
+        "  }).catch(()=>{});"
         "}"
         ""
         "function render(data){"
@@ -2557,6 +2760,7 @@ static void serve_lte_page(int fd)
         "<a href='/devices.html'>&#x1f4fb; Devices</a>"
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -2584,8 +2788,16 @@ static void serve_lte_page(int fd)
         "      document.getElementById('cell-count').textContent='';"
         "      return;"
         "    }"
+        "    if(!lte.enabled){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-lte\"><h3>&#x1f4f6; LTE Scanner Disabled</h3>'"
+        "        +'<p>The LTE decoder is currently disabled.</p>'"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "      document.getElementById('cell-count').textContent='';"
+        "      return;"
+        "    }"
         "    fetch('/api/lte').then(r=>r.json()).then(data=>render(data));"
-        "  });"
+        "  }).catch(()=>{});"
         "}"
         ""
         "function render(data){"
@@ -2683,6 +2895,184 @@ static void serve_lte_page(int fd)
     http_send(fd, 200, "text/html", html, (int)strlen(html));
 }
 
+static void serve_iot868_page(int fd)
+{
+    const char *html =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>IoT 868 MHz - dump1090-gg</title>"
+        "<style>"
+        ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
+        "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
+        "nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}"
+        "nav h1{font-size:18px;color:var(--accent);white-space:nowrap;margin:0}"
+        ".tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}"
+        ".tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}"
+        ".tabs a:hover{background:var(--hover);color:var(--text)}"
+        ".tabs a.active{background:var(--accent);color:#000;font-weight:600}"
+        ".main{padding:20px;max-width:1600px;margin:0 auto}"
+        "h2{color:var(--accent);margin-top:0}"
+        "table{border-collapse:collapse;width:100%;font-size:13px}"
+        "th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:42px;z-index:10;cursor:pointer;user-select:none}"
+        "td{padding:6px 8px;border-bottom:1px solid var(--border)}"
+        "tr:hover td{background:var(--hover)}"
+        ".badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}"
+        ".badge-ok{background:#003322;color:var(--ok)}"
+        ".badge-warn{background:#332200;color:var(--warn)}"
+        ".badge-err{background:#330000;color:var(--danger)}"
+        ".badge-info{background:#002244;color:var(--link)}"
+        ".card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}"
+        ".stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px}"
+        ".stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}"
+        ".stat .val{font-size:24px;font-weight:700;color:var(--accent)}"
+        ".stat .lbl{font-size:11px;color:var(--dim);margin-top:4px}"
+        ".no-data{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:40px;text-align:center;color:var(--dim)}"
+        ".no-data h3{color:var(--accent);margin-bottom:8px}"
+        ".toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}"
+        ".btn{padding:6px 14px;border:1px solid var(--accent);border-radius:4px;cursor:pointer;font-size:13px;background:var(--head);color:var(--accent)}"
+        ".btn:hover{background:var(--accent);color:#000}"
+        "code{background:var(--input-bg);padding:1px 5px;border-radius:3px;font-size:12px}"
+        "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
+        "</style></head><body>"
+        "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
+        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/status.html'>&#x1f4e1; Status</a>"
+        "<a href='/connections.html'>&#x1f50c; Connections</a>"
+        "<a href='/logs.html'>&#x1f4cb; Logs</a>"
+        "<a href='/messages.html'>&#x1f4e8; Messages</a>"
+        "<a href='/aircraft.html'>&#x2708;&#xfe0f; Aircraft</a>"
+        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
+        "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
+        "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a class='active' href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
+        "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
+        "<div class='main'>"
+        "<h2>&#x1f321;&#xfe0f; IoT 868 MHz Monitor</h2>"
+        "<div class='toolbar'>"
+        "<span id='dev-count' style='font-size:16px;font-weight:600;color:var(--accent)'></span>"
+        "<span id='update-time' style='color:var(--dim);margin-left:16px;font-size:12px'></span>"
+        "<button class='btn' onclick='load()' style='margin-left:auto'>&#x21bb; Refresh</button>"
+        "</div>"
+        "<div id='content'><p style='color:var(--dim)'>Loading...</p></div>"
+
+        "<script>"
+        "var sortKey='protocol',sortDir=1,devData=[];"
+        ""
+        "function load(){"
+        "  fetch('/api/config').then(r=>r.json()).then(cfg=>{"
+        "    var iot=cfg.sdr_iot868||{};"
+        "    if(!iot.active){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-data\"><h3>&#x1f321;&#xfe0f; IoT 868 MHz Scanner Not Active</h3>'"
+        "        +'<p>No SDR device is configured for IoT 868 MHz reception.</p>'"
+        "        +'<p style=\"margin-top:12px\">Go to <a href=\"/devices.html\">Devices</a> and assign an RTL-SDR dongle to the <strong>IoT 868 MHz</strong> role.</p></div>';"
+        "      document.getElementById('dev-count').textContent='';"
+        "      return;"
+        "    }"
+        "    if(!iot.enabled){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-data\"><h3>&#x1f321;&#xfe0f; IoT 868 MHz Scanner Disabled</h3>'"
+        "        +'<p>The IoT 868 MHz decoder is currently disabled.</p>'"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "      document.getElementById('dev-count').textContent='';"
+        "      return;"
+        "    }"
+        "    fetch('/api/iot868').then(r=>r.json()).then(data=>render(data)).catch(()=>{"
+        "      document.getElementById('content').innerHTML='<div class=\"no-data\"><h3>Error</h3><p>Failed to fetch IoT data.</p></div>';"
+        "    });"
+        "  }).catch(()=>{});"
+        "}"
+        ""
+        "function render(data){"
+        "  devData=data.devices||[];"
+        "  document.getElementById('dev-count').textContent=devData.length+' device'+(devData.length!==1?'s':'');"
+        "  document.getElementById('update-time').textContent='Updated: '+new Date().toLocaleTimeString();"
+        "  if(!devData.length){"
+        "    document.getElementById('content').innerHTML='<div class=\"no-data\"><h3>Scanning...</h3><p>IoT decoder is active but no devices detected yet.</p><p style=\"color:var(--dim);font-size:12px;margin-top:8px\">Listening on 868.3 MHz (2 MHz BW) for OOK/FSK signals from weather stations, smart meters, thermostats, etc.</p></div>';"
+        "    return;"
+        "  }"
+        ""
+        "  /* Stats summary */"
+        "  var protos={};var totalMsg=0;"
+        "  devData.forEach(d=>{"
+        "    protos[d.protocol]=(protos[d.protocol]||0)+1;"
+        "    totalMsg+=d.msg_count;"
+        "  });"
+        "  var html='<div class=\"stats\">';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+devData.length+'</div><div class=\"lbl\">Devices</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+Object.keys(protos).length+'</div><div class=\"lbl\">Protocols</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+totalMsg+'</div><div class=\"lbl\">Messages</div></div>';"
+        "  html+='</div>';"
+        ""
+        "  /* Sort */"
+        "  devData.sort((a,b)=>{"
+        "    var va=a[sortKey],vb=b[sortKey];"
+        "    if(typeof va==='string') return sortDir*va.localeCompare(vb);"
+        "    return sortDir*((va||0)-(vb||0));"
+        "  });"
+        ""
+        "  /* Table */"
+        "  html+='<table><thead><tr>';"
+        "  var cols=[{k:'protocol',l:'Protocol'},{k:'modulation',l:'Mod'},{k:'device_id',l:'Device ID'},"
+        "    {k:'channel',l:'Ch'},{k:'temperature',l:'Temp \\u00b0C'},{k:'humidity',l:'Hum %'},"
+        "    {k:'pressure',l:'hPa'},{k:'wind_speed',l:'Wind m/s'},{k:'wind_dir',l:'Dir \\u00b0'},"
+        "    {k:'rain',l:'Rain mm'},{k:'power',l:'Power W'},{k:'energy',l:'kWh'},"
+        "    {k:'battery_ok',l:'Bat'},{k:'freq_mhz',l:'Freq MHz'},"
+        "    {k:'rssi',l:'RSSI'},{k:'msg_count',l:'Msgs'},{k:'age',l:'Age'}];"
+        "  cols.forEach(c=>{"
+        "    var arrow=sortKey===c.k?(sortDir>0?' \\u25b2':' \\u25bc'):'';"
+        "    html+='<th onclick=\"sortBy(\\''+c.k+'\\')\">' +c.l+arrow+'</th>';"
+        "  });"
+        "  html+='</tr></thead><tbody>';"
+        ""
+        "  devData.forEach(d=>{"
+        "    var ageCls=d.age>120?'badge-err':d.age>60?'badge-warn':'badge-ok';"
+        "    var batCls=d.battery_ok===0?'badge-err':d.battery_ok===1?'badge-ok':'badge-info';"
+        "    var batTxt=d.battery_ok===0?'LOW':d.battery_ok===1?'OK':'?';"
+        "    html+='<tr'+(d.stale?' style=\"opacity:0.5\"':'')+'>';"
+        "    html+='<td><strong>'+d.protocol+'</strong></td>';"
+        "    html+='<td><span class=\"badge badge-info\">'+d.modulation+'</span></td>';"
+        "    html+='<td><code>'+d.device_id+'</code></td>';"
+        "    html+='<td>'+(d.channel||'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.temperature>-900?d.temperature.toFixed(1):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.humidity>=0?d.humidity.toFixed(0):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.pressure>=0?d.pressure.toFixed(1):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.wind_speed>=0?d.wind_speed.toFixed(1):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.wind_dir>=0?d.wind_dir.toFixed(0):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.rain>=0?d.rain.toFixed(1):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.power>=0?d.power.toFixed(1):'&mdash;')+'</td>';"
+        "    html+='<td>'+(d.energy>=0?d.energy.toFixed(2):'&mdash;')+'</td>';"
+        "    html+='<td><span class=\"badge '+batCls+'\">'+batTxt+'</span></td>';"
+        "    html+='<td>'+d.freq_mhz.toFixed(3)+'</td>';"
+        "    html+='<td>'+d.rssi.toFixed(1)+'</td>';"
+        "    html+='<td>'+d.msg_count+'</td>';"
+        "    html+='<td><span class=\"badge '+ageCls+'\">'+d.age.toFixed(0)+'s</span></td>';"
+        "    html+='</tr>';"
+        "  });"
+        "  html+='</tbody></table>';"
+        "  document.getElementById('content').innerHTML=html;"
+        "}"
+        ""
+        "function sortBy(key){"
+        "  if(sortKey===key) sortDir=-sortDir;"
+        "  else{sortKey=key;sortDir=1;}"
+        "  if(devData.length) render({devices:devData});"
+        "}"
+        ""
+        "load();"
+        "setInterval(load,5000);"
+        ""
+        "fetch('/api/status').then(r=>r.json()).then(s=>{"
+        "  var v=document.getElementById('ver-badge');"
+        "  if(v&&s.version) v.textContent='v'+s.version;"
+        "}).catch(()=>{});"
+        "</script></div></body></html>";
+
+    http_send(fd, 200, "text/html", html, (int)strlen(html));
+}
+
 static void serve_devices_page(int fd)
 {
     const char *html =
@@ -2748,6 +3138,7 @@ static void serve_devices_page(int fd)
         "<a class='active' href='/devices.html'>&#x1f4fb; Devices</a>"
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -2907,6 +3298,7 @@ static void serve_devices_page(int fd)
         "h+='<option value=pocsag'+(curRole=='pocsag'?' selected':'')+'>&#x1f4df; POCSAG (466 MHz)</option>';"
         "h+='<option value=gsm'+(curRole=='gsm'?' selected':'')+'>&#x1f4f6; GSM (935 MHz)</option>';"
         "h+='<option value=lte'+(curRole=='lte'?' selected':'')+'>&#x1f4f6; LTE (800 MHz)</option>';"
+        "h+='<option value=iot868'+(curRole=='iot868'?' selected':'')+'>&#x1f321;&#xfe0f; IoT 868 MHz</option>';"
         "h+='</select></td>';"
         // Gain dropdown - populated from receiver's gain_list
         "var gainOpts='';"
@@ -3018,6 +3410,7 @@ static void serve_diagnostics_page(int fd)
         "<a href='/devices.html'>&#x1f4fb; Devices</a>"
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a class='active' style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3415,6 +3808,8 @@ static void handle_request(int fd, const char *request, int reqlen)
             api_get_gsm(fd);
         } else if (strcmp(path, "/api/lte") == 0) {
             api_get_lte(fd);
+        } else if (strcmp(path, "/api/iot868") == 0) {
+            api_get_iot868(fd);
         } else if (strcmp(path, "/api/stats") == 0) {
             api_get_stats(fd);
         } else if (strcmp(path, "/api/connections") == 0) {
@@ -3427,12 +3822,16 @@ static void handle_request(int fd, const char *request, int reqlen)
             api_get_devices(fd);
         } else if (strcmp(path, "/api/receivers") == 0) {
             api_get_receivers(fd);
+        } else if (strcmp(path, "/api/decoders") == 0) {
+            api_get_decoders(fd);
         } else if (strcmp(path, "/devices.html") == 0 || strcmp(path, "/devices") == 0) {
             serve_devices_page(fd);
         } else if (strcmp(path, "/gsm.html") == 0 || strcmp(path, "/gsm") == 0) {
             serve_gsm_page(fd);
         } else if (strcmp(path, "/lte.html") == 0 || strcmp(path, "/lte") == 0) {
             serve_lte_page(fd);
+        } else if (strcmp(path, "/iot868.html") == 0 || strcmp(path, "/iot868") == 0) {
+            serve_iot868_page(fd);
         } else if (strcmp(path, "/diagnostics.html") == 0 || strcmp(path, "/diagnostics") == 0) {
             serve_diagnostics_page(fd);
         } else if (strcmp(path, "/api/diagnostics") == 0) {
@@ -3459,6 +3858,14 @@ static void handle_request(int fd, const char *request, int reqlen)
             if (body) {
                 body += 4;
                 api_post_receiver_assign(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
+        } else if (strcmp(path, "/api/decoders") == 0) {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_decoders(fd, body);
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }

@@ -19,6 +19,7 @@
 #include <time.h>
 #include <math.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #include "dump1090.h"
 #include "ogntp_decode.h"
@@ -288,6 +289,14 @@ bool flarmReaderOpen(void)
         if (!Flarm.demod) {
             fprintf(stderr, "flarm-ifile: failed to create demodulator\n");
             return false;
+        }
+
+        // Use file mtime as timestamp for XXTEA decryption
+        struct stat st;
+        if (stat(FlarmConfig.ifile_path, &st) == 0) {
+            uint32_t file_time = (uint32_t)st.st_mtime;
+            flarm_demod_set_time_override(Flarm.demod, file_time);
+            fprintf(stderr, "flarm-ifile: using file mtime %u for decryption\n", file_time);
         }
 
         fprintf(stderr, "flarm-ifile: initialized (will replay in loop)\n");
@@ -971,6 +980,16 @@ bool flarmDecoderInit(struct sdr_receiver *rx)
         return false;
     }
 
+    // For virtual file devices, set time override from file mtime
+    if (rx->config.ifile_path[0] != '\0') {
+        struct stat file_st;
+        if (stat(rx->config.ifile_path, &file_st) == 0) {
+            flarm_demod_set_time_override(st->demod, (uint32_t)file_st.st_mtime);
+            fprintf(stderr, "rx[%d]: FLARM using file mtime %u for decryption\n",
+                    rx->id, (uint32_t)file_st.st_mtime);
+        }
+    }
+
     rx->decoder_state = st;
 
     // Initialize OGN client if station is configured
@@ -1026,8 +1045,9 @@ void flarmDecoderDrain(struct sdr_receiver *rx)
 
         unsigned char raw[14];
 
-        // Identity & category
+        // Identity & category (submit twice to reach reliability threshold faster)
         flarm_build_ident_msg(raw, addr, callsign, category);
+        flarm_submit_synthetic(raw, signal);
         flarm_submit_synthetic(raw, signal);
 
         // Position (even + odd CPR)

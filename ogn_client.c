@@ -294,7 +294,7 @@ static int format_aprs_position(const flarm_message_t *msg, char *buf, size_t bu
                      lon_deg, lon_min, lon_ew,
                      symbol[1],
                      course, speed_kts, alt_feet,
-                     (unsigned)((msg->addr_type << 2) | (msg->aircraft_type & 0x3F)),
+                     (unsigned)(((msg->stealth & 1) << 7) | ((msg->no_track & 1) << 6) | ((msg->addr_type & 3) << 4) | (msg->aircraft_type & 0x0F)),
                      msg->addr,
                      climb_fpm / 10);
 

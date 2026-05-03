@@ -26,5 +26,8 @@ misc
 frames.js
 untrackedDeveloperSettings.js
 
+# Instance-specific config
+receivers.json
+
 # Large data files (download separately for aircraft DB rebuild)
 tools/*.csv.xz

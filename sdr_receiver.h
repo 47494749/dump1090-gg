@@ -38,7 +38,8 @@ typedef enum {
     SDR_ROLE_RADIOSONDE,    // ~403 MHz radiosonde decoding
     SDR_ROLE_POCSAG,        // ~466 MHz POCSAG pager decoding
     SDR_ROLE_GSM,           // ~935 MHz GSM broadcast channel decoder
-    SDR_ROLE_LTE            // ~800 MHz LTE cell scanner (PSS/SSS/MIB/SIB1)
+    SDR_ROLE_LTE,           // ~800 MHz LTE cell scanner (PSS/SSS/MIB/SIB1)
+    SDR_ROLE_IOT868         // ~868 MHz ISM band IoT device monitor (OOK/FSK)
 } sdr_role_t;
 
 // Decoder operations — plugin interface for each receiver role.
@@ -84,7 +85,7 @@ typedef struct {
 
 // Per-receiver configuration (set before open, changeable at runtime for some fields)
 typedef struct {
-    char    serial[64];             // RTL-SDR serial number (empty = auto)
+    char    serial[64];             // RTL-SDR serial number (empty = auto, "FILE" = virtual)
     sdr_role_t role;                // receiver role
     int     freq;                   // center frequency in Hz
     float   gain;                   // gain in dB, or MODES_DEFAULT_GAIN / MODES_LEGACY_AUTO_GAIN
@@ -92,6 +93,7 @@ typedef struct {
     bool    digital_agc;            // enable digital AGC
     int     direct_sampling;        // direct sampling mode (0=off)
     double  sample_rate;            // sample rate in Hz
+    char    ifile_path[512];        // IQ file path for virtual device (empty = real SDR)
 } rx_config_t;
 
 // RTL-SDR device state (per-receiver, replaces the static RTLSDR struct)
@@ -159,6 +161,7 @@ extern sdr_manager_t SdrManager;
 extern int PocsagOutputEnabled;
 extern int GsmOutputEnabled;
 extern int LteOutputEnabled;
+extern int IotOutputEnabled;
 
 // ======================== Manager API ========================
 
