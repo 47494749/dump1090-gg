@@ -373,9 +373,7 @@ async function loadSdrReceiverConfig(){
                     html+=`<button id="ag_${dev.serial}" onclick="autoGain('${dev.serial}')" style="font-size:12px;padding:4px 12px;background:#2a1a0a;border:1px solid #ff9800;color:#ff9800;border-radius:4px;cursor:pointer;white-space:nowrap" title="Sweep all gain steps and pick the best">🔍 Auto</button>`;
                 }
                 html+=`</div></div>`;
-                const calBtn=role==='flarm'?`<button onclick="calibratePPM('${dev.serial}')" id="cal_btn_${dev.serial}" style="font-size:12px;padding:4px 12px;background:var(--card);border:1px solid var(--border);color:var(--accent);border-radius:4px;cursor:pointer;white-space:nowrap" title="Calibrate PPM">📡 Calibrate</button>`:'';
-                html+=`<div class="field"><label>PPM</label><div style="display:flex;gap:8px;align-items:center"><input type="number" step="1" value="${ppm}" id="rx_ppm_${dev.serial}" style="width:100px">${calBtn}</div></div>`;
-                html+=`<div style="min-height:12px;font-size:11px" id="cal_status_${dev.serial}"></div>`;
+                html+=`<div class="field"><label>PPM</label><span style="color:var(--text)">${ppm}</span></div>`;
                 html+=`</div>`;
             }
         }
@@ -621,17 +619,15 @@ async function saveConfig(){
     document.getElementById('save-status').textContent='Saving...';
     document.getElementById('save-status').style.color='var(--dim)';
     try{
-        // Save receiver gain/ppm changes
+        // Save receiver gain changes
         const gainEls=document.querySelectorAll('[id^="rx_gain_"]');
         for(const gel of gainEls){
             const serial=gel.id.replace('rx_gain_','');
-            const ppmEl=document.getElementById('rx_ppm_'+serial);
             const gain=parseFloat(gel.value)||40.0;
-            const ppm=ppmEl?parseInt(ppmEl.value)||0:0;
-            let role='none';
+            let role='none',ppm=0;
             try{const rxRes=await fetch('/api/receivers').then(r=>r.json());
             const rx=rxRes.receivers.find(r=>r.serial===serial||r.serial_actual===serial);
-            if(rx)role=rx.role;}catch(e){}
+            if(rx){role=rx.role;ppm=rx.ppm||0;}}catch(e){}
             if(role!=='none'){
                 await fetch('/api/receivers/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({serial:serial,role:role,gain:gain,ppm:ppm})});
             }

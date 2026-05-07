@@ -1,9 +1,10 @@
 # dump1090-gg-light
 
 **dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / OGNTP / ACARS / VDL2 /
-Radiosonde / CPDLC / GSM / POCSAG receiver and multi-feed relay for Linux.
+Radiosonde / CPDLC / GSM / LTE / POCSAG receiver and multi-feed relay for Linux.
 It is a fork of [dump1090-fa](https://github.com/flightaware/dump1090) by FlightAware,
-extended with native threaded feeder clients, a multi-SDR receiver architecture,
+extended with native threaded feeder clients, a multi-SDR receiver architecture
+with pluggable backends (librtlsdr and libsdrgg),
 decoders for aeronautical communication, weather sounding, and cellular/paging
 signals, and a built-in web control panel with version display.
 
@@ -103,6 +104,7 @@ compiling, and deploying code — proved highly effective for this project.
 | GSM cell scanning | not supported | **native** (GMSK demod, FCCH/SCH sync, SI decode, cell tracking) |
 | POCSAG pager decoding | not supported | **native** (FSK demod, BCH ECC, alpha/numeric, multi-baud) |
 | Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR) |
+| SDR backend | librtlsdr only | **pluggable** (librtlsdr + libsdrgg optimized USB driver) |
 | Web control panel | not supported | **native** (HTTP REST API, live configuration) |
 
 All feeder threads use **lock-free SPSC ring buffers** to receive data from the main
@@ -170,6 +172,35 @@ to default to the git tag.
 
 This produces three binaries: `dump1090`, `view1090`, `starch-benchmark`.
 
+#### libsdrgg support
+
+The program supports two SDR backends:
+
+- **librtlsdr** — the standard open-source RTL-SDR driver (default)
+- **libsdrgg** — an optimized USB SDR driver designed for better control of
+  RTL-SDR hardware, with per-stage gain (LNA/mixer/VGA), R820T IF frequency
+  reprogramming, PLL lock detection, and improved USB transfer management
+
+To build with libsdrgg support:
+
+```bash
+make clean
+make -j4 SDRGG=yes
+```
+
+If libsdrgg is installed in a non-standard location:
+
+```bash
+make -j4 SDRGG=yes SDRGG_PREFIX=/path/to/libsdrgg
+```
+
+When both backends are compiled in, each receiver can select its backend via
+the `backend=` option in the `--receiver` config string:
+
+```bash
+--receiver 00000001:adsb:backend=sdrgg --receiver 00000002:flarm:backend=rtlsdr
+```
+
 ### Install
 
 ```bash
@@ -191,13 +222,14 @@ Live configuration is also possible via the web control panel.
 
 | Option | Description |
 |---|---|
-| `--device-type <type>` | SDR type: `rtlsdr`, `bladerf`, `hackrf`, `limesdr`, `ifile` |
+| `--device-type <type>` | SDR type: `rtlsdr`, `sdrgg`, `bladerf`, `hackrf`, `limesdr`, `ifile` |
 | `--gain <dB>` | Tuner gain (default: max). `-10` for AGC |
 | `--freq <Hz>` | Override frequency (default: 1090 MHz) |
 | `--fix` | Enable single-bit CRC error correction |
 | `--enable-df24` | Enable DF24–31 Comm-D ELM decoding (required for CPDLC) |
-| `--receiver <spec>` | Add SDR receiver: `serial:role[:gain=X][:ppm=Y][:agc]` |
+| `--receiver <spec>` | Add SDR receiver: `serial:role[:gain=X][:ppm=Y][:agc][:backend=name]` |
 | | Role: `adsb`, `flarm`, `acars`, `vdl2`, `radiosonde`, `gsm`, `pocsag`, `lte` |
+| | Backend: `rtlsdr` (default), `sdrgg` |
 
 #### FLARM / OGN
 
@@ -914,6 +946,8 @@ which is listed in the protocol source column.
 | `ogn_client.c/.h` | OGN APRS-IS feed client | [OGN protocol wiki](http://wiki.glidernet.org/) and public APRS-IS documentation | GPL-3.0-or-later |
 | `opensky_client.c/.h` | OpenSky Network native feed client | Open-source [opensky-sensor](https://github.com/openskynetwork/opensky-sensor) v2.1.7 (BSD 3-Clause) | GPL-3.0-or-later |
 | `sdr_receiver.c/.h` | Multi-SDR receiver manager | Original implementation | GPL-2.0-or-later |
+| `sdr_backend.c/.h` | SDR hardware abstraction layer (vtable dispatch) | Original implementation | GPL-2.0-or-later |
+| `sdr_backend_sdrgg.cpp` | libsdrgg backend (R820T per-stage gain, PLL lock) | Original implementation | GPL-2.0-or-later |
 | `config_panel.c/.h` | Web control panel (HTTP REST) | Original implementation | GPL-3.0-or-later |
 | `acars_demod.c/.h` | ACARS AM-MSK demodulator | Algorithms from [acarsdec](https://github.com/TLeconte/acarsdec); upstream repository README states GNU Library GPL version 2 | GPL-3.0-or-later |
 | `vdl2_demod.c/.h` | VDL Mode 2 D8PSK demodulator | ICAO Doc 9776, Annex 10 Vol III | GPL-3.0-or-later |
@@ -923,7 +957,7 @@ which is listed in the protocol source column.
 | `gsm_decode.c/.h` | GSM broadcast channel decoder (GMSK, Viterbi, SI) | 3GPP TS 05.02/05.03/04.08/03.41/04.06 (public standards) | GPL-3.0-or-later |
 | `gsm_tracker.c/.h` | GSM cell tracker and JSON API | Original implementation | GPL-3.0-or-later |
 | `gsm_calibrate.c/.h` | RTL-SDR PPM calibration via GSM carriers | Approach from [ogn-rf](https://github.com/glidernet/ogn-rf) (GPL-3.0) | GPL-3.0-or-later |
-| `lte_decode.c/.h`, `lte_tracker.c/.h` | LTE cell scanner and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
+| `lte_decode.c/.h`, `lte_sib.c/.h`, `lte_tracker.c/.h` | LTE cell scanner, SIB decoder and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (FSK, BCH, multi-baud) | ITU-R M.584, ETSI ETS 300 133-2 (public standards) | GPL-3.0-or-later |
 | `elm.c/.h` | Comm-D ELM reassembly | ICAO Annex 10 Vol IV (Comm-D framing) | GPL-3.0-or-later |
 | `cpdlc_decode.c/.h` | FANS-1/A CPDLC message decoder | ICAO Doc 9705, RTCA DO-258A, ASN.1 constraints from [libacars](https://github.com/szpajder/libacars) | GPL-3.0-or-later |
@@ -1285,9 +1319,12 @@ These are included in the source tree and compiled directly into the binary.
 | `gsm_decode.c/.h` | GSM broadcast channel decoder (FCCH, SCH, BCCH, Viterbi, Fire CRC) | 3GPP TS 05.02, 05.03, 04.08 standards; GSM reference implementations |
 | `gsm_tracker.c/.h` | Multi-cell GSM tracker (SI3, frequency hopping, cell database) | Original |
 | `lte_decode.c/.h` | LTE PSS/SSS synchronization, PBCH/SIB1 decode | Approach from [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) by James Peroulas (AGPL-3.0); 3GPP TS 36.211, 36.212, 36.331 standards |
+| `lte_sib.c/.h` | LTE SIB1–SIB14 decode, PDCCH/PDSCH, ETWS/CMAS alerts | 3GPP TS 36.212, 36.331 standards |
 | `lte_tracker.c/.h` | LTE cell tracker with cell database | Original |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (512/1200/2400 baud, BCH ECC) | ITU-R M.584, ETSI ETS 300 133-2 standards |
-| `sdr_receiver.c/.h` | Multi-SDR receiver manager (dynamic role assignment) | Original (librtlsdr API) |
+| `sdr_receiver.c/.h` | Multi-SDR receiver manager (dynamic role assignment) | Original (sdr_backend abstraction layer) |
+| `sdr_backend.c/.h` | SDR hardware abstraction layer (vtable dispatch, rtlsdr wrapper) | Original |
+| `sdr_backend_sdrgg.cpp` | libsdrgg backend (R820T per-stage gain, PLL lock, DDC) | Original |
 | `config_panel.c/.h` | Web control panel (HTTP REST API, live config) | Original |
 | `feeder_thread.c/.h` | Beast-binary multi-network feed relay (11 networks) | Original |
 

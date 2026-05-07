@@ -5,6 +5,102 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+### v1.0.4 (2026-05-07)
+
+**SDR backend abstraction layer (new):**
+- New hardware abstraction layer (`sdr_backend.c/.h`) decoupling all SDR access
+  from direct `rtlsdr_*` calls — defines `sdr_backend_ops_t` vtable with ~20
+  operations (enumerate, open, close, set_frequency, set_gain, read_async, etc.)
+- Unified enums `sdr_tuner_type_t`, `sdr_backend_type_t` and extended
+  capabilities struct `sdr_tuner_caps_t` (per-stage gain, bandwidth control,
+  PLL lock detection)
+- `rtlsdr` backend wrapping all `rtlsdr_*` calls into the new vtable
+- Per-receiver `backend=<name>` option in receiver config string
+
+**libsdrgg support (new):**
+- New C++ backend (`sdr_backend_sdrgg.cpp`) for libsdrgg — an optimized
+  USB SDR driver with R820T-specific IF frequency reprogramming after DDC
+  reset, per-stage gain control (LNA/mixer/VGA), PLL lock detection, and
+  stream mutex protection
+- Build with `make SDRGG=yes` (optionally `SDRGG_PREFIX=/path/to/lib`)
+- Prints libsdrgg version at startup when enabled
+
+**LTE SIB decoding (new):**
+- Full SIB1 and SI message decoding after MIB (`lte_sib.c/.h`, 1430 lines):
+  PDCCH blind detection (SI-RNTI), PDSCH QPSK demod, convolutional/turbo
+  decode, rate dematching, CRC-16, ASN.1 UPER bit reader
+- SIB1 field extraction: MCC, MNC, TAC, CellID, cell_barred, q_rxlevmin,
+  si_window_length
+- Emergency alert scanning on SI subframes (4,6,7,8,9) for SIB10/SIB11
+  (ETWS) and SIB12 (CMAS), CBS 7-bit text decode
+
+**IQ file replay for all decoders (new):**
+- Standalone IQ-file replay infrastructure with per-decoder options:
+  `--pocsag-ifile`, `--sonde-ifile`/`--sonde-freq`,
+  `--acars-ifile`/`--acars-freq`, `--gsm-ifile`/`--gsm-freq`,
+  `--lte-ifile`/`--lte-freq`
+- Each decoder gets its own reader thread with real-time throttling, stats
+  on completion, and proper cleanup on shutdown
+
+**Source tree reorganization:**
+- All source files moved into a structured directory layout:
+  `src/main/`, `src/adsb/`, `src/net/`, `src/sdr/`, `src/panel/`,
+  `src/decode/{flarm,acars,vdl2,sonde,pocsag,gsm,lte,iot}/`,
+  `src/util/`, `src/stubs/`, `include/`, `tests/`, `docs/`,
+  `web/legacy-map/`
+- Makefile rewritten with VPATH-based build, `obj/` output directory,
+  per-module `SRCDIR_*` variables, and named object lists
+
+**Header refactoring:**
+- Monolithic `dump1090.h` split into focused headers in `include/`:
+  `dump1090_types.h` (enums), `dump1090_defs.h` (constants),
+  `dump1090_message.h` (`struct modesMessage`), `dump1090_state.h`
+  (`struct _Modes`), and umbrella `dump1090.h`
+
+**SDR receiver migration:**
+- `sdr_receiver.c` fully migrated from direct `rtlsdr_*` calls to the backend
+  abstraction layer: `rtlsdr_dev_t` → `sdr_device_t`, all API calls through
+  `rx->backend_ops->` vtable dispatch
+- Device enumeration via `ops->enumerate()` returning `sdr_dev_info_t[]`
+- Guard broadened from `#ifdef ENABLE_RTLSDR` to
+  `#if defined(ENABLE_RTLSDR) || defined(ENABLE_SDRGG)`
+
+**Config panel migration:**
+- Diagnostics and tuner probing migrated from `rtlsdr_*` to backend layer:
+  `panelProbeAllTuners()` uses `sdrBackendEnumerateAll()` +
+  `ops->open_by_serial()` loop
+- Tuner name/range functions use unified `sdr_tuner_type_t` enums
+
+**ELM / Comm-D improvements:**
+- `elm_decode_acars()` output refactored from `printf()`/`putchar()` to buffer
+  (`char *outbuf, int outbuf_size`) with `snprintf()`
+- CPDLC decode uses `open_memstream()` to capture output into buffer
+- Simplified panel logging via `panelLogMessage("[ELM] %s", decoded)`
+
+**GSM calibrator improvements:**
+- Migrated from `rtlsdr_*` to backend abstraction layer
+- Multiple reads per scan (`READS_PER_SCAN=4`) for better SNR through averaging
+- Gain strategy changed from auto-gain to max manual gain (FC0012 reliability)
+- Lowered FCCH detection threshold ratio from 5.0 to 2.0
+- Enhanced diagnostics: DC percentage, per-scan read stats, best ratio tracking
+
+**IoT 868 MHz decoder improvements:**
+- Honeywell CM921/CM927 (RAMSES II) multi-pattern temperature extraction:
+  scans payload for command codes `0x30C9` (zone temp) and `0x2309` (setpoint)
+- Manchester decode buffer increased from 16 to 32 bytes
+- Range validation on extracted temperatures (-20°C to 60°C)
+- Cast fix for correct 24-bit device ID construction
+
+**Signal handling:**
+- `sigintHandler`/`sigtermHandler` now use async-signal-safe `write()` instead
+  of `log_with_timestamp()`/`fprintf()`
+
+**Tests:**
+- `test_r820t_iq.cpp` — R820T IQ quality test via libsdrgg: per-stage gain
+  control, PLL lock check, IQ capture statistics at 3 frequencies
+
+---
+
 ### v1.0.3 (2026-05-03)
 
 **FLARM demodulator rewrite:**

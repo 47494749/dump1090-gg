@@ -1,13 +1,43 @@
 PROGNAME=dump1090
 
-DUMP1090_VERSION ?= 1.0.3
+DUMP1090_VERSION ?= 1.0.4
+
+# ======================== Directory layout ========================
+
+SRCDIR_MAIN    := src/main
+SRCDIR_ADSB    := src/adsb
+SRCDIR_UTIL    := src/util
+SRCDIR_NET     := src/net
+SRCDIR_SDR     := src/sdr
+SRCDIR_PANEL   := src/panel
+SRCDIR_STUBS   := src/stubs
+SRCDIR_FLARM   := src/decode/flarm
+SRCDIR_ACARS   := src/decode/acars
+SRCDIR_VDL2    := src/decode/vdl2
+SRCDIR_SONDE   := src/decode/sonde
+SRCDIR_POCSAG  := src/decode/pocsag
+SRCDIR_GSM     := src/decode/gsm
+SRCDIR_LTE     := src/decode/lte
+SRCDIR_IOT     := src/decode/iot
+INCLUDEDIR     := include
+
+OBJDIR         := obj
+
+# VPATH: where make looks for source files
+VPATH := $(SRCDIR_MAIN):$(SRCDIR_ADSB):$(SRCDIR_UTIL):$(SRCDIR_NET):$(SRCDIR_SDR):$(SRCDIR_PANEL):$(SRCDIR_STUBS):$(SRCDIR_FLARM):$(SRCDIR_ACARS):$(SRCDIR_VDL2):$(SRCDIR_SONDE):$(SRCDIR_POCSAG):$(SRCDIR_GSM):$(SRCDIR_LTE):$(SRCDIR_IOT)
+
+# ======================== Compiler flags ========================
 
 CFLAGS ?= -O3 -g
 DUMP1090_CFLAGS := -std=c11 -fno-common -Wall -Wmissing-declarations -Werror -Wformat-signedness -W
-DUMP1090_CPPFLAGS := -I. -D_POSIX_C_SOURCE=200112L -DMODES_DUMP1090_VERSION=\"$(DUMP1090_VERSION)\" -DMODES_DUMP1090_VARIANT=\"dump1090-gg-light\"
+
+# Include paths: all source directories + include/ so #include "foo.h" works from anywhere
+INCLUDE_DIRS := -I. -I$(INCLUDEDIR) -I$(SRCDIR_MAIN) -I$(SRCDIR_ADSB) -I$(SRCDIR_UTIL) -I$(SRCDIR_NET) -I$(SRCDIR_SDR) -I$(SRCDIR_PANEL) -I$(SRCDIR_STUBS) -I$(SRCDIR_FLARM) -I$(SRCDIR_ACARS) -I$(SRCDIR_VDL2) -I$(SRCDIR_SONDE) -I$(SRCDIR_POCSAG) -I$(SRCDIR_GSM) -I$(SRCDIR_LTE) -I$(SRCDIR_IOT)
+
+DUMP1090_CPPFLAGS := $(INCLUDE_DIRS) -D_POSIX_C_SOURCE=200112L -DMODES_DUMP1090_VERSION=\"$(DUMP1090_VERSION)\" -DMODES_DUMP1090_VARIANT=\"dump1090-gg-light\"
 
 LIBS = -lpthread -lm
-SDR_OBJ = cpu.o sdr.o fifo.o sdr_ifile.o dsp/helpers/tables.o
+SDR_OBJ = $(OBJDIR)/cpu.o $(OBJDIR)/sdr.o $(OBJDIR)/fifo.o $(OBJDIR)/sdr_ifile.o $(OBJDIR)/sdr_backend.o dsp/helpers/tables.o
 
 # Try to autodetect available libraries via pkg-config if no explicit setting was used
 PKGCONFIG=$(shell pkg-config --version >/dev/null 2>&1 && echo "yes" || echo "no")
@@ -108,7 +138,7 @@ RTLSDR ?= yes
 BLADERF ?= yes
 
 ifeq ($(RTLSDR), yes)
-  SDR_OBJ += sdr_rtlsdr.o
+  SDR_OBJ += $(OBJDIR)/sdr_rtlsdr.o
   DUMP1090_CPPFLAGS += -DENABLE_RTLSDR
 
   ifdef RTLSDR_PREFIX
@@ -119,17 +149,11 @@ ifeq ($(RTLSDR), yes)
       LIBS_SDR += -L$(RTLSDR_PREFIX)/lib -lrtlsdr $(LIBS_USB)
     endif
   else
-    # some packaged .pc files are massively broken, try to handle it
-
-    # FreeBSD's librtlsdr.pc includes -std=gnu89 in cflags
-    # some linux librtlsdr packages return a bare -I/ with no path in --cflags
     RTLSDR_CFLAGS := $(shell pkg-config --cflags librtlsdr)
     RTLSDR_CFLAGS := $(filter-out -std=%,$(RTLSDR_CFLAGS))
     RTLSDR_CFLAGS := $(filter-out -I/,$(RTLSDR_CFLAGS))
     DUMP1090_CFLAGS += $(RTLSDR_CFLAGS)
 
-    # some linux librtlsdr packages return a bare -L with no path in --libs
-    # which horribly confuses things because it eats the next option on the command line
     RTLSDR_LFLAGS := $(shell pkg-config --libs-only-L librtlsdr)
     ifeq ($(RTLSDR_LFLAGS),-L)
       LIBS_SDR += $(shell pkg-config --libs-only-l --libs-only-other librtlsdr)
@@ -139,29 +163,45 @@ ifeq ($(RTLSDR), yes)
   endif
 endif
 
+SDRGG ?= no
+
+ifeq ($(SDRGG), yes)
+  SDR_OBJ += $(OBJDIR)/sdr_backend_sdrgg.o
+  DUMP1090_CPPFLAGS += -DENABLE_SDRGG
+  CXX ?= g++
+  CXXFLAGS = -std=c++2a -O3 -Wall $(DUMP1090_CPPFLAGS)
+
+  ifdef SDRGG_PREFIX
+    DUMP1090_CPPFLAGS += -I$(SDRGG_PREFIX)
+    LIBS_SDR += -L$(SDRGG_PREFIX) -lsdrgg -lstdc++
+  else
+    LIBS_SDR += -lsdrgg -lstdc++
+  endif
+endif
+
 ifeq ($(BLADERF), yes)
-  SDR_OBJ += sdr_bladerf.o
+  SDR_OBJ += $(OBJDIR)/sdr_bladerf.o
   DUMP1090_CPPFLAGS += -DENABLE_BLADERF
   DUMP1090_CFLAGS += $(shell pkg-config --cflags libbladeRF)
   LIBS_SDR += $(shell pkg-config --libs libbladeRF)
 endif
 
 ifeq ($(HACKRF), yes)
-  SDR_OBJ += sdr_hackrf.o
+  SDR_OBJ += $(OBJDIR)/sdr_hackrf.o
   DUMP1090_CPPFLAGS += -DENABLE_HACKRF
   DUMP1090_CFLAGS += $(shell pkg-config --cflags libhackrf)
   LIBS_SDR += $(shell pkg-config --libs libhackrf)
 endif
 
 ifeq ($(LIMESDR), yes)
-  SDR_OBJ += sdr_limesdr.o
+  SDR_OBJ += $(OBJDIR)/sdr_limesdr.o
   DUMP1090_CPPFLAGS += -DENABLE_LIMESDR
   DUMP1090_CFLAGS += $(shell pkg-config --cflags LimeSuite)
   LIBS_SDR += $(shell pkg-config --libs LimeSuite)
 endif
 
 ifeq ($(SOAPYSDR), yes)
-  SDR_OBJ += sdr_soapy.o
+  SDR_OBJ += $(OBJDIR)/sdr_soapy.o
   DUMP1090_CPPFLAGS += -DENABLE_SOAPYSDR
   DUMP1090_CFLAGS += $(shell pkg-config --cflags SoapySDR)
   LIBS_SDR += $(shell pkg-config --libs SoapySDR)
@@ -173,27 +213,22 @@ endif
 ##
 
 ifneq ($(CPUFEATURES),yes)
-  # need to be able to detect CPU features at runtime to enable any non-standard compiler flags
   STARCH_MIX := generic
   DUMP1090_CPPFLAGS += -DSTARCH_MIX_GENERIC
 else
   ifeq ($(ARCH),x86_64)
-    # AVX, AVX2
     STARCH_MIX := x86
     DUMP1090_CPPFLAGS += -DSTARCH_MIX_X86
   else ifeq ($(ARCH),amd64)
-    # this is the Debian naming of x86_64
     STARCH_MIX := x86
     DUMP1090_CPPFLAGS += -DSTARCH_MIX_X86
   else ifeq ($(findstring aarch,$(ARCH)),aarch)
     STARCH_MIX := aarch64
     DUMP1090_CPPFLAGS += -DSTARCH_MIX_AARCH64
   else ifeq ($(findstring arm64,$(ARCH)),arm64)
-    # Apple calls this arm64, not aarch64
     STARCH_MIX := aarch64
     DUMP1090_CPPFLAGS += -DSTARCH_MIX_AARCH64
   else ifeq ($(findstring arm,$(ARCH)),arm)
-    # ARMv7 NEON
     STARCH_MIX := arm
     DUMP1090_CPPFLAGS += -DSTARCH_MIX_ARM
   else
@@ -201,6 +236,9 @@ else
     DUMP1090_CPPFLAGS += -DSTARCH_MIX_GENERIC
   endif
 endif
+
+# ======================== Build targets ========================
+
 all: showconfig dump1090 view1090 starch-benchmark
 
 ALL_CCFLAGS := $(CPPFLAGS) $(DUMP1090_CPPFLAGS) $(CFLAGS) $(DUMP1090_CFLAGS)
@@ -218,53 +256,153 @@ showconfig:
 	@echo "  HackRF support:   $(HACKRF)" >&2
 	@echo "  LimeSDR support:  $(LIMESDR)" >&2
 	@echo "  SoapySDR support: $(SOAPYSDR)" >&2
+	@echo "  libsdrgg support: $(SDRGG)" >&2
 
-%.o: %.c *.h
+# Create obj directory
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+# Pattern rule: compile .c from VPATH into obj/
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
 
-dump1090: dump1090.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o net_io.o crc.o demod_2400.o stats.o cpr.o icao_filter.o track.o util.o convert.o ais_charset.o adaptive.o elm.o cpdlc_decode.o mlat_client.o piaware_client.o fa_mlat.o planefinder_client.o fr24_client.o radarbox_client.o flarm_decode.o flarm_demod.o flarm_reader.o ogntp_decode.o ogn_client.o opensky_client.o sondehub_client.o feeder_thread.o config_panel.o sdr_receiver.o acars_demod.o vdl2_demod.o sonde_demod.o pocsag_demod.o gsm_calibrate.o gsm_decode.o gsm_tracker.o lte_decode.o lte_tracker.o iot_decode.o iot_tracker.o decoder_config.o app_config.o $(SDR_OBJ) $(COMPAT) $(CPUFEATURES_OBJS) $(STARCH_OBJS)
+# DSP helpers (compiled in-place, not in OBJDIR)
+dsp/helpers/tables.o: dsp/helpers/tables.c
+	$(CC) $(ALL_CCFLAGS) -c $< -o $@
+
+# In-place pattern rule for subsystems that compile in their own directories
+# (cpu_features, compat) - these override ALL_CCFLAGS via Makefile.cpufeatures
+cpu_features/src/%.o: cpu_features/src/%.c
+	$(CC) $(ALL_CCFLAGS) -c $< -o $@
+
+compat/clock_gettime/%.o: compat/clock_gettime/%.c
+	$(CC) $(ALL_CCFLAGS) -c $< -o $@
+
+compat/clock_nanosleep/%.o: compat/clock_nanosleep/%.c
+	$(CC) $(ALL_CCFLAGS) -c $< -o $@
+
+# C++ rule for sdrgg backend
+ifeq ($(SDRGG), yes)
+$(OBJDIR)/sdr_backend_sdrgg.o: $(SRCDIR_SDR)/sdr_backend_sdrgg.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+endif
+
+# ======================== Object lists ========================
+
+DUMP1090_OBJS := \
+	$(OBJDIR)/dump1090.o \
+	$(OBJDIR)/interactive.o \
+	$(OBJDIR)/app_config.o \
+	$(OBJDIR)/mode_ac.o \
+	$(OBJDIR)/mode_s.o \
+	$(OBJDIR)/comm_b.o \
+	$(OBJDIR)/demod_2400.o \
+	$(OBJDIR)/stats.o \
+	$(OBJDIR)/cpr.o \
+	$(OBJDIR)/icao_filter.o \
+	$(OBJDIR)/track.o \
+	$(OBJDIR)/adaptive.o \
+	$(OBJDIR)/elm.o \
+	$(OBJDIR)/util.o \
+	$(OBJDIR)/crc.o \
+	$(OBJDIR)/convert.o \
+	$(OBJDIR)/ais_charset.o \
+	$(OBJDIR)/cpdlc_decode.o \
+	$(OBJDIR)/anet.o \
+	$(OBJDIR)/net_io.o \
+	$(OBJDIR)/feeder_thread.o \
+	$(OBJDIR)/mlat_client.o \
+	$(OBJDIR)/fa_mlat.o \
+	$(OBJDIR)/piaware_client.o \
+	$(OBJDIR)/planefinder_client.o \
+	$(OBJDIR)/fr24_client.o \
+	$(OBJDIR)/radarbox_client.o \
+	$(OBJDIR)/opensky_client.o \
+	$(OBJDIR)/ogn_client.o \
+	$(OBJDIR)/sondehub_client.o \
+	$(OBJDIR)/flarm_decode.o \
+	$(OBJDIR)/flarm_demod.o \
+	$(OBJDIR)/flarm_reader.o \
+	$(OBJDIR)/ogntp_decode.o \
+	$(OBJDIR)/acars_demod.o \
+	$(OBJDIR)/vdl2_demod.o \
+	$(OBJDIR)/sonde_demod.o \
+	$(OBJDIR)/pocsag_demod.o \
+	$(OBJDIR)/gsm_calibrate.o \
+	$(OBJDIR)/gsm_decode.o \
+	$(OBJDIR)/gsm_tracker.o \
+	$(OBJDIR)/lte_decode.o \
+	$(OBJDIR)/lte_sib.o \
+	$(OBJDIR)/lte_tracker.o \
+	$(OBJDIR)/iot_decode.o \
+	$(OBJDIR)/iot_tracker.o \
+	$(OBJDIR)/config_panel.o \
+	$(OBJDIR)/decoder_config.o \
+	$(OBJDIR)/sdr_receiver.o
+
+VIEW1090_OBJS := \
+	$(OBJDIR)/view1090.o \
+	$(OBJDIR)/interactive.o \
+	$(OBJDIR)/mode_ac.o \
+	$(OBJDIR)/mode_s.o \
+	$(OBJDIR)/comm_b.o \
+	$(OBJDIR)/stats.o \
+	$(OBJDIR)/cpr.o \
+	$(OBJDIR)/icao_filter.o \
+	$(OBJDIR)/track.o \
+	$(OBJDIR)/elm.o \
+	$(OBJDIR)/util.o \
+	$(OBJDIR)/crc.o \
+	$(OBJDIR)/ais_charset.o \
+	$(OBJDIR)/cpdlc_decode.o \
+	$(OBJDIR)/anet.o \
+	$(OBJDIR)/net_io.o \
+	$(OBJDIR)/mlat_client.o \
+	$(OBJDIR)/fa_mlat.o \
+	$(OBJDIR)/piaware_client.o \
+	$(OBJDIR)/feeder_thread_stub.o \
+	$(OBJDIR)/config_panel_stub.o \
+	$(OBJDIR)/sdr_stub.o
+
+FAUP1090_OBJS := \
+	$(OBJDIR)/faup1090.o \
+	$(OBJDIR)/mode_ac.o \
+	$(OBJDIR)/mode_s.o \
+	$(OBJDIR)/comm_b.o \
+	$(OBJDIR)/stats.o \
+	$(OBJDIR)/cpr.o \
+	$(OBJDIR)/icao_filter.o \
+	$(OBJDIR)/track.o \
+	$(OBJDIR)/elm.o \
+	$(OBJDIR)/util.o \
+	$(OBJDIR)/crc.o \
+	$(OBJDIR)/ais_charset.o \
+	$(OBJDIR)/cpdlc_decode.o \
+	$(OBJDIR)/anet.o \
+	$(OBJDIR)/net_io.o \
+	$(OBJDIR)/piaware_client.o \
+	$(OBJDIR)/fa_mlat.o \
+	$(OBJDIR)/feeder_thread_stub.o \
+	$(OBJDIR)/config_panel_stub.o \
+	$(OBJDIR)/sdr_stub.o
+
+# ======================== Link targets ========================
+
+dump1090: $(DUMP1090_OBJS) $(SDR_OBJ) $(COMPAT) $(CPUFEATURES_OBJS) $(STARCH_OBJS)
 	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_SDR) $(LIBS_CURSES) -lssl -lcrypto -lz
 
-view1090: view1090.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o net_io.o crc.o stats.o cpr.o icao_filter.o track.o util.o ais_charset.o elm.o cpdlc_decode.o mlat_client.o piaware_client.o fa_mlat.o feeder_thread_stub.o config_panel_stub.o sdr_stub.o $(COMPAT)
+view1090: $(VIEW1090_OBJS) $(COMPAT)
 	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_CURSES) -lssl -lcrypto
 
-faup1090: faup1090.o anet.o mode_ac.o mode_s.o comm_b.o net_io.o crc.o stats.o cpr.o icao_filter.o track.o util.o ais_charset.o elm.o cpdlc_decode.o piaware_client.o fa_mlat.o feeder_thread_stub.o config_panel_stub.o sdr_stub.o $(COMPAT)
+faup1090: $(FAUP1090_OBJS) $(COMPAT)
 	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) -lssl -lcrypto
 
-starch-benchmark: cpu.o dsp/helpers/tables.o $(CPUFEATURES_OBJS) $(STARCH_OBJS) $(STARCH_BENCHMARK_OBJ)
+starch-benchmark: $(OBJDIR)/cpu.o dsp/helpers/tables.o $(CPUFEATURES_OBJS) $(STARCH_OBJS) $(STARCH_BENCHMARK_OBJ)
 	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS)
 
+# ======================== Clean ========================
+
 clean:
-	rm -f *.o oneoff/*.o compat/clock_gettime/*.o compat/clock_nanosleep/*.o cpu_features/src/*.o dsp/generated/*.o dsp/helpers/*.o $(CPUFEATURES_OBJS) dump1090 view1090 faup1090 cprtests crctests oneoff/convert_benchmark oneoff/decode_comm_b oneoff/dsp_error_measurement oneoff/uc8_capture_stats starch-benchmark
-
-test: cprtests
-	./cprtests
-
-cprtests: cpr.o cprtests.o
-	$(CC) $(ALL_CCFLAGS) -g -o $@ $^ -lm
-
-crctests: crc.c crc.h
-	$(CC) $(ALL_CCFLAGS) -g -DCRCDEBUG -o $@ $<
-
-benchmarks: oneoff/convert_benchmark
-	oneoff/convert_benchmark
-
-oneoff/convert_benchmark: oneoff/convert_benchmark.o convert.o util.o dsp/helpers/tables.o cpu.o $(CPUFEATURES_OBJS) $(STARCH_OBJS)
-	$(CC) $(ALL_CCFLAGS) -g -o $@ $^ -lm -lpthread
-
-oneoff/decode_comm_b: oneoff/decode_comm_b.o comm_b.o ais_charset.o
-	$(CC) $(ALL_CCFLAGS) -g -o $@ $^ -lm
-
-oneoff/dsp_error_measurement: oneoff/dsp_error_measurement.o dsp/helpers/tables.o cpu.o $(CPUFEATURES_OBJS) $(STARCH_OBJS)
-	$(CC) $(ALL_CCFLAGS) -g -o $@ $^ -lm
-
-oneoff/uc8_capture_stats: oneoff/uc8_capture_stats.o
-	$(CC) $(ALL_CCFLAGS) -g -o $@ $^ -lm
-
-starchgen:
-	dsp/starchgen.py .
-
-.PHONY: wisdom.local
-wisdom.local: starch-benchmark
-	./starch-benchmark -i 5 -o wisdom.local mean_power_u16 mean_power_u16_aligned magnitude_uc8 magnitude_uc8_aligned
-	./starch-benchmark -i 5 -r wisdom.local -o wisdom.local
+	rm -rf $(OBJDIR)
+	rm -f compat/clock_gettime/*.o compat/clock_nanosleep/*.o cpu_features/src/*.o dsp/generated/*.o dsp/helpers/*.o $(CPUFEATURES_OBJS)
+	rm -f dump1090 view1090 faup1090 cprtests crctests starch-benchmark
