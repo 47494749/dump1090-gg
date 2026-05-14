@@ -4,6 +4,10 @@
 #ifndef FR24_CLIENT_H
 #define FR24_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 typedef struct {
@@ -33,5 +37,9 @@ extern fr24_client_t FR24Client;
 
 int fr24_load_config(const char *path);
 void *fr24_thread_entry(void *arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // FR24_CLIENT_H

@@ -36,18 +36,18 @@ static struct mag_buf *fifo_tail;          // tail of queued buffers awaiting de
 static struct mag_buf *fifo_freelist;      // freelist of preallocated buffers
 static bool fifo_halted;                   // true if queue has been halted
 
-static unsigned overlap_length;     // desired overlap size in samples (size of overlap_buffer)
+static uint32_t overlap_length;     // desired overlap size in samples (size of overlap_buffer)
 static uint16_t *overlap_buffer;    // buffer used to save overlapping data
 
 // Create the queue structures. Not threadsafe.
-bool fifo_create(unsigned buffer_count, unsigned buffer_size, unsigned overlap)
+bool fifo_create(uint32_t buffer_count, uint32_t buffer_size, uint32_t overlap)
 {
     if (!(overlap_buffer = calloc(overlap, sizeof(overlap_buffer[0]))))
         goto nomem;
 
     overlap_length = overlap;
 
-    for (unsigned i = 0; i < buffer_count; ++i) {
+    for (uint32_t i = 0; i < buffer_count; ++i) {
         struct mag_buf *newbuf;
         if (!(newbuf = calloc(1, sizeof(*newbuf)))) {
             goto nomem;

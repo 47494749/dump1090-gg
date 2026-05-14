@@ -21,6 +21,14 @@
 #ifndef COMM_B_H
 #define COMM_B_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void decodeCommB(struct modesMessage *mm);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

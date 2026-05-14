@@ -6,11 +6,15 @@
 #ifndef DUMP1090_MESSAGE_H
 #define DUMP1090_MESSAGE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // The struct we use to store information about a decoded message.
 struct modesMessage {
     // Generic fields
-    unsigned char msg[MODES_LONG_MSG_BYTES];      // Binary message.
-    unsigned char verbatim[MODES_LONG_MSG_BYTES]; // Binary message, as originally received before correction
+    uint8_t       msg[MODES_LONG_MSG_BYTES];      // Binary message.
+    uint8_t       verbatim[MODES_LONG_MSG_BYTES]; // Binary message, as originally received before correction
     int           msgbits;                        // Number of bits in message
     int           msgtype;                        // Downlink format #
     uint32_t      crc;                            // Message CRC
@@ -28,57 +32,57 @@ struct modesMessage {
 
     // Raw data, just extracted directly from the message
     // The names reflect the field names in Annex 4
-    unsigned IID; // extracted from CRC of DF11s
-    unsigned AA;
-    unsigned AC;
-    unsigned CA;
-    unsigned CC;
-    unsigned CF;
-    unsigned DR;
-    unsigned FS;
-    unsigned ID;
-    unsigned KE;
-    unsigned ND;
-    unsigned RI;
-    unsigned SL;
-    unsigned UM;
-    unsigned VS;
-    unsigned char MB[7];
-    unsigned char MD[10];
-    unsigned char ME[7];
-    unsigned char MV[7];
+    uint32_t IID; // extracted from CRC of DF11s
+    uint32_t AA;
+    uint32_t AC;
+    uint32_t CA;
+    uint32_t CC;
+    uint32_t CF;
+    uint32_t DR;
+    uint32_t FS;
+    uint32_t ID;
+    uint32_t KE;
+    uint32_t ND;
+    uint32_t RI;
+    uint32_t SL;
+    uint32_t UM;
+    uint32_t VS;
+    uint8_t MB[7];
+    uint8_t MD[10];
+    uint8_t ME[7];
+    uint8_t MV[7];
 
     // Decoded data
-    unsigned altitude_baro_valid : 1;
-    unsigned altitude_geom_valid : 1;
-    unsigned track_valid : 1;
-    unsigned track_rate_valid : 1;
-    unsigned heading_valid : 1;
-    unsigned roll_valid : 1;
-    unsigned gs_valid : 1;
-    unsigned ias_valid : 1;
-    unsigned tas_valid : 1;
-    unsigned mach_valid : 1;
-    unsigned baro_rate_valid : 1;
-    unsigned geom_rate_valid : 1;
-    unsigned squawk_valid : 1;
-    unsigned callsign_valid : 1;
-    unsigned cpr_valid : 1;
-    unsigned cpr_odd : 1;
-    unsigned cpr_decoded : 1;
-    unsigned cpr_relative : 1;
-    unsigned category_valid : 1;
-    unsigned geom_delta_valid : 1;
-    unsigned from_mlat : 1;
-    unsigned from_tisb : 1;
-    unsigned spi_valid : 1;
-    unsigned spi : 1;
-    unsigned alert_valid : 1;
-    unsigned alert : 1;
-    unsigned emergency_valid : 1;
+    uint32_t altitude_baro_valid : 1;
+    uint32_t altitude_geom_valid : 1;
+    uint32_t track_valid : 1;
+    uint32_t track_rate_valid : 1;
+    uint32_t heading_valid : 1;
+    uint32_t roll_valid : 1;
+    uint32_t gs_valid : 1;
+    uint32_t ias_valid : 1;
+    uint32_t tas_valid : 1;
+    uint32_t mach_valid : 1;
+    uint32_t baro_rate_valid : 1;
+    uint32_t geom_rate_valid : 1;
+    uint32_t squawk_valid : 1;
+    uint32_t callsign_valid : 1;
+    uint32_t cpr_valid : 1;
+    uint32_t cpr_odd : 1;
+    uint32_t cpr_decoded : 1;
+    uint32_t cpr_relative : 1;
+    uint32_t category_valid : 1;
+    uint32_t geom_delta_valid : 1;
+    uint32_t from_mlat : 1;
+    uint32_t from_tisb : 1;
+    uint32_t spi_valid : 1;
+    uint32_t spi : 1;
+    uint32_t alert_valid : 1;
+    uint32_t alert : 1;
+    uint32_t emergency_valid : 1;
 
-    unsigned metype; // DF17/18 ME type
-    unsigned mesub;  // DF17/18 ME subtype
+    uint32_t metype; // DF17/18 ME type
+    uint32_t mesub;  // DF17/18 ME subtype
 
     commb_format_t commb_format; // Inferred format of a comm-b message
 
@@ -104,93 +108,93 @@ struct modesMessage {
         float v2;
         float selected;
     } gs;
-    unsigned ias;               // Indicated airspeed, kts
-    unsigned tas;               // True airspeed, kts
+    uint32_t ias;               // Indicated airspeed, kts
+    uint32_t tas;               // True airspeed, kts
     double   mach;              // Mach number
     int      baro_rate;         // Rate of change of barometric altitude, feet/minute
     int      geom_rate;         // Rate of change of geometric (GNSS / INS) altitude, feet/minute
-    unsigned squawk;            // 13 bits identity (Squawk), encoded as 4 hex digits
+    uint32_t squawk;            // 13 bits identity (Squawk), encoded as 4 hex digits
     char     callsign[9];       // 8 chars flight number, NUL-terminated
-    unsigned category;          // A0 - D7 encoded as a single hex byte
+    uint32_t category;          // A0 - D7 encoded as a single hex byte
     emergency_t emergency;      // emergency/priority status
 
     // valid if cpr_valid
     cpr_type_t cpr_type;       // The encoding type used (surface, airborne, coarse TIS-B)
-    unsigned   cpr_lat;        // Non decoded latitude.
-    unsigned   cpr_lon;        // Non decoded longitude.
-    unsigned   cpr_nucp;       // NUCp/NIC value implied by message type
+    uint32_t   cpr_lat;        // Non decoded latitude.
+    uint32_t   cpr_lon;        // Non decoded longitude.
+    uint32_t   cpr_nucp;       // NUCp/NIC value implied by message type
 
     airground_t airground;     // air/ground state
 
     // valid if cpr_decoded:
     double decoded_lat;
     double decoded_lon;
-    unsigned decoded_nic;
-    unsigned decoded_rc;
+    uint32_t decoded_nic;
+    uint32_t decoded_rc;
 
     // various integrity/accuracy things
     struct {
-        unsigned nic_a_valid : 1;
-        unsigned nic_b_valid : 1;
-        unsigned nic_c_valid : 1;
-        unsigned nic_baro_valid : 1;
-        unsigned nac_p_valid : 1;
-        unsigned nac_v_valid : 1;
-        unsigned gva_valid : 1;
-        unsigned sda_valid : 1;
+        uint32_t nic_a_valid : 1;
+        uint32_t nic_b_valid : 1;
+        uint32_t nic_c_valid : 1;
+        uint32_t nic_baro_valid : 1;
+        uint32_t nac_p_valid : 1;
+        uint32_t nac_v_valid : 1;
+        uint32_t gva_valid : 1;
+        uint32_t sda_valid : 1;
 
-        unsigned nic_a : 1;        // if nic_a_valid
-        unsigned nic_b : 1;        // if nic_b_valid
-        unsigned nic_c : 1;        // if nic_c_valid
-        unsigned nic_baro : 1;     // if nic_baro_valid
+        uint32_t nic_a : 1;        // if nic_a_valid
+        uint32_t nic_b : 1;        // if nic_b_valid
+        uint32_t nic_c : 1;        // if nic_c_valid
+        uint32_t nic_baro : 1;     // if nic_baro_valid
 
-        unsigned nac_p;        // if nac_p_valid
-        unsigned nac_v;        // if nac_v_valid
+        uint32_t nac_p;        // if nac_p_valid
+        uint32_t nac_v;        // if nac_v_valid
 
-        unsigned sil;          // if sil_type != SIL_INVALID
+        uint32_t sil;          // if sil_type != SIL_INVALID
         sil_type_t sil_type;
 
-        unsigned gva;          // if gva_valid
-        unsigned sda;          // if sda_valid
+        uint32_t gva;          // if gva_valid
+        uint32_t sda;          // if sda_valid
     } accuracy;
 
     // Operational Status
     struct {
-        unsigned valid : 1;
-        unsigned version;
+        uint32_t valid : 1;
+        uint32_t version;
 
-        unsigned om_acas_ra : 1;
-        unsigned om_ident : 1;
-        unsigned om_atc : 1;
-        unsigned om_saf : 1;
+        uint32_t om_acas_ra : 1;
+        uint32_t om_ident : 1;
+        uint32_t om_atc : 1;
+        uint32_t om_saf : 1;
 
-        unsigned cc_acas : 1;
-        unsigned cc_cdti : 1;
-        unsigned cc_1090_in : 1;
-        unsigned cc_arv : 1;
-        unsigned cc_ts : 1;
-        unsigned cc_tc;
-        unsigned cc_uat_in : 1;
-        unsigned cc_poa : 1;
-        unsigned cc_b2_low : 1;
-        unsigned cc_lw_valid : 1;
+        uint32_t cc_acas : 1;
+        uint32_t cc_cdti : 1;
+        uint32_t cc_1090_in : 1;
+        uint32_t cc_arv : 1;
+        uint32_t cc_ts : 1;
+        uint32_t cc_tc;
+        uint32_t cc_uat_in : 1;
+        uint32_t cc_poa : 1;
+        uint32_t cc_b2_low : 1;
+        uint32_t cc_lw_valid : 1;
 
         heading_type_t tah;
         heading_type_t hrd;
 
-        unsigned cc_lw;
-        unsigned cc_antenna_offset;
+        uint32_t cc_lw;
+        uint32_t cc_antenna_offset;
     } opstatus;
 
     // combined:
     //   Target State & Status (ADS-B V2 only)
     //   Comm-B BDS4,0 Vertical Intent
     struct {
-        unsigned heading_valid : 1;
-        unsigned fms_altitude_valid : 1;
-        unsigned mcp_altitude_valid : 1;
-        unsigned qnh_valid : 1;
-        unsigned modes_valid : 1;
+        uint32_t heading_valid : 1;
+        uint32_t fms_altitude_valid : 1;
+        uint32_t mcp_altitude_valid : 1;
+        uint32_t qnh_valid : 1;
+        uint32_t modes_valid : 1;
 
         float    heading;       // heading, degrees (0-359) (could be magnetic or true heading; magnetic recommended)
         heading_type_t heading_type;
@@ -204,12 +208,12 @@ struct modesMessage {
     } nav;
 
     // BDS 4,4 MRAR
-    unsigned mrar_source_valid : 1;
-    unsigned wind_valid : 1;
-    unsigned temperature_valid : 1;
-    unsigned pressure_valid : 1;
-    unsigned turbulence_valid : 1;
-    unsigned humidity_valid : 1;
+    uint32_t mrar_source_valid : 1;
+    uint32_t wind_valid : 1;
+    uint32_t temperature_valid : 1;
+    uint32_t pressure_valid : 1;
+    uint32_t turbulence_valid : 1;
+    uint32_t humidity_valid : 1;
 
     mrar_source_t mrar_source;
     float wind_speed;    // kts
@@ -220,14 +224,14 @@ struct modesMessage {
     float humidity;      // 0-100 %
 
     // BDS 4,5 MHAR (Meteorological Hazard Report)
-    unsigned mhar_turbulence_valid : 1;
-    unsigned mhar_windshear_valid : 1;
-    unsigned mhar_microburst_valid : 1;
-    unsigned mhar_icing_valid : 1;
-    unsigned mhar_wake_valid : 1;
-    unsigned mhar_sat_valid : 1;
-    unsigned mhar_asp_valid : 1;
-    unsigned mhar_rh_valid : 1;
+    uint32_t mhar_turbulence_valid : 1;
+    uint32_t mhar_windshear_valid : 1;
+    uint32_t mhar_microburst_valid : 1;
+    uint32_t mhar_icing_valid : 1;
+    uint32_t mhar_wake_valid : 1;
+    uint32_t mhar_sat_valid : 1;
+    uint32_t mhar_asp_valid : 1;
+    uint32_t mhar_rh_valid : 1;
 
     hazard_t mhar_turbulence;
     hazard_t mhar_windshear;
@@ -239,31 +243,35 @@ struct modesMessage {
     float mhar_rh;     // 0-100 %
 
     // BDS 3,0 ACAS RA (decoded fields)
-    unsigned acas_ra_valid : 1;
-    unsigned acas_ara;       // 14 bits: Active Resolution Advisories
-    unsigned acas_rac;       // 4 bits: Resolution Advisory Complement
-    unsigned acas_rat : 1;   // RA Terminated
-    unsigned acas_mte : 1;   // Multiple Threat Encounter
-    unsigned acas_tti;       // 2 bits: Threat Type Indicator
-    unsigned acas_threat_id; // 26 bits: Threat Identity Data
+    uint32_t acas_ra_valid : 1;
+    uint32_t acas_ara;       // 14 bits: Active Resolution Advisories
+    uint32_t acas_rac;       // 4 bits: Resolution Advisory Complement
+    uint32_t acas_rat : 1;   // RA Terminated
+    uint32_t acas_mte : 1;   // Multiple Threat Encounter
+    uint32_t acas_tti;       // 2 bits: Threat Type Indicator
+    uint32_t acas_threat_id; // 26 bits: Threat Identity Data
 
     // BDS 4,1 - Next Waypoint Identifier
-    unsigned waypoint_valid : 1;
+    uint32_t waypoint_valid : 1;
     char waypoint_id[9]; // 8 chars + NUL
 
     // BDS 4,2 - Next Waypoint Position
-    unsigned waypoint_lat_valid : 1;
-    unsigned waypoint_lon_valid : 1;
-    unsigned waypoint_alt_valid : 1;
+    uint32_t waypoint_lat_valid : 1;
+    uint32_t waypoint_lon_valid : 1;
+    uint32_t waypoint_alt_valid : 1;
     double waypoint_lat;
     double waypoint_lon;
     int waypoint_alt; // feet
 
     // BDS 4,3 - Next Waypoint Crossing Info
-    unsigned waypoint_crossing_alt_valid : 1;
-    unsigned waypoint_crossing_speed_valid : 1;
+    uint32_t waypoint_crossing_alt_valid : 1;
+    uint32_t waypoint_crossing_speed_valid : 1;
     int waypoint_crossing_alt; // feet
-    unsigned waypoint_crossing_speed; // kts
+    uint32_t waypoint_crossing_speed; // kts
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DUMP1090_MESSAGE_H

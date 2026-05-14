@@ -6,6 +6,10 @@
 #ifndef DUMP1090_DEFS_H
 #define DUMP1090_DEFS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Default version number, if not overriden by the Makefile
 #ifndef MODES_DUMP1090_VERSION
 # define MODES_DUMP1090_VERSION     "unknown"
@@ -80,5 +84,9 @@
 #define MAX_POWER (MAX_AMPLITUDE * MAX_AMPLITUDE)
 
 #define FAUP_DEFAULT_RATE_MULTIPLIER    1.0                  // FA Upload rate multiplier
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DUMP1090_DEFS_H

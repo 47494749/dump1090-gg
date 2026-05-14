@@ -8,6 +8,10 @@
 #ifndef DUMP1090_STATE_H
 #define DUMP1090_STATE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Program global state
 struct _Modes {                             // Internal state
     pthread_t       reader_thread;
@@ -16,7 +20,7 @@ struct _Modes {                             // Internal state
     struct timespec reader_cpu_accumulator;               // accumulated CPU time used by the reader thread
     struct timespec reader_cpu_start;                     // start time for the last reader thread CPU measurement
 
-    unsigned        trailing_samples;                     // extra trailing samples in magnitude buffers
+    uint32_t        trailing_samples;                     // extra trailing samples in magnitude buffers
     double          sample_rate;                          // actual sample rate in use (in hz)
 
     uint16_t       *log10lut;        // Magnitude -> log10 lookup table
@@ -91,6 +95,14 @@ struct _Modes {                             // Internal state
     int beast_feed_count;
     char *adsbhub_ckey;              // ADSBHub station ckey for dynamic IP update
 
+    // Airframes.io ACARS/VDL2 UDP feed
+    struct {
+        char *host;                  // feed host (default: feed.acars.io)
+        int   port;                  // feed port (default: 5550 for ACARS, 5552 for VDL2)
+        int   enabled;               // 1=active, 0=disabled
+    } airframes_acars_feed, airframes_vdl2_feed;
+    char  airframes_station_id[32];  // station identifier for airframes.io
+
     int   quiet;                     // Suppress stdout
     uint32_t show_only;              // Only show messages from this ICAO
     int   interactive;               // Interactive mode
@@ -150,21 +162,25 @@ struct _Modes {                             // Internal state
 
     bool adaptive_burst_control;
     float adaptive_burst_alpha;
-    unsigned adaptive_burst_change_delay;
+    uint32_t adaptive_burst_change_delay;
     float adaptive_burst_loud_rate;
-    unsigned adaptive_burst_loud_runlength;
+    uint32_t adaptive_burst_loud_runlength;
     float adaptive_burst_quiet_rate;
-    unsigned adaptive_burst_quiet_runlength;
+    uint32_t adaptive_burst_quiet_runlength;
 
     bool adaptive_range_control;
     float adaptive_range_alpha;
-    unsigned adaptive_range_percentile;
+    uint32_t adaptive_range_percentile;
     float adaptive_range_target;
-    unsigned adaptive_range_change_delay;
-    unsigned adaptive_range_scan_delay;
-    unsigned adaptive_range_rescan_delay;
+    uint32_t adaptive_range_change_delay;
+    uint32_t adaptive_range_scan_delay;
+    uint32_t adaptive_range_rescan_delay;
 };
 
 extern struct _Modes Modes;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DUMP1090_STATE_H

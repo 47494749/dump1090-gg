@@ -14,6 +14,10 @@
 #ifndef SDR_RECEIVER_H
 #define SDR_RECEIVER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include "sdr_backend.h"
 #include <stdint.h>
@@ -40,7 +44,9 @@ typedef enum {
     SDR_ROLE_POCSAG,        // ~466 MHz POCSAG pager decoding
     SDR_ROLE_GSM,           // ~935 MHz GSM broadcast channel decoder
     SDR_ROLE_LTE,           // ~800 MHz LTE cell scanner (PSS/SSS/MIB/SIB1)
-    SDR_ROLE_IOT868         // ~868 MHz ISM band IoT device monitor (OOK/FSK)
+    SDR_ROLE_IOT868,        // ~868 MHz ISM band IoT device monitor (OOK/FSK)
+    SDR_ROLE_FANET,         // ~868.2 MHz FANET+ LoRa (SF7/BW250)
+    SDR_ROLE_SARSAT         // ~406 MHz Cospas-Sarsat ELT/EPIRB/PLB beacon
 } sdr_role_t;
 
 // Decoder operations — plugin interface for each receiver role.
@@ -80,7 +86,7 @@ typedef struct {
     struct mag_buf *freelist;       // preallocated free buffers
     bool            halted;
 
-    unsigned        overlap_length;
+    uint32_t        overlap_length;
     uint16_t       *overlap_buffer;
 } rx_fifo_t;
 
@@ -127,7 +133,7 @@ typedef struct sdr_receiver {
     bool            thread_started;
 
     // Callback state (replaces static locals in rtlsdrCallback)
-    unsigned        dropped;
+    uint32_t        dropped;
     uint64_t        sample_counter;
 
     // CPU accounting
@@ -152,8 +158,8 @@ typedef struct sdr_receiver {
     volatile uint32_t pending_freq; // 0 = no retune pending
 
     // USB error recovery
-    unsigned        usb_error_count;    // consecutive set_freq failures
-    unsigned        usb_error_total;    // total set_freq failures
+    uint32_t        usb_error_count;    // consecutive set_freq failures
+    uint32_t        usb_error_total;    // total set_freq failures
 } sdr_receiver_t;
 
 // Global receiver manager state
@@ -168,6 +174,22 @@ extern int PocsagOutputEnabled;
 extern int GsmOutputEnabled;
 extern int LteOutputEnabled;
 extern int IotOutputEnabled;
+extern int FanetOutputEnabled;
+extern int SarsatOutputEnabled;
+
+// FANET ground tracking entry (exposed for API serialization)
+typedef struct {
+    uint32_t addr;
+    double   latitude;
+    double   longitude;
+    uint8_t  ground_type;
+    char     name[32];
+    uint64_t last_seen;
+    uint8_t  valid;
+} fanet_ground_entry_t;
+
+// Iterate over active ground tracking entries (thread-safe, <5min old)
+void fanetGetGroundTracks(void (*cb)(const fanet_ground_entry_t *e, void *ctx), void *ctx);
 
 // ======================== Manager API ========================
 
@@ -205,7 +227,7 @@ void sdrManagerShutdown(void);
 // ======================== Per-receiver FIFO API ========================
 
 // These mirror fifo.h but operate on a per-receiver FIFO context.
-bool rxFifoCreate(rx_fifo_t *fifo, unsigned buffer_count, unsigned buffer_size, unsigned overlap);
+bool rxFifoCreate(rx_fifo_t *fifo, uint32_t buffer_count, uint32_t buffer_size, uint32_t overlap);
 void rxFifoDestroy(rx_fifo_t *fifo);
 void rxFifoDrain(rx_fifo_t *fifo);
 void rxFifoHalt(rx_fifo_t *fifo);
@@ -230,7 +252,7 @@ void rxClose(sdr_receiver_t *rx);
 
 // Reconfigure a running receiver in-place (no device close/reopen).
 bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
-                   int new_ppm, unsigned new_freq, double new_sample_rate);
+                   int new_ppm, uint32_t new_freq, double new_sample_rate);
 
 // Gain control for a specific receiver
 int rxGetGain(sdr_receiver_t *rx);
@@ -281,6 +303,10 @@ bool rxDecoderCreate(sdr_receiver_t *rx);
 void rxDecoderDestroy(sdr_receiver_t *rx);
 
 // Process IQ samples through the internal decoder (called from RTL-SDR callback)
-void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, unsigned len);
+void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, uint32_t len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SDR_RECEIVER_H

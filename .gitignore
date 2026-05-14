@@ -20,11 +20,15 @@ panel.conf
 *.orig
 
 # Build artifacts
+obj/
 wisdom.local
 testfiles/*.bin
 misc
 frames.js
 untrackedDeveloperSettings.js
+
+# Test IQ samples (large binary files)
+samples/
 
 # Instance-specific config
 receivers.json

@@ -35,6 +35,7 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 <a href="/gsm.html">📶 GSM</a>
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
+<a href="/fanet.html">🚩 FANET</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -48,13 +49,19 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 </div>
 
 <script>
+let lastSeq=-1;
 async function loadMessages(){
     try{
         const r=await fetch('/api/messages');
         const d=await r.json();
+        if(d.seq===lastSeq) return;
+        lastSeq=d.seq;
         const box=document.getElementById('msgbox');
+        const autoScroll=document.getElementById('msg-scroll').checked;
+        const savedTop=box.scrollTop;
         box.textContent=d.messages.join('\n');
-        if(document.getElementById('msg-scroll').checked)box.scrollTop=box.scrollHeight;
+        if(autoScroll) box.scrollTop=box.scrollHeight;
+        else box.scrollTop=savedTop;
     }catch(e){}
 }
 

@@ -6,6 +6,10 @@
 #ifndef DUMP1090_TYPES_H
 #define DUMP1090_TYPES_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Where did a bit of data arrive from? In order of increasing priority */
 typedef enum {
     SOURCE_INVALID,        /* data is not valid */
@@ -143,5 +147,9 @@ typedef enum {
 typedef enum {
     SDR_NONE, SDR_IFILE, SDR_RTLSDR, SDR_BLADERF, SDR_HACKRF, SDR_LIMESDR, SDR_SOAPYSDR
 } sdr_type_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DUMP1090_TYPES_H

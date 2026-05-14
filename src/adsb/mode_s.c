@@ -190,7 +190,7 @@ static int decodeAC12Field(int AC12Field, altitude_unit_t *unit) {
 //
 // Decode the 7 bit ground movement field PWL exponential style scale (ADS-B v2)
 //
-static float decodeMovementFieldV2(unsigned movement) {
+static float decodeMovementFieldV2(uint32_t movement) {
     // Note : movement codes 0,125,126,127 are all invalid, but they are
     //        trapped for before this function is called.
 
@@ -215,7 +215,7 @@ static float decodeMovementFieldV2(unsigned movement) {
 //
 // Decode the 7 bit ground movement field PWL exponential style scale (ADS-B v0)
 //
-static float decodeMovementFieldV0(unsigned movement) {
+static float decodeMovementFieldV0(uint32_t movement) {
     // Note : movement codes 0,125,126,127 are all invalid, but they are
     //        trapped for before this function is called.
 
@@ -241,24 +241,24 @@ static float decodeMovementFieldV0(unsigned movement) {
 // If the message is uncorrectable (this may mean the message type does not have CRC coverage), returns -1
 
 // is this message a long-form message with a DF that uses Parity/Interrogator?
-static bool isLongPIMessage(const unsigned char *msg)
+static bool isLongPIMessage(const uint8_t *msg)
 {
-    const unsigned df = getbits(msg, 1, 5);
+    const uint32_t df = getbits(msg, 1, 5);
     if (df == 17 || df == 18 || df == 19)
         return true;
     return false;
 }
 
 // is this message a short-form message with a DF that uses Parity/Interrogator?
-static bool isShortPIMessage(const unsigned char *msg)
+static bool isShortPIMessage(const uint8_t *msg)
 {
-    const unsigned df = getbits(msg, 1, 5);
+    const uint32_t df = getbits(msg, 1, 5);
     return (df == 11); // assume IID==0
 }
 
 #define UNCHECKED_SYNDROME 0xFFFFFFFFU
 
-static int correctMessage(const unsigned char *in, unsigned char *out, uint32_t *short_syndrome, uint32_t *long_syndrome)
+static int correctMessage(const uint8_t *in, uint8_t *out, uint32_t *short_syndrome, uint32_t *long_syndrome)
 {
     // Possible DF values of the first byte of a message that could be a valid DF11/17/18
     // message after correction. See tools/df-correction-arrays.py for generator code.
@@ -279,13 +279,13 @@ static int correctMessage(const unsigned char *in, unsigned char *out, uint32_t 
     // Try to correct, including corrections to the initial 5 bit DF field
     // that determines message format
 
-    const unsigned uncorrected_df = getbits(in, 1, 5);
+    const uint32_t uncorrected_df = getbits(in, 1, 5);
     const uint32_t df_bit = 1 << uncorrected_df;
 
     // Select the right bitset based on the maximum number of bit errors in the DF field that we could correct.
     // nb: strictly speaking, --no-fix-df doesn't _entirely_ disable correction of the DF field when nfix_crc == 2
     // (DF17 could be corrected to DF18 or vice versa), but it does disable the CPU hungry part of it.
-    const unsigned fix_df_bits = (Modes.fix_df ? Modes.nfix_crc : 0);
+    const uint32_t fix_df_bits = (Modes.fix_df ? Modes.nfix_crc : 0);
 
     struct errorinfo *long_ei = NULL;
     if (df_correctable_long[fix_df_bits] & df_bit) {
@@ -314,8 +314,8 @@ static int correctMessage(const unsigned char *in, unsigned char *out, uint32_t 
 
     // Might be a damaged DF11/17/18, or might be another message type that doesn't have a full CRC
 
-    unsigned long_errors = (long_ei ? long_ei->errors : 999);
-    unsigned short_errors = (short_ei ? short_ei->errors : 999);
+    uint32_t long_errors = (long_ei ? long_ei->errors : 999);
+    uint32_t short_errors = (short_ei ? short_ei->errors : 999);
 
     // If both 56-bit and 112-bit corrections are possible:
     //   try the correction with fewer error bits first
@@ -356,19 +356,19 @@ static int correctMessage(const unsigned char *in, unsigned char *out, uint32_t 
 
 // Score how plausible this ModeS message looks.
 // The more positive, the more reliable the message is.
-score_rank scoreModesMessage(const unsigned char *uncorrected)
+score_rank scoreModesMessage(const uint8_t *uncorrected)
 {
     // This is a "valid" DF0 message, but it's not useful; we discard these messages
-    static const unsigned char all_zeros[MODES_SHORT_MSG_BYTES] = { 0, 0, 0, 0, 0, 0, 0 };
+    static const uint8_t all_zeros[MODES_SHORT_MSG_BYTES] = { 0, 0, 0, 0, 0, 0, 0 };
     if (!memcmp(all_zeros, uncorrected, sizeof(all_zeros)))
         return SR_ALL_ZEROS;
 
     // try to produce a corrected DF11/17/18, including correcting the DF bits
-    unsigned char corrected[14];
+    uint8_t corrected[14];
     uint32_t short_syndrome, long_syndrome;
     int corrections = correctMessage(uncorrected, corrected, &short_syndrome, &long_syndrome);
 
-    unsigned df = getbits(corrected, 1, 5); // Downlink Format
+    uint32_t df = getbits(corrected, 1, 5); // Downlink Format
     switch (df) {
     case 0:  // short air-air surveillance
     case 4:  // surveillance, altitude reply
@@ -546,7 +546,7 @@ static void decodeExtendedSquitter(struct modesMessage *mm);
 // return 0 if all OK
 // <0 if it's a bad message
 //
-int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
+int decodeModesMessage(struct modesMessage *mm, const uint8_t *in)
 {
     // score the message if needed (it might be coming off the network)
     if (mm->score == SR_NOT_SET)
@@ -563,7 +563,7 @@ int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
     // Apply corrections to our local copy
     uint32_t short_syndrome, long_syndrome;
     int corrections = correctMessage(in, mm->msg, &short_syndrome, &long_syndrome);
-    const unsigned char *msg = mm->msg;
+    const uint8_t *msg = mm->msg;
 
     // Get the message type ASAP as other operations depend on this
     mm->msgtype         = getbits(msg, 1, 5); // Downlink Format
@@ -768,7 +768,7 @@ int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
         // ND must be extracted before elmAddSegment uses it
         mm->ND = getbits(msg, 5, 8);
         memcpy(mm->MD, &msg[1], 10);
-        // Feed ELM reassembly — but only if the frame had zero corrected bits.
+        // Feed ELM reassembly Ã¢â‚¬â€ but only if the frame had zero corrected bits.
         // DF24-31 uses Address/Parity so there's no independent CRC validation.
         // Frames that needed bit correction to reach a DF24 are almost certainly
         // misclassified DF17/DF20/DF21 and produce garbage ELM data.
@@ -789,12 +789,12 @@ int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
         // Parse ACAS Resolution Advisory from MV field
         // MV format: ARA(14) RAC(4) RAT(1) MTE(1) TTI(2) TID(26) reserved(8)
         if (!mm->VS) { // Only meaningful when airborne (VS=0)
-            unsigned ara = getbits(mm->MV, 1, 14);
-            unsigned rac = getbits(mm->MV, 15, 18);
-            unsigned rat = getbit(mm->MV, 19);
-            unsigned mte = getbit(mm->MV, 20);
-            unsigned tti = getbits(mm->MV, 21, 22);
-            unsigned tid = getbits(mm->MV, 23, 48);
+            uint32_t ara = getbits(mm->MV, 1, 14);
+            uint32_t rac = getbits(mm->MV, 15, 18);
+            uint32_t rat = getbit(mm->MV, 19);
+            uint32_t mte = getbit(mm->MV, 20);
+            uint32_t tti = getbits(mm->MV, 21, 22);
+            uint32_t tid = getbits(mm->MV, 23, 48);
             if (ara || rac || rat || mte) {
                 mm->acas_ra_valid = 1;
                 mm->acas_ara = ara;
@@ -807,7 +807,7 @@ int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
         }
     }
 
-    // ND (number of D-segment, Comm-D) — extracted earlier, before elmAddSegment
+    // ND (number of D-segment, Comm-D) Ã¢â‚¬â€ extracted earlier, before elmAddSegment
 
     // RI (Reply information, ACAS)
     if (mm->msgtype == 0 || mm->msgtype == 16) {
@@ -853,7 +853,7 @@ int decodeModesMessage(struct modesMessage *mm, const unsigned char *in)
 static void decodeESIdentAndCategory(struct modesMessage *mm)
 {
     // Aircraft Identification and Category
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     mm->mesub = getbits(me, 6, 8);
 
@@ -869,7 +869,7 @@ static void decodeESIdentAndCategory(struct modesMessage *mm)
     mm->callsign_valid = 1;
 
     // actually valid?
-    for (unsigned i = 0; i < 8; ++i) {
+    for (uint32_t i = 0; i < 8; ++i) {
         if (!(mm->callsign[i] >= 'A' && mm->callsign[i] <= 'Z') &&
             !(mm->callsign[i] >= '0' && mm->callsign[i] <= '9') &&
             mm->callsign[i] != ' ') {
@@ -911,7 +911,7 @@ static void setIMF(struct modesMessage *mm)
 static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
 {
     // Airborne Velocity Message
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     // 1-5: ME type
     // 6-8: ME subtype
@@ -938,8 +938,8 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
             // 15-24: E/W speed
             // 25:    N/S direction
             // 26-35: N/S speed
-            unsigned ew_raw = getbits(me, 15, 24);
-            unsigned ns_raw = getbits(me, 26, 35);
+            uint32_t ew_raw = getbits(me, 15, 24);
+            uint32_t ns_raw = getbits(me, 26, 35);
 
             if (ew_raw && ns_raw) {
                 int ew_vel = (ew_raw - 1) * (getbit(me, 14) ? -1 : 1) * ((mm->mesub == 2) ? 4 : 1);
@@ -974,9 +974,9 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
 
             // 25: airspeed type
             // 26-35: airspeed
-            unsigned airspeed = getbits(me, 26, 35);
+            uint32_t airspeed = getbits(me, 26, 35);
             if (airspeed) {
-                unsigned speed = (airspeed - 1) * (mm->mesub == 4 ? 4 : 1);
+                uint32_t speed = (airspeed - 1) * (mm->mesub == 4 ? 4 : 1);
                 if (getbit(me, 25)) {
                     mm->tas_valid = 1;
                     mm->tas = speed;
@@ -993,8 +993,8 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
     // 36: vert rate source
     // 37: vert rate sign
     // 38-46: vert rate magnitude
-    unsigned vert_rate = getbits(me, 38, 46);
-    unsigned vert_rate_is_baro = getbit(me, 36);
+    uint32_t vert_rate = getbits(me, 38, 46);
+    uint32_t vert_rate_is_baro = getbit(me, 36);
     if (vert_rate) {
         int rate = (vert_rate - 1) * (getbit(me, 37) ? -64 : 64);
         if (vert_rate_is_baro) {
@@ -1010,7 +1010,7 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
 
     // 49: baro/geom delta sign
     // 50-56: baro/geom delta magnitude
-    unsigned raw_delta = getbits(me, 50, 56);
+    uint32_t raw_delta = getbits(me, 50, 56);
     if (raw_delta) {
         mm->geom_delta_valid = 1;
         mm->geom_delta = (raw_delta - 1) * (getbit(me, 49) ? -25 : 25);
@@ -1020,14 +1020,14 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
 static void decodeESSurfacePosition(struct modesMessage *mm, int check_imf)
 {
     // Surface position and movement
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     mm->airground = AG_GROUND; // definitely.
     mm->cpr_valid = 1;
     mm->cpr_type = CPR_SURFACE;
 
     // 6-12: Movement
-    unsigned movement = getbits(me, 6, 12);
+    uint32_t movement = getbits(me, 6, 12);
     if (movement > 0 && movement < 125) {
         mm->gs_valid = 1;
         mm->gs.selected = mm->gs.v0 = decodeMovementFieldV0(movement); // assumed v0 until told otherwise
@@ -1058,7 +1058,7 @@ static void decodeESSurfacePosition(struct modesMessage *mm, int check_imf)
 static void decodeESAirbornePosition(struct modesMessage *mm, int check_imf)
 {
     // Airborne position and altitude
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     // 6-7: surveillance status
     switch (getbits(me, 6, 7)) {
@@ -1093,7 +1093,7 @@ static void decodeESAirbornePosition(struct modesMessage *mm, int check_imf)
     }
 
     // 9-20: altitude
-    unsigned AC12Field = getbits(me, 9, 20);
+    uint32_t AC12Field = getbits(me, 9, 20);
 
     if (mm->metype == 0) {
         // no position information
@@ -1148,7 +1148,7 @@ static void decodeESAirbornePosition(struct modesMessage *mm, int check_imf)
 
 static void decodeESTestMessage(struct modesMessage *mm)
 {
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     mm->mesub = getbits(me, 6, 8);
 
@@ -1164,7 +1164,7 @@ static void decodeESTestMessage(struct modesMessage *mm)
 static void decodeESAircraftStatus(struct modesMessage *mm, int check_imf)
 {
     // Extended Squitter Aircraft Status
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     mm->mesub = getbits(me, 6, 8);
 
@@ -1172,7 +1172,7 @@ static void decodeESAircraftStatus(struct modesMessage *mm, int check_imf)
         mm->emergency_valid = 1;
         mm->emergency = (emergency_t) getbits(me, 9, 11);
 
-        unsigned ID13Field = getbits(me, 12, 24);
+        uint32_t ID13Field = getbits(me, 12, 24);
         if (ID13Field) {
             mm->squawk_valid = 1;
             mm->squawk   = decodeID13Field(ID13Field);
@@ -1196,7 +1196,7 @@ static void decodeESAircraftStatus(struct modesMessage *mm, int check_imf)
 
 static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
 {
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     mm->mesub = getbits(me, 6, 7); // an unusual message: only 2 bits of subtype
 
@@ -1263,7 +1263,7 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
             break;
         }
         // 26-27: horizontal data source
-        unsigned h_source = getbits(me, 26, 27);
+        uint32_t h_source = getbits(me, 26, 27);
         if (h_source != 0) {
             // 28-36: target heading/track
             mm->nav.heading_valid = 1;
@@ -1332,9 +1332,9 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
         mm->emergency = (emergency_t) getbits(me, 54, 56);
     } else if (mm->mesub == 1) { // Target state and status, V2
         // 8: SIL
-        unsigned is_fms = getbit(me, 9);
+        uint32_t is_fms = getbit(me, 9);
 
-        unsigned alt_bits = getbits(me, 10, 20);
+        uint32_t alt_bits = getbits(me, 10, 20);
         if (alt_bits != 0) {
             if (is_fms) {
                 mm->nav.fms_altitude_valid = 1;
@@ -1345,7 +1345,7 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
             }
         }
 
-        unsigned baro_bits = getbits(me, 21, 29);
+        uint32_t baro_bits = getbits(me, 21, 29);
         if (baro_bits != 0) {
             mm->nav.qnh_valid = 1;
             mm->nav.qnh = 800.0 + (baro_bits - 1) * 0.8;
@@ -1354,7 +1354,7 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
         if (getbit(me, 30)) {
             mm->nav.heading_valid = 1;
             // two's complement -180..+180, which is conveniently
-            // also the same as unsigned 0..360
+            // also the same as uint32_t 0..360
             mm->nav.heading = getbits(me, 31, 39) * 180.0 / 256.0;
             mm->nav.heading_type = HEADING_MAGNETIC_OR_TRUE;
         }
@@ -1391,7 +1391,7 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
 
 static void decodeESOperationalStatus(struct modesMessage *mm, int check_imf)
 {
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     mm->mesub = getbits(me, 6, 8);
 
@@ -1447,7 +1447,7 @@ static void decodeESOperationalStatus(struct modesMessage *mm, int check_imf)
                 mm->accuracy.nic_baro_valid = 1;
                 mm->accuracy.nic_baro = getbit(me, 53);
             } else {
-                // see DO=260B §2.2.3.2.7.2.12
+                // see DO=260B Ã‚Â§2.2.3.2.7.2.12
                 // TAH=0 : surface movement reports ground track
                 // TAH=1 : surface movement reports aircraft heading
                 mm->opstatus.tah = getbit(me, 53) ? mm->opstatus.hrd : HEADING_GROUND_TRACK;
@@ -1500,7 +1500,7 @@ static void decodeESOperationalStatus(struct modesMessage *mm, int check_imf)
                 mm->accuracy.nic_baro_valid = 1;
                 mm->accuracy.nic_baro = getbit(me, 53);
             } else {
-                // see DO=260B §2.2.3.2.7.2.12
+                // see DO=260B Ã‚Â§2.2.3.2.7.2.12
                 // TAH=0 : surface movement reports ground track
                 // TAH=1 : surface movement reports aircraft heading
                 mm->opstatus.tah = getbit(me, 53) ? mm->opstatus.hrd : HEADING_GROUND_TRACK;
@@ -1515,14 +1515,14 @@ static void decodeESOperationalStatus(struct modesMessage *mm, int check_imf)
 // Format: IMF(1) AltCode(12) SS(2) T(1) F(1) LAT(12) LON(12) GS(8) TRK(7)
 static void decodeCoarseTISB(struct modesMessage *mm)
 {
-    unsigned char *me = mm->ME;
+    uint8_t *me = mm->ME;
 
     // Bit 1: IMF (Address qualifier)
     if (getbit(me, 1))
         setIMF(mm);
 
     // Bits 2-13: Encoded altitude (12 bits)
-    unsigned alt_code = getbits(me, 2, 13);
+    uint32_t alt_code = getbits(me, 2, 13);
     if (alt_code) {
         altitude_unit_t unit;
         int alt = decodeAC12Field(alt_code, &unit);
@@ -1538,12 +1538,12 @@ static void decodeCoarseTISB(struct modesMessage *mm)
     // Bits 14-15: Surveillance status (reserved for coarse)
     // Bit 16: T (UTC synchronized)
     // Bit 17: F (CPR odd/even flag)
-    unsigned cpr_odd = getbit(me, 17);
+    uint32_t cpr_odd = getbit(me, 17);
 
     // Bits 18-29: CPR Latitude (12 bits)
     // Bits 30-41: CPR Longitude (12 bits)
-    unsigned cpr_lat_12 = getbits(me, 18, 29);
-    unsigned cpr_lon_12 = getbits(me, 30, 41);
+    uint32_t cpr_lat_12 = getbits(me, 18, 29);
+    uint32_t cpr_lon_12 = getbits(me, 30, 41);
 
     // Scale 12-bit CPR to 17-bit for the standard CPR decoder
     mm->cpr_lat = cpr_lat_12 << 5;
@@ -1554,14 +1554,14 @@ static void decodeCoarseTISB(struct modesMessage *mm)
     mm->cpr_nucp = 0; // Very low accuracy for coarse
 
     // Bits 42-49: Ground speed (8 bits)
-    unsigned gs_code = getbits(me, 42, 49);
+    uint32_t gs_code = getbits(me, 42, 49);
     if (gs_code) {
         mm->gs_valid = 1;
         mm->gs.selected = mm->gs.v0 = mm->gs.v2 = (float)gs_code;
     }
 
     // Bits 50-56: Ground track (7 bits, 360/128 degree resolution)
-    unsigned trk_code = getbits(me, 50, 56);
+    uint32_t trk_code = getbits(me, 50, 56);
     mm->heading_valid = 1;
     mm->heading = trk_code * 360.0f / 128.0f;
     mm->heading_type = HEADING_GROUND_TRACK;
@@ -1569,9 +1569,9 @@ static void decodeCoarseTISB(struct modesMessage *mm)
 
 static void decodeExtendedSquitter(struct modesMessage *mm)
 {
-    unsigned char *me = mm->ME;
-    unsigned metype = mm->metype = getbits(me, 1, 5);
-    unsigned check_imf = 0;
+    uint8_t *me = mm->ME;
+    uint32_t metype = mm->metype = getbits(me, 1, 5);
+    uint32_t check_imf = 0;
 
     // Check CF on DF18 to work out the format of the ES and whether we need to look for an IMF bit
     if (mm->msgtype == 18) {
@@ -1715,7 +1715,7 @@ static const char *df_names[33] = {
     /* 32 */ "Mode A/C Reply",
 };
 
-static const char *df_to_string(unsigned df) {
+static const char *df_to_string(uint32_t df) {
     if (df > 32)
         return "out of range";
     if (!df_names[df])
@@ -1914,14 +1914,14 @@ static const char *hazard_to_string(hazard_t hazard)
     }
 }
 
-static void print_hex_bytes(unsigned char *data, size_t len) {
+static void print_hex_bytes(uint8_t *data, size_t len) {
     size_t i;
     for (i = 0; i < len; ++i) {
-        printf("%02X", (unsigned)data[i]);
+        printf("%02X", (uint32_t)data[i]);
     }
 }
 
-static int esTypeHasSubtype(unsigned metype)
+static int esTypeHasSubtype(uint32_t metype)
 {
     if (metype <= 18) {
         return 0;
@@ -1934,7 +1934,7 @@ static int esTypeHasSubtype(unsigned metype)
     return 1;
 }
 
-static const char *esTypeName(unsigned metype, unsigned mesub)
+static const char *esTypeName(uint32_t metype, uint32_t mesub)
 {
     switch (metype) {
     case 0:
@@ -2505,27 +2505,27 @@ static void logTisbMessage(struct modesMessage *mm)
 
     // Decode CF=4 management message fields
     if (mm->CF == 4) {
-        unsigned char *me = mm->ME;
-        unsigned bds1 = getbits(me, 1, 4);
-        unsigned bds2 = getbits(me, 5, 8);
+        uint8_t *me = mm->ME;
+        uint32_t bds1 = getbits(me, 1, 4);
+        uint32_t bds2 = getbits(me, 5, 8);
         fprintf(stderr, " BDS=%u,%u", bds1, bds2);
 
         if (bds1 == 6 && bds2 == 1) {
             // Airborne position management (BDS 6,1)
-            unsigned site_id = getbits(me, 9, 12);
-            unsigned tid = getbits(me, 13, 26);  // TIS-B site target ID
+            uint32_t site_id = getbits(me, 9, 12);
+            uint32_t tid = getbits(me, 13, 26);  // TIS-B site target ID
             fprintf(stderr, " [Airborne mgmt] site=%u tid=%u", site_id, tid);
         } else if (bds1 == 6 && bds2 == 2) {
             // Surface position management (BDS 6,2)
-            unsigned site_id = getbits(me, 9, 12);
-            unsigned tid = getbits(me, 13, 26);
+            uint32_t site_id = getbits(me, 9, 12);
+            uint32_t tid = getbits(me, 13, 26);
             fprintf(stderr, " [Surface mgmt] site=%u tid=%u", site_id, tid);
         }
     }
 
     // For decoded data, print what we have
     if (mm->CF == 3) {
-        // Coarse TIS-B — already decoded by decodeCoarseTISB
+        // Coarse TIS-B Ã¢â‚¬â€ already decoded by decodeCoarseTISB
         if (mm->altitude_baro_valid)
             fprintf(stderr, " alt=%dft", mm->altitude_baro);
         if (mm->gs_valid)
@@ -2537,7 +2537,7 @@ static void logTisbMessage(struct modesMessage *mm)
     }
 
     if (mm->CF == 2 || mm->CF == 5 || mm->CF == 6) {
-        // Fine TIS-B / ADS-R — decoded through normal ME path
+        // Fine TIS-B / ADS-R Ã¢â‚¬â€ decoded through normal ME path
         if (mm->callsign_valid)
             fprintf(stderr, " ident=%s", mm->callsign);
         if (mm->altitude_baro_valid)

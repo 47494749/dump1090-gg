@@ -56,6 +56,8 @@
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
 #include "iot_tracker.h"
+#include "dispatcher.h"
+#include "airframes_feed.h"
 
 #ifdef ENABLE_SDRGG
 #include "sdrgg.h"
@@ -118,7 +120,7 @@ static void *pocsag_ifile_reader_thread(void *arg)
     (void)arg;
 
     const char *path = PocsagConfig.ifile_path;
-    const unsigned buf_size = 262144; // 256 KB
+    const uint32_t buf_size = 262144; // 256 KB
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "pocsag-ifile: failed to allocate read buffer\n");
@@ -141,7 +143,7 @@ static void *pocsag_ifile_reader_thread(void *arg)
         nread &= ~(size_t)1; // ensure even (IQ pairs)
 
         if (PocsagIfile.demod && nread > 0) {
-            pocsag_process(PocsagIfile.demod, buf, (unsigned)nread);
+            pocsag_process(PocsagIfile.demod, buf, (uint32_t)nread);
         }
 
         // Throttle to approximate real-time
@@ -161,13 +163,13 @@ static void *pocsag_ifile_reader_thread(void *arg)
     // Print final stats
     pocsag_stats_t stats;
     pocsag_get_stats(PocsagIfile.demod, &stats);
-    fprintf(stderr, "pocsag-ifile: done. samples=%llu preambles=%llu syncs=%llu messages=%llu bch_ok=%llu bch_fail=%llu\n",
-            (unsigned long long)stats.samples_processed,
-            (unsigned long long)stats.preambles_detected,
-            (unsigned long long)stats.syncs_detected,
-            (unsigned long long)stats.messages_decoded,
-            (unsigned long long)stats.bch_corrections,
-            (unsigned long long)stats.bch_failures);
+    fprintf(stderr, "pocsag-ifile: done. samples=%" PRIu64 " preambles=%" PRIu64 " syncs=%" PRIu64 " messages=%" PRIu64 " bch_ok=%" PRIu64 " bch_fail=%" PRIu64 "\n",
+            (uint64_t)stats.samples_processed,
+            (uint64_t)stats.preambles_detected,
+            (uint64_t)stats.syncs_detected,
+            (uint64_t)stats.messages_decoded,
+            (uint64_t)stats.bch_corrections,
+            (uint64_t)stats.bch_failures);
 
     // Signal main loop to exit when file playback is done
     Modes.exit = 1;
@@ -211,7 +213,7 @@ static void *sonde_ifile_reader_thread(void *arg)
     (void)arg;
 
     const char *path = SondeIfileConfig.ifile_path;
-    const unsigned buf_size = 262144;
+    const uint32_t buf_size = 262144;
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "sonde-ifile: failed to allocate read buffer\n");
@@ -234,7 +236,7 @@ static void *sonde_ifile_reader_thread(void *arg)
         nread &= ~(size_t)1; // ensure even (IQ pairs)
 
         if (SondeIfile.demod && nread > 0) {
-            sonde_process(SondeIfile.demod, buf, (unsigned)nread);
+            sonde_process(SondeIfile.demod, buf, (uint32_t)nread);
         }
 
         // Throttle to approximate real-time
@@ -254,13 +256,13 @@ static void *sonde_ifile_reader_thread(void *arg)
     // Print final stats
     sonde_stats_t stats;
     sonde_get_stats(SondeIfile.demod, &stats);
-    fprintf(stderr, "sonde-ifile: done. samples=%llu frames_detected=%llu frames_decoded=%llu rs_corrected=%llu rs_uncorrectable=%llu crc_errors=%llu\n",
-            (unsigned long long)stats.samples_processed,
-            (unsigned long long)stats.frames_detected,
-            (unsigned long long)stats.frames_decoded,
-            (unsigned long long)stats.rs_corrected,
-            (unsigned long long)stats.rs_uncorrectable,
-            (unsigned long long)stats.crc_errors);
+    fprintf(stderr, "sonde-ifile: done. samples=%" PRIu64 " frames_detected=%" PRIu64 " frames_decoded=%" PRIu64 " rs_corrected=%" PRIu64 " rs_uncorrectable=%" PRIu64 " crc_errors=%" PRIu64 "\n",
+            (uint64_t)stats.samples_processed,
+            (uint64_t)stats.frames_detected,
+            (uint64_t)stats.frames_decoded,
+            (uint64_t)stats.rs_corrected,
+            (uint64_t)stats.rs_uncorrectable,
+            (uint64_t)stats.crc_errors);
 
     Modes.exit = 1;
     return NULL;
@@ -285,9 +287,14 @@ static struct {
 static void acars_ifile_msg_handler(const acars_msg_t *msg, void *ctx)
 {
     (void)ctx;
-    fprintf(stderr, "[ACARS-ifile] ch=%d %.3fMHz mode=%c reg=%s label=%s blk=%c msgno=%s flight=%s \"%.*s\"\n",
+    fprintf(stderr, "[ACARS-ifile] ch=%d %.3fMHz mode=%c reg=%s label=%s blk=%c%s%s%s%s%s msgno=%s flight=%s \"%.*s\"\n",
             msg->channel, msg->freq / 1e6, msg->mode,
             msg->reg, msg->label, msg->block_id,
+            msg->dsp_header[0] ? " route=" : "",
+            msg->dsp_header[0] ? msg->dsp_header : "",
+            msg->sublabel[0] ? " sub=" : "",
+            msg->sublabel[0] ? msg->sublabel : "",
+            msg->mfi[0] ? msg->mfi : "",
             msg->msgno, msg->flight,
             msg->text_len, msg->text);
 }
@@ -297,7 +304,7 @@ static void *acars_ifile_reader_thread(void *arg)
     (void)arg;
 
     const char *path = AcarsIfileConfig.ifile_path;
-    const unsigned buf_size = 262144;
+    const uint32_t buf_size = 262144;
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "acars-ifile: failed to allocate read buffer\n");
@@ -318,7 +325,7 @@ static void *acars_ifile_reader_thread(void *arg)
         if (nread == 0) break;
         nread &= ~(size_t)1;
         if (AcarsIfile.demod && nread > 0)
-            acars_process(AcarsIfile.demod, buf, (unsigned)nread);
+            acars_process(AcarsIfile.demod, buf, (uint32_t)nread);
 
         double samples = nread / 2.0;
         double sleep_us = (samples / ACARS_IFILE_SAMPLE_RATE) * 1e6;
@@ -335,10 +342,10 @@ static void *acars_ifile_reader_thread(void *arg)
 
     acars_stats_t stats;
     acars_get_stats(AcarsIfile.demod, &stats);
-    fprintf(stderr, "acars-ifile: done. samples=%llu messages=%llu crc_errors=%llu\n",
-            (unsigned long long)stats.samples_processed,
-            (unsigned long long)stats.messages_decoded,
-            (unsigned long long)stats.crc_errors);
+    fprintf(stderr, "acars-ifile: done. samples=%" PRIu64 " messages=%" PRIu64 " crc_errors=%" PRIu64 "\n",
+            (uint64_t)stats.samples_processed,
+            (uint64_t)stats.messages_decoded,
+            (uint64_t)stats.crc_errors);
 
     Modes.exit = 1;
     return NULL;
@@ -382,7 +389,7 @@ static void *gsm_ifile_reader_thread(void *arg)
     (void)arg;
 
     const char *path = GsmIfileConfig.ifile_path;
-    const unsigned buf_size = 262144;
+    const uint32_t buf_size = 262144;
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "gsm-ifile: failed to allocate read buffer\n");
@@ -406,10 +413,10 @@ static void *gsm_ifile_reader_thread(void *arg)
             /* Feed in small chunks so the state machine runs frequently
              * enough to track frame positions across buffer shifts.
              * chunk_size = 9230 samples (18460 bytes) = half the phase buffer */
-            const unsigned chunk_bytes = 18460;
-            unsigned off = 0;
-            while (off < (unsigned)nread) {
-                unsigned n = (unsigned)nread - off;
+            const uint32_t chunk_bytes = 18460;
+            uint32_t off = 0;
+            while (off < (uint32_t)nread) {
+                uint32_t n = (uint32_t)nread - off;
                 if (n > chunk_bytes) n = chunk_bytes;
                 gsm_process(GsmIfile.demod, buf + off, n);
                 off += n;
@@ -431,15 +438,15 @@ static void *gsm_ifile_reader_thread(void *arg)
 
     gsm_stats_t stats;
     gsm_get_stats(GsmIfile.demod, &stats);
-    fprintf(stderr, "gsm-ifile: done. samples=%llu fcch=%llu sch=%llu/%llu bcch=%llu/%llu ccch=%llu cb=%llu\n",
-            (unsigned long long)stats.samples_processed,
-            (unsigned long long)stats.fcch_detected,
-            (unsigned long long)stats.sch_decoded,
-            (unsigned long long)stats.sch_failed,
-            (unsigned long long)stats.bcch_decoded,
-            (unsigned long long)stats.bcch_failed,
-            (unsigned long long)stats.ccch_decoded,
-            (unsigned long long)stats.cb_decoded);
+    fprintf(stderr, "gsm-ifile: done. samples=%" PRIu64 " fcch=%" PRIu64 " sch=%" PRIu64 "/%" PRIu64 " bcch=%" PRIu64 "/%" PRIu64 " ccch=%" PRIu64 " cb=%" PRIu64 "\n",
+            (uint64_t)stats.samples_processed,
+            (uint64_t)stats.fcch_detected,
+            (uint64_t)stats.sch_decoded,
+            (uint64_t)stats.sch_failed,
+            (uint64_t)stats.bcch_decoded,
+            (uint64_t)stats.bcch_failed,
+            (uint64_t)stats.ccch_decoded,
+            (uint64_t)stats.cb_decoded);
 
     Modes.exit = 1;
     return NULL;
@@ -479,6 +486,16 @@ static void lte_ifile_cell_handler(const lte_cell_info_t *cell, void *ctx)
     if (cell->sib1.valid)
         fprintf(stderr, " MCC=%u MNC=%u TAC=%u CellID=%u",
                 cell->sib1.mcc, cell->sib1.mnc, cell->sib1.tac, cell->sib1.cell_id);
+    if (cell->sib2.valid)
+        fprintf(stderr, " RACH=%upream maxHARQ=%u TA=%u",
+                cell->sib2.ra_preambles,
+                cell->sib2.max_harq_msg3_tx,
+                cell->sib2.time_alignment_timer_sf);
+    if (cell->sib3.valid)
+        fprintf(stderr, " Qhyst=%udB QRxMin=%d Prio=%u",
+                cell->sib3.q_hyst_db,
+                cell->sib3.q_rxlevmin,
+                cell->sib3.cell_reselection_priority);
     fprintf(stderr, " SNR=%.1fdB\n", cell->snr_db);
 }
 
@@ -487,7 +504,7 @@ static void *lte_ifile_reader_thread(void *arg)
     (void)arg;
 
     const char *path = LteIfileConfig.ifile_path;
-    const unsigned buf_size = 262144;
+    const uint32_t buf_size = 262144;
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "lte-ifile: failed to allocate read buffer\n");
@@ -508,7 +525,7 @@ static void *lte_ifile_reader_thread(void *arg)
         if (nread == 0) break;
         nread &= ~(size_t)1;
         if (LteIfile.demod && nread > 0)
-            lte_process(LteIfile.demod, buf, (unsigned)nread);
+            lte_process(LteIfile.demod, buf, (uint32_t)nread);
 
         double samples = nread / 2.0;
         double sleep_us = (samples / LTE_IFILE_SAMPLE_RATE) * 1e6;
@@ -525,8 +542,8 @@ static void *lte_ifile_reader_thread(void *arg)
 
     lte_stats_t stats;
     lte_get_stats(LteIfile.demod, &stats);
-    fprintf(stderr, "lte-ifile: done. samples=%llu pss=%u sss=%u mib=%u sib1=%u crc_err=%u\n",
-            (unsigned long long)stats.samples_processed,
+    fprintf(stderr, "lte-ifile: done. samples=%" PRIu64 " pss=%u sss=%u mib=%u sib1=%u crc_err=%u\n",
+            (uint64_t)stats.samples_processed,
             stats.pss_detected, stats.sss_decoded,
             stats.mib_decoded, stats.sib1_decoded, stats.crc_errors);
 
@@ -641,6 +658,13 @@ static void modesInitConfig(void) {
     openskyClientInit();
     sondehubClientInit();
     panelInitConfig();
+
+    // Airframes.io feed defaults (disabled until --airframes-acars/--airframes-vdl2 or panel)
+    Modes.airframes_acars_feed.host = strdup("feed.acars.io");
+    Modes.airframes_acars_feed.port = 5550;
+    Modes.airframes_vdl2_feed.host  = strdup("feed.acars.io");
+    Modes.airframes_vdl2_feed.port  = 5552;
+    snprintf(Modes.airframes_station_id, sizeof(Modes.airframes_station_id), "dump1090-gg");
 }
 //
 //=========================================================================
@@ -822,6 +846,7 @@ static void showHelp(void)
 "--tisb-verbose           Log TIS-B/ADS-R messages (DF18) to stderr\n"
 "--crc-rescue             Enable CRC-based message rescue (recover corrupted preambles)\n"
 "--quiet                  Disable output to stdout. Use for daemon applications\n"
+"--no-saved-config        Skip decoders.json, receivers.json and saved panel/feed state\n"
 "--show-only <addr>       Show only messages from the given ICAO on stdout\n"
 "--snip <level>           Strip IQ file removing samples < level\n"
 "\n"
@@ -934,6 +959,16 @@ static void showHelp(void)
 "--adsbhub-port <port>    ADSBHub feed port override\n"
 "--adsbhub-ckey <key>     ADSBHub station ckey for dynamic IP registration\n"
 "--adsbhub-ckey-file <f>  Read ADSBHub ckey from file (avoids shell escaping)\n"
+"\n"
+"      Airframes.io ACARS/VDL2 feeds (UDP JSON)\n"
+"\n"
+"--airframes-acars        Enable ACARS feed to airframes.io (feed.acars.io:5550)\n"
+"--airframes-acars-host <h> ACARS feed host override\n"
+"--airframes-acars-port <p> ACARS feed port override\n"
+"--airframes-vdl2         Enable VDL2 feed to airframes.io (feed.acars.io:5552)\n"
+"--airframes-vdl2-host <h>  VDL2 feed host override\n"
+"--airframes-vdl2-port <p>  VDL2 feed port override\n"
+"--airframes-station-id <s> Station identifier for airframes.io\n"
 "\n"
 "      Built-in MLAT client\n"
 "\n"
@@ -1087,6 +1122,10 @@ static void backgroundTasks(void) {
         flarmReaderPeriodicWork();
     }
 
+    // Poll the C++ dispatcher: drain all decoder queues → aircraft list + APIs
+    // Must come after all producers (feeders, FLARM, SDR drains) have pushed.
+    dispatcher_poll();
+
 
     // Refresh screen when in interactive mode
     if (Modes.interactive) {
@@ -1226,8 +1265,84 @@ static int addBeastFeed(const char *name, const char *default_host, int default_
     return idx;
 }
 
+static void stopStandaloneIfileReaders(void)
+{
+    // Stop standalone FLARM reader (ifile mode)
+    if (FlarmConfig.enabled && FlarmConfig.ifile_path[0]) {
+        flarmReaderClose();
+    }
+
+    // Stop standalone POCSAG reader (ifile mode)
+    if (PocsagIfile.thread_running) {
+        PocsagIfile.stop_flag = 1;
+        pthread_join(PocsagIfile.thread, NULL);
+        PocsagIfile.thread_running = 0;
+        if (PocsagIfile.demod) {
+            pocsag_destroy(PocsagIfile.demod);
+            PocsagIfile.demod = NULL;
+        }
+        fprintf(stderr, "pocsag-ifile: reader stopped\n");
+    }
+
+    // Stop standalone Sonde reader (ifile mode)
+    if (SondeIfile.thread_running) {
+        SondeIfile.stop_flag = 1;
+        pthread_join(SondeIfile.thread, NULL);
+        SondeIfile.thread_running = 0;
+        if (SondeIfile.demod) {
+            sonde_destroy(SondeIfile.demod);
+            SondeIfile.demod = NULL;
+        }
+        fprintf(stderr, "sonde-ifile: reader stopped\n");
+    }
+
+    // Stop standalone ACARS reader (ifile mode)
+    if (AcarsIfile.thread_running) {
+        AcarsIfile.stop_flag = 1;
+        pthread_join(AcarsIfile.thread, NULL);
+        AcarsIfile.thread_running = 0;
+        if (AcarsIfile.demod) {
+            acars_destroy(AcarsIfile.demod);
+            AcarsIfile.demod = NULL;
+        }
+        fprintf(stderr, "acars-ifile: reader stopped\n");
+    }
+
+    // Stop standalone GSM reader (ifile mode)
+    if (GsmIfile.thread_running) {
+        GsmIfile.stop_flag = 1;
+        pthread_join(GsmIfile.thread, NULL);
+        GsmIfile.thread_running = 0;
+        if (GsmIfile.demod) {
+            gsm_destroy(GsmIfile.demod);
+            GsmIfile.demod = NULL;
+        }
+        fprintf(stderr, "gsm-ifile: reader stopped\n");
+    }
+
+    // Stop standalone LTE reader (ifile mode)
+    if (LteIfile.thread_running) {
+        LteIfile.stop_flag = 1;
+        pthread_join(LteIfile.thread, NULL);
+        LteIfile.thread_running = 0;
+        if (LteIfile.demod) {
+            lte_destroy(LteIfile.demod);
+            LteIfile.demod = NULL;
+        }
+        fprintf(stderr, "lte-ifile: reader stopped\n");
+    }
+}
+
 int main(int argc, char **argv) {
     int j;
+    bool load_saved_config = true;
+
+    for (j = 1; j < argc; j++) {
+        if (!strcmp(argv[j], "--no-saved-config")) {
+            load_saved_config = false;
+            break;
+        }
+    }
 
     // Set sane defaults
     modesInitConfig();
@@ -1237,9 +1352,13 @@ int main(int argc, char **argv) {
 
     // Initialize decoder configs with defaults, then load from file
     decoderConfigInit();
-    if (!decoderConfigLoad()) {
-        // JSON config doesn't exist yet - still try to load FLARM keys
-        decoderConfigLoadFlarmKeys(DecoderConfigs.flarm.keys_file);
+    if (load_saved_config) {
+        if (!decoderConfigLoad()) {
+            // JSON config doesn't exist yet - still try to load FLARM keys
+            decoderConfigLoadFlarmKeys(DecoderConfigs.flarm.keys_file);
+        }
+    } else {
+        fprintf(stderr, "startup: skipping saved decoder config (--no-saved-config)\n");
     }
 
     // Initialize GSM cell tracker
@@ -1544,6 +1663,32 @@ int main(int argc, char **argv) {
             fclose(f);
             if (!Modes.adsbhub_ckey) { fprintf(stderr, "Empty ckey file: %s\n", argv[j]); exit(1); }
 
+        // Airframes.io ACARS/VDL2 feeds
+        } else if (!strcmp(argv[j],"--airframes-acars")) {
+            Modes.airframes_acars_feed.enabled = 1;
+            if (!Modes.airframes_acars_feed.host)
+                Modes.airframes_acars_feed.host = strdup("feed.acars.io");
+            if (!Modes.airframes_acars_feed.port)
+                Modes.airframes_acars_feed.port = 5550;
+        } else if (!strcmp(argv[j],"--airframes-acars-host") && more) {
+            free(Modes.airframes_acars_feed.host);
+            Modes.airframes_acars_feed.host = strdup(argv[++j]);
+        } else if (!strcmp(argv[j],"--airframes-acars-port") && more) {
+            Modes.airframes_acars_feed.port = atoi(argv[++j]);
+        } else if (!strcmp(argv[j],"--airframes-vdl2")) {
+            Modes.airframes_vdl2_feed.enabled = 1;
+            if (!Modes.airframes_vdl2_feed.host)
+                Modes.airframes_vdl2_feed.host = strdup("feed.acars.io");
+            if (!Modes.airframes_vdl2_feed.port)
+                Modes.airframes_vdl2_feed.port = 5552;
+        } else if (!strcmp(argv[j],"--airframes-vdl2-host") && more) {
+            free(Modes.airframes_vdl2_feed.host);
+            Modes.airframes_vdl2_feed.host = strdup(argv[++j]);
+        } else if (!strcmp(argv[j],"--airframes-vdl2-port") && more) {
+            Modes.airframes_vdl2_feed.port = atoi(argv[++j]);
+        } else if (!strcmp(argv[j],"--airframes-station-id") && more) {
+            snprintf(Modes.airframes_station_id, sizeof(Modes.airframes_station_id), "%s", argv[++j]);
+
         } else if (!strcmp(argv[j],"--mlat-server") && more) {
             Modes.net = 1;
             if (mlatClientAddServer(argv[++j]) < 0) {
@@ -1712,6 +1857,8 @@ int main(int argc, char **argv) {
             showVersion();
             showDSP();
             exit(0);
+        } else if (!strcmp(argv[j],"--no-saved-config")) {
+            // handled by the pre-scan before config loading
         } else if (!strcmp(argv[j],"--quiet")) {
             Modes.quiet = 1;
         } else if (!strcmp(argv[j],"--show-only") && more) {
@@ -1779,7 +1926,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (Modes.sdr_type == SDR_NONE && !Modes.net && !FlarmConfig.enabled && !PocsagConfig.enabled && SdrManager.count == 0) {
+    bool has_standalone_ifile = FlarmConfig.enabled || PocsagConfig.enabled ||
+                                SondeIfileConfig.ifile_path[0] ||
+                                AcarsIfileConfig.ifile_path[0] ||
+                                GsmIfileConfig.ifile_path[0] ||
+                                LteIfileConfig.ifile_path[0];
+
+    if (Modes.sdr_type == SDR_NONE && !Modes.net && !has_standalone_ifile && SdrManager.count == 0) {
         // Note: CLI ADS-B/FLARM args are converted to SdrManager receivers at startup,
         // so this check only fires if truly nothing was configured
         fprintf(stderr,
@@ -1809,9 +1962,14 @@ int main(int argc, char **argv) {
     // ========== Load saved receivers, then apply CLI overrides ==========
 
     // Step 1: Load all receivers from receivers.json (baseline config)
-    int loaded = sdrManagerLoad();
-    if (loaded > 0) {
-        log_with_timestamp("Loaded %d receiver(s) from receivers.json", loaded);
+    int loaded = 0;
+    if (load_saved_config) {
+        loaded = sdrManagerLoad();
+        if (loaded > 0) {
+            log_with_timestamp("Loaded %d receiver(s) from receivers.json", loaded);
+        }
+    } else {
+        log_with_timestamp("Skipping receivers.json load (--no-saved-config)");
     }
 
     // Step 2: CLI args override or add receivers
@@ -2097,6 +2255,9 @@ int main(int argc, char **argv) {
         modesInitNet();
     }
 
+    // Initialize the C++ dispatcher (decoder queue → aircraft list + feeders)
+    dispatcher_init();
+
     // Initialize FLARM decode tables and keys
     if (FlarmConfig.keys_file[0]) {
         flarm_load_keys(FlarmConfig.keys_file);
@@ -2117,11 +2278,15 @@ int main(int argc, char **argv) {
     // Start web control panel
     panelStart();
 
-    // Ensure all well-known beast feeds exist (disabled by default)
-    panelEnsureDefaultBeastFeeds();
+    if (load_saved_config) {
+        // Ensure all well-known beast feeds exist (disabled by default)
+        panelEnsureDefaultBeastFeeds();
 
-    // Load saved beast feed enabled/disabled state from panel.conf
-    panelLoadBeastFeedState();
+        // Load saved beast feed enabled/disabled state from panel.conf
+        panelLoadBeastFeedState();
+    } else {
+        log_with_timestamp("Skipping saved panel/feed state (--no-saved-config)");
+    }
 
     // init stats:
     reset_stats(&Modes.stats_current);
@@ -2160,6 +2325,9 @@ int main(int argc, char **argv) {
 
     // Start feeder threads (MLAT, PiAware, OGN) — each in its own pthread
     feederThreadsStart();
+
+    // Start airframes.io ACARS/VDL2 UDP feeds
+    airframesFeedInit();
 
     // ======================== Main loop ========================
     if (SdrManager.count == 0) {
@@ -2205,72 +2373,9 @@ int main(int argc, char **argv) {
         // Shutdown all receivers
         log_with_timestamp("Stopping all SDR receivers...");
         sdrManagerStopAll();
-
-        // Stop standalone FLARM reader (ifile mode)
-        if (FlarmConfig.enabled && FlarmConfig.ifile_path[0]) {
-            flarmReaderClose();
-        }
-
-        // Stop standalone POCSAG reader (ifile mode)
-        if (PocsagIfile.thread_running) {
-            PocsagIfile.stop_flag = 1;
-            pthread_join(PocsagIfile.thread, NULL);
-            PocsagIfile.thread_running = 0;
-            if (PocsagIfile.demod) {
-                pocsag_destroy(PocsagIfile.demod);
-                PocsagIfile.demod = NULL;
-            }
-            fprintf(stderr, "pocsag-ifile: reader stopped\n");
-        }
-
-        // Stop standalone Sonde reader (ifile mode)
-        if (SondeIfile.thread_running) {
-            SondeIfile.stop_flag = 1;
-            pthread_join(SondeIfile.thread, NULL);
-            SondeIfile.thread_running = 0;
-            if (SondeIfile.demod) {
-                sonde_destroy(SondeIfile.demod);
-                SondeIfile.demod = NULL;
-            }
-            fprintf(stderr, "sonde-ifile: reader stopped\n");
-        }
-
-        // Stop standalone ACARS reader (ifile mode)
-        if (AcarsIfile.thread_running) {
-            AcarsIfile.stop_flag = 1;
-            pthread_join(AcarsIfile.thread, NULL);
-            AcarsIfile.thread_running = 0;
-            if (AcarsIfile.demod) {
-                acars_destroy(AcarsIfile.demod);
-                AcarsIfile.demod = NULL;
-            }
-            fprintf(stderr, "acars-ifile: reader stopped\n");
-        }
-
-        // Stop standalone GSM reader (ifile mode)
-        if (GsmIfile.thread_running) {
-            GsmIfile.stop_flag = 1;
-            pthread_join(GsmIfile.thread, NULL);
-            GsmIfile.thread_running = 0;
-            if (GsmIfile.demod) {
-                gsm_destroy(GsmIfile.demod);
-                GsmIfile.demod = NULL;
-            }
-            fprintf(stderr, "gsm-ifile: reader stopped\n");
-        }
-
-        // Stop standalone LTE reader (ifile mode)
-        if (LteIfile.thread_running) {
-            LteIfile.stop_flag = 1;
-            pthread_join(LteIfile.thread, NULL);
-            LteIfile.thread_running = 0;
-            if (LteIfile.demod) {
-                lte_destroy(LteIfile.demod);
-                LteIfile.demod = NULL;
-            }
-            fprintf(stderr, "lte-ifile: reader stopped\n");
-        }
     }
+
+    stopStandaloneIfileReaders();
 
     interactiveCleanup();
     elmCleanup(&Modes.elm);
@@ -2282,6 +2387,7 @@ int main(int argc, char **argv) {
     piawareClientCleanup();
     ognClientCleanup();
     sondehubClientCleanup();
+    airframesFeedCleanup();
 
     // Write final stats
     flush_stats(0);

@@ -10,6 +10,10 @@
 #ifndef FLARM_READER_H
 #define FLARM_READER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -32,6 +36,10 @@ typedef struct {
     // Virtual IQ file input (--flarm-ifile)
     char   ifile_path[512];    // Path to raw IQ file (uint8 I/Q pairs, 1.6 MSPS)
     uint32_t ifile_time;       // Unix timestamp of file (mtime), used for XXTEA decrypt
+    int    ifile_once;         // If set, stop after a single file replay pass
+
+    // P3I (PilotAware) decoder
+    int    p3i_enabled;        // Enable P3I 869.525 MHz decoder (widens SDR bandwidth)
 } flarm_reader_config_t;
 
 extern flarm_reader_config_t FlarmConfig;
@@ -73,5 +81,9 @@ bool flarmDecoderInit(struct sdr_receiver *rx);
 void flarmDecoderProcess(struct sdr_receiver *rx, const uint8_t *iq, uint32_t len);
 void flarmDecoderDrain(struct sdr_receiver *rx);
 void flarmDecoderStop(struct sdr_receiver *rx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // FLARM_READER_H

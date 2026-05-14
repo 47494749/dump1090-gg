@@ -20,6 +20,10 @@
 #ifndef DUMP1090_UTIL_H
 #define DUMP1090_UTIL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <pthread.h>
 
@@ -65,5 +69,9 @@ void set_thread_name(const char *name);
  * if the thread has not terminated within `timeout_ms` milliseconds, return ETIMEDOUT.
  */
 int join_thread(pthread_t thread, void **retval, uint32_t timeout_ms);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

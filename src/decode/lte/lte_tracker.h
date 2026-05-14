@@ -10,6 +10,10 @@
 #ifndef LTE_TRACKER_H
 #define LTE_TRACKER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "lte_decode.h"
 
 // Initialize the global LTE cell tracker
@@ -21,10 +25,14 @@ void lteTrackerUpdate(const lte_cell_info_t *cell);
 // Get number of tracked cells
 int lteTrackerCount(void);
 
-// Export cells as JSON string (caller must free)
-char *lteTrackerToJSON(void);
-
 // Clean up
 void lteTrackerDestroy(void);
+
+#ifdef __cplusplus
+}
+// C++ only: returns std::string
+#include <string>
+std::string lteTrackerToJSON(void);
+#endif
 
 #endif // LTE_TRACKER_H

@@ -57,8 +57,8 @@ static struct {
     bool throttle;
 
     int fd;
-    unsigned bytes_per_sample;
-    unsigned bufsize;
+    uint32_t bytes_per_sample;
+    uint32_t bufsize;
     char *readbuf;
     iq_convert_fn converter;
     struct converter_state *converter_state;
@@ -200,11 +200,11 @@ void ifileRun()
         outbuf->sampleTimestamp = sampleCounter * 12e6 / Modes.sample_rate;
         outbuf->sysTimestamp = mstime();
 
-        unsigned bytes_wanted = (outbuf->totalLength - outbuf->overlap) * ifile.bytes_per_sample;
+        uint32_t bytes_wanted = (outbuf->totalLength - outbuf->overlap) * ifile.bytes_per_sample;
         if (bytes_wanted > ifile.bufsize)
             bytes_wanted = ifile.bufsize;
 
-        unsigned bytes_read = 0;
+        uint32_t bytes_read = 0;
         while (bytes_read < bytes_wanted) {
             ssize_t nread = read(ifile.fd, ifile.readbuf + bytes_read, bytes_wanted - bytes_read);
             if (nread <= 0) {
@@ -218,7 +218,7 @@ void ifileRun()
             bytes_read += nread;
         }
 
-        unsigned samples_read = bytes_read / ifile.bytes_per_sample;
+        uint32_t samples_read = bytes_read / ifile.bytes_per_sample;
 
         // Convert the new data
         ifile.converter(ifile.readbuf, &outbuf->data[outbuf->overlap], samples_read, ifile.converter_state, &outbuf->mean_level, &outbuf->mean_power);

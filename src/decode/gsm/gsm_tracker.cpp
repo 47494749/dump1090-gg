@@ -1,13 +1,17 @@
-// gsm_tracker.c — Global GSM cell tracking for web panel
+// gsm_tracker.cpp — Global GSM cell tracking for web panel
 //
 // Thread-safe cell list updated from GSM decoder callbacks.
 
 #include "gsm_tracker.h"
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <time.h>
+
+#include <string>
+#include <cstdarg>
 
 static gsm_tracked_cell_t cells[GSM_MAX_CELLS];
 static pthread_mutex_t tracker_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -164,41 +168,46 @@ int gsmTrackerActiveCount(void)
     return count;
 }
 
-// Escape a string for JSON (minimal: escape quotes, backslash, control chars)
-static int json_esc(char *dst, int maxlen, const char *src)
-{
-    int n = 0;
-    for (const char *s = src; *s && n < maxlen - 2; s++) {
-        if (*s == '"' || *s == '\\') {
-            if (n + 2 >= maxlen) break;
-            dst[n++] = '\\';
-            dst[n++] = *s;
-        } else if ((unsigned char)*s < 0x20) {
-            // Skip control chars
-        } else {
-            dst[n++] = *s;
-        }
-    }
-    dst[n] = '\0';
-    return n;
+// Helper: format into std::string
+static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static std::string sfmt(const char *fmt, ...) {
+    char tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0) return {};
+    if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
+    std::string s(n, '\0');
+    va_start(ap, fmt);
+    vsnprintf(&s[0], n + 1, fmt, ap);
+    va_end(ap);
+    return s;
 }
 
-char *gsmTrackerToJSON(void)
+// Escape a string for JSON (minimal: escape quotes, backslash, control chars)
+static std::string json_esc(const char *src)
 {
-    // Allocate generous buffer
-    int bufsize = 4096 + GSM_MAX_CELLS * 1024;
-    char *buf = malloc((size_t)bufsize);
-    if (!buf) return NULL;
+    std::string out;
+    for (const char *s = src; *s; s++) {
+        if (*s == '"' || *s == '\\') {
+            out += '\\';
+            out += *s;
+        } else if ((uint8_t)*s < 0x20) {
+            // Skip control chars
+        } else {
+            out += *s;
+        }
+    }
+    return out;
+}
 
-    char *p = buf;
-    char *end = buf + bufsize;
+std::string gsmTrackerToJSON(void)
+{
     uint64_t ts = now_ms();
     uint64_t cutoff = ts - (uint64_t)GSM_CELL_TIMEOUT * 1000;
 
-    // Check if any GSM SDR is active
-    // (done by caller, we just report what we have)
-
-    p += snprintf(p, (size_t)(end - p), "{\"now\":%.1f,\"cells\":[\n", ts / 1000.0);
+    std::string s = sfmt("{\"now\":%.1f,\"cells\":[\n", ts / 1000.0);
 
     pthread_mutex_lock(&tracker_mutex);
 
@@ -206,26 +215,24 @@ char *gsmTrackerToJSON(void)
     for (int i = 0; i < GSM_MAX_CELLS; i++) {
         gsm_tracked_cell_t *c = &cells[i];
         if (!c->active) continue;
-        // Include stale cells too but flag them
         bool stale = (c->last_seen_ms < cutoff);
 
-        if (!first) p += snprintf(p, (size_t)(end - p), ",\n");
+        if (!first) s += ",\n";
         first = 0;
 
-        char cb_esc[512];
-        json_esc(cb_esc, (int)sizeof(cb_esc), c->last_cb_text);
+        std::string cb_esc = json_esc(c->last_cb_text);
 
         const char *sync_names[] = {"none", "fcch", "sch", "locked"};
         const char *sync_name = (c->sync_state >= 0 && c->sync_state <= 3)
                                 ? sync_names[c->sync_state] : "?";
 
-        p += snprintf(p, (size_t)(end - p),
+        s += sfmt(
             "{\"mcc\":%d,\"mnc\":%d,\"lac\":%u,\"cid\":%u,"
             "\"arfcn\":%d,\"bsic\":%d,\"freq_mhz\":%.3f,"
             "\"sync\":\"%s\",\"stale\":%s,"
             "\"ccch_conf\":%d,\"t3212\":%d,\"cell_barred\":%s,"
             "\"rxlev_min\":%d,"
-            "\"bcch\":%llu,\"ccch\":%llu,\"cb\":%llu,\"paging\":%llu,"
+            "\"bcch\":%" PRIu64 ",\"ccch\":%" PRIu64 ",\"cb\":%" PRIu64 ",\"paging\":%" PRIu64 ","
             "\"freq_offset\":%.1f,"
             "\"last_cb_id\":%d,\"last_cb_text\":\"%s\","
             "\"first_seen\":%.1f,\"last_seen\":%.1f,\"age\":%.1f}",
@@ -234,12 +241,12 @@ char *gsmTrackerToJSON(void)
             sync_name, stale ? "true" : "false",
             c->ccch_conf, c->t3212, c->cell_barred ? "true" : "false",
             c->rxlev_access_min,
-            (unsigned long long)c->bcch_count,
-            (unsigned long long)c->ccch_count,
-            (unsigned long long)c->cb_count,
-            (unsigned long long)c->paging_count,
+            (uint64_t)c->bcch_count,
+            (uint64_t)c->ccch_count,
+            (uint64_t)c->cb_count,
+            (uint64_t)c->paging_count,
             c->freq_offset_hz,
-            c->last_cb_id, cb_esc,
+            c->last_cb_id, cb_esc.c_str(),
             c->first_seen_ms / 1000.0,
             c->last_seen_ms / 1000.0,
             (ts - c->last_seen_ms) / 1000.0);
@@ -247,7 +254,6 @@ char *gsmTrackerToJSON(void)
 
     pthread_mutex_unlock(&tracker_mutex);
 
-    p += snprintf(p, (size_t)(end - p), "\n]}");
-
-    return buf;
+    s += "\n]}";
+    return s;
 }

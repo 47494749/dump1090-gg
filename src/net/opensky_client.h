@@ -7,8 +7,12 @@
 #ifndef OPENSKY_CLIENT_H
 #define OPENSKY_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
-#include "feeder_thread.h"
+#include "msg_queue.h"
 
 struct opensky_config {
     int      enabled;
@@ -24,9 +28,13 @@ struct opensky_config {
 
 extern struct opensky_config OpenSkyConfig;
 
-extern struct feeder_msg_queue opensky_queue;
+extern msg_queue_t opensky_queue;
 
 void openskyClientInit(void);
 void *opensky_thread_entry(void *arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // OPENSKY_CLIENT_H

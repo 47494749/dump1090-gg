@@ -18,6 +18,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include "sdr_receiver.h"
+
+// Stub SdrManager for view1090 (which links track.o but has no SDR)
+sdr_manager_t SdrManager;
 
 void sdrInitConfig()
 {

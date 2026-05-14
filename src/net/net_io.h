@@ -20,6 +20,12 @@
 #ifndef DUMP1090_NETIO_H
 #define DUMP1090_NETIO_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+
 // Describes a networking service (group of connections)
 
 struct aircraft;
@@ -67,7 +73,7 @@ struct client {
 // Common writer state for all output sockets of one type
 struct net_writer {
     struct net_service *service; // owning service
-    void *data;          // shared write buffer, sized MODES_OUT_BUF_SIZE
+    char *data;          // shared write buffer, sized MODES_OUT_BUF_SIZE
     int dataUsed;        // number of bytes of write buffer currently used
     uint64_t lastWrite;  // time of last write to clients
     heartbeat_fn send_heartbeat; // function that queues a heartbeat if needed
@@ -96,5 +102,9 @@ char *generateStatsJson(const char *url_path, int *len);
 char *generateReceiverJson(const char *url_path, int *len);
 char *generateHistoryJson(const char *url_path, int *len);
 void writeJsonToFile(const char *file, char * (*generator) (const char *,int*));
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

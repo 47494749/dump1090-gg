@@ -870,16 +870,16 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
 
 // ======================== Main Processing ========================
 
-void lte_process(struct lte_state *st, const uint8_t *iq_data, unsigned len)
+void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
 {
-    unsigned n_samples = len / 2;
+    uint32_t n_samples = len / 2;
     st->stats.samples_processed += n_samples;
 
     // Convert uint8 IQ to float and append to buffer
-    unsigned offset = 0;
+    uint32_t offset = 0;
     while (offset < n_samples) {
-        unsigned avail = (unsigned)(st->iq_buf_size - st->iq_buf_len);
-        unsigned chunk = n_samples - offset;
+        uint32_t avail = (uint32_t)(st->iq_buf_size - st->iq_buf_len);
+        uint32_t chunk = n_samples - offset;
         if (chunk > avail) chunk = avail;
 
         if (chunk == 0) {
@@ -1035,6 +1035,34 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, unsigned len)
                                         if (!lte_parse_si_msg(si_bits, si_len, &si_res))
                                             continue;
 
+                                        if (si_res.sib2.valid) {
+                                            cell->info.sib2.ra_preambles = si_res.sib2.ra_preambles;
+                                            cell->info.sib2.power_ramping_step_db = si_res.sib2.power_ramping_step_db;
+                                            cell->info.sib2.preamble_target_dbm = si_res.sib2.preamble_target_dbm;
+                                            cell->info.sib2.preamble_trans_max = si_res.sib2.preamble_trans_max;
+                                            cell->info.sib2.ra_response_window_sf = si_res.sib2.ra_response_window_sf;
+                                            cell->info.sib2.max_harq_msg3_tx = si_res.sib2.max_harq_msg3_tx;
+                                            cell->info.sib2.ul_carrier_freq_present = si_res.sib2.ul_carrier_freq_present;
+                                            cell->info.sib2.ul_carrier_freq = si_res.sib2.ul_carrier_freq;
+                                            cell->info.sib2.ul_bandwidth_present = si_res.sib2.ul_bandwidth_present;
+                                            cell->info.sib2.ul_bandwidth_rb = si_res.sib2.ul_bandwidth_rb;
+                                            cell->info.sib2.time_alignment_timer_sf = si_res.sib2.time_alignment_timer_sf;
+                                            cell->info.sib2.valid = true;
+                                        }
+
+                                        if (si_res.sib3.valid) {
+                                            cell->info.sib3.q_hyst_db = si_res.sib3.q_hyst_db;
+                                            cell->info.sib3.s_non_intra_search_present = si_res.sib3.s_non_intra_search_present;
+                                            cell->info.sib3.s_non_intra_search = si_res.sib3.s_non_intra_search;
+                                            cell->info.sib3.thresh_serving_low = si_res.sib3.thresh_serving_low;
+                                            cell->info.sib3.cell_reselection_priority = si_res.sib3.cell_reselection_priority;
+                                            cell->info.sib3.q_rxlevmin = si_res.sib3.q_rxlevmin;
+                                            cell->info.sib3.s_intra_search_present = si_res.sib3.s_intra_search_present;
+                                            cell->info.sib3.s_intra_search = si_res.sib3.s_intra_search;
+                                            cell->info.sib3.t_reselection_eutra = si_res.sib3.t_reselection_eutra;
+                                            cell->info.sib3.valid = true;
+                                        }
+
                                         // Check for ETWS (SIB10/11)
                                         if (si_res.sib10.valid && cell->info.alert_count < LTE_MAX_ALERTS) {
                                             lte_alert_t *a = &cell->info.alerts[cell->info.alert_count++];
@@ -1128,7 +1156,7 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, unsigned len)
         }
 
         // Convert u8 IQ to float (centered at 0)
-        for (unsigned i = 0; i < chunk; i++) {
+        for (uint32_t i = 0; i < chunk; i++) {
             st->iq_buf[(st->iq_buf_len + (int)i) * 2]     = ((float)iq_data[(offset + i) * 2] - 127.5f) / 127.5f;
             st->iq_buf[(st->iq_buf_len + (int)i) * 2 + 1] = ((float)iq_data[(offset + i) * 2 + 1] - 127.5f) / 127.5f;
         }

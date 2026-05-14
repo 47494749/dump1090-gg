@@ -21,12 +21,12 @@
 // ========== UPER Bitstream Reader ==========
 
 typedef struct {
-    const unsigned char *data;
+    const uint8_t *data;
     int len;       // total bytes
     int bit_pos;   // current bit position
 } uper_t;
 
-static void uper_init(uper_t *u, const unsigned char *data, int len) {
+static void uper_init(uper_t *u, const uint8_t *data, int len) {
     u->data = data;
     u->len = len;
     u->bit_pos = 0;
@@ -798,7 +798,7 @@ static int decode_route_clearance(uper_t *u, char *buf, int sz) {
     if (opt & (1<<3)) { char t[32]; if(decode_procedure_name(u,t,sizeof(t))==0) n+=snprintf(buf+n,sz-n,"%sPROCARR:%s",n?" ":"",t); }
     if (opt & (1<<2)) { char t[8]; if(uper_read_ia5string(u,t,sizeof(t),1,5)>=0) n+=snprintf(buf+n,sz-n,"%sAWY:%s",n?" ":"",t); }
     if (opt & (1<<1)) { char t[256]; if(decode_route_info_seq(u,t,sizeof(t))==0) n+=snprintf(buf+n,sz-n,"%sROUTE:%s",n?" ":"",t); else if(n<sz) n+=snprintf(buf+n,sz-n,"%sROUTE:(?)",n?" ":""); }
-    if (opt & (1<<0)) { int32_t ao=uper_read(u,6); if(ao>=0&&n<sz) n+=snprintf(buf+n,sz-n,"%sADD:%02X",n?" ":"",(unsigned)ao); }
+    if (opt & (1<<0)) { int32_t ao=uper_read(u,6); if(ao>=0&&n<sz) n+=snprintf(buf+n,sz-n,"%sADD:%02X",n?" ":"",(uint32_t)ao); }
     if (n==0) snprintf(buf,sz,"(empty)");
     return 0;
 }
@@ -1019,7 +1019,7 @@ static int decode_param(uper_t *u, param_type_t ptype, const char *fmt, char *bu
 
 // ========== Top-Level Message Decoder ==========
 
-static int try_decode_message(uint32_t addr, const unsigned char *data, int len,
+static int try_decode_message(uint32_t addr, const uint8_t *data, int len,
                               int is_uplink) {
     uper_t u;
     uper_init(&u, data, len);
@@ -1092,7 +1092,7 @@ static int try_decode_message(uint32_t addr, const unsigned char *data, int len,
 
 // ========== Public API ==========
 
-int cpdlc_try_decode(uint32_t addr, const unsigned char *data, int len) {
+int cpdlc_try_decode(uint32_t addr, const uint8_t *data, int len) {
     if (!data || len < 3) return 0;
 
     int decoded = try_decode_message(addr, data, len, 0);
@@ -1102,7 +1102,7 @@ int cpdlc_try_decode(uint32_t addr, const unsigned char *data, int len) {
     return decoded;
 }
 
-int cpdlc_try_decode_dir(uint32_t addr, const unsigned char *data, int len, int dir) {
+int cpdlc_try_decode_dir(uint32_t addr, const uint8_t *data, int len, int dir) {
     if (!data || len < 3) return 0;
 
     if (dir == 0)

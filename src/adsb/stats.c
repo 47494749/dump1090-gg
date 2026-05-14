@@ -79,8 +79,8 @@ void display_stats(struct stats *st) {
 
     if (!Modes.net_only) {
         printf("Local receiver:\n");
-        printf("  %12llu samples processed\n",                        (unsigned long long)st->samples_processed);
-        printf("  %12llu samples dropped\n",                          (unsigned long long)st->samples_dropped);
+        printf("  %12" PRIu64 " samples processed\n",                        (uint64_t)st->samples_processed);
+        printf("  %12" PRIu64 " samples dropped\n",                          (uint64_t)st->samples_dropped);
 
         printf("  %12u Mode A/C messages received\n",                 st->demod_modeac);
         printf("  %12u Mode-S message preambles received\n",          st->demod_preambles);
@@ -135,12 +135,12 @@ void display_stats(struct stats *st) {
                st->adaptive_gain_changes);
 
         uint32_t total_seconds = 0;
-        for (unsigned i = 0; i < STATS_GAIN_COUNT; ++i)
+        for (uint32_t i = 0; i < STATS_GAIN_COUNT; ++i)
             total_seconds += st->adaptive_gain_seconds[i];
 
         if (total_seconds) {
-            unsigned count = 0;
-            for (unsigned i = 0; i < STATS_GAIN_COUNT; ++i) {
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < STATS_GAIN_COUNT; ++i) {
                 count += st->adaptive_gain_seconds[i];
                 if (count >= total_seconds/2) {
                     printf("  %5.1f dB median gain\n", sdrGetGainDb(i));
@@ -149,8 +149,8 @@ void display_stats(struct stats *st) {
             }
 
             printf("  Gain histogram:\n");
-            for (unsigned i = 0; i < STATS_GAIN_COUNT; ++i) {
-                unsigned seconds = st->adaptive_gain_seconds[i];
+            for (uint32_t i = 0; i < STATS_GAIN_COUNT; ++i) {
+                uint32_t seconds = st->adaptive_gain_seconds[i];
                 if (seconds) {
                     printf("    %5.1f dB: %5u seconds (%5.1f%%)\n",
                            sdrGetGainDb(i), seconds, 100.0 * seconds / total_seconds);
@@ -175,7 +175,7 @@ void display_stats(struct stats *st) {
            "  %8u total usable messages\n",
            st->messages_total);
 
-    for (unsigned i = 0; i < 32; ++i) {
+    for (uint32_t i = 0; i < 32; ++i) {
         if (st->messages_by_df[i])
             printf("    %8u DF%u messages\n", st->messages_by_df[i], i);
     }
@@ -220,13 +220,13 @@ void display_stats(struct stats *st) {
         uint64_t background_cpu_millis = (uint64_t)st->background_cpu.tv_sec*1000UL + st->background_cpu.tv_nsec/1000000UL;
 
         printf("CPU load: %5.1f%%\n"
-               "  %5llu ms for demodulation\n"
-               "  %5llu ms for reading from USB\n"
-               "  %5llu ms for network input and background tasks\n",
+               "  %5" PRIu64 " ms for demodulation\n"
+               "  %5" PRIu64 " ms for reading from USB\n"
+               "  %5" PRIu64 " ms for network input and background tasks\n",
                100.0 * (demod_cpu_millis + reader_cpu_millis + background_cpu_millis) / (st->end - st->start + 1),
-               (unsigned long long) demod_cpu_millis,
-               (unsigned long long) reader_cpu_millis,
-               (unsigned long long) background_cpu_millis);
+               (uint64_t) demod_cpu_millis,
+               (uint64_t) reader_cpu_millis,
+               (uint64_t) background_cpu_millis);
     }
 
     if (Modes.stats_range_histo)
@@ -414,7 +414,7 @@ void add_stats(const struct stats *st1, const struct stats *st2, struct stats *t
         adaptive_best = st2;
 
     target->adaptive_valid = adaptive_best->adaptive_valid;
-    for (unsigned i = 0; i < STATS_GAIN_COUNT; ++i)
+    for (uint32_t i = 0; i < STATS_GAIN_COUNT; ++i)
         target->adaptive_gain_seconds[i] = st1->adaptive_gain_seconds[i] + st2->adaptive_gain_seconds[i];
     target->adaptive_loud_undecoded = st1->adaptive_loud_undecoded + st2->adaptive_loud_undecoded;
     target->adaptive_loud_decoded = st1->adaptive_loud_decoded + st2->adaptive_loud_decoded;

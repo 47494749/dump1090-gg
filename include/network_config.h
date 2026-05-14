@@ -5,6 +5,10 @@
 #ifndef NETWORK_CONFIG_H
 #define NETWORK_CONFIG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -49,5 +53,9 @@ typedef struct {
 } network_config_t;
 
 extern network_config_t NetworkConfig;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // NETWORK_CONFIG_H

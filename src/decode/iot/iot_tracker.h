@@ -8,6 +8,10 @@
 #ifndef IOT_TRACKER_H
 #define IOT_TRACKER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include "iot_decode.h"
@@ -60,10 +64,14 @@ void iotTrackerUpdate(const iot_device_msg_t *msg);
 // Get number of active (non-stale) devices
 int iotTrackerActiveCount(void);
 
-// Generate JSON for /api/iot868 endpoint. Returns malloc'd string (caller frees).
-char *iotTrackerToJSON(void);
-
 // Clean up
 void iotTrackerDestroy(void);
+
+#ifdef __cplusplus
+}
+// C++ only: returns std::string
+#include <string>
+std::string iotTrackerToJSON(void);
+#endif
 
 #endif // IOT_TRACKER_H

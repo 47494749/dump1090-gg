@@ -1,6 +1,6 @@
 // Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
-// sondehub_client.c: SondeHub telemetry upload client
+// sondehub_client.cpp: SondeHub telemetry upload client
 //
 // Uploads decoded radiosonde telemetry to SondeHub v2 API:
 //   PUT https://api.v2.sondehub.org/sondes/telemetry
@@ -28,7 +28,11 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include <string>
+#include <cstdarg>
+
 #include "dump1090.h"
+#include "decoder_queue.h"
 
 // ======================== Constants ========================
 
@@ -45,14 +49,12 @@
 sondehub_config_t SondehubConfig;
 
 static struct {
-    sonde_msg_t  queue[SONDEHUB_QUEUE_SIZE];
-    unsigned     queue_head;
-    unsigned     queue_tail;
+    DecoderQueue<sonde_msg_t> queue{SONDEHUB_QUEUE_SIZE};
 
     uint64_t     last_upload_ms;
     uint64_t     last_listener_ms;
     bool         listener_sent;
-    unsigned     listener_fails;
+    uint32_t     listener_fails;
 
     uint64_t     uploads_ok;
     uint64_t     uploads_fail;
@@ -63,16 +65,23 @@ static struct {
 
 void sondehubClientInit(void)
 {
-    memset(&SH, 0, sizeof(SH));
+    SH.queue.clear();
+    SH.last_upload_ms = 0;
+    SH.last_listener_ms = 0;
+    SH.listener_sent = false;
+    SH.listener_fails = 0;
+    SH.uploads_ok = 0;
+    SH.uploads_fail = 0;
+    SH.telemetry_sent = 0;
 }
 
 void sondehubClientCleanup(void)
 {
     if (SH.telemetry_sent > 0 || SH.uploads_ok > 0) {
-        fprintf(stderr, "sondehub: sent %lu telemetry in %lu uploads (%lu failed)\n",
-                (unsigned long)SH.telemetry_sent,
-                (unsigned long)SH.uploads_ok,
-                (unsigned long)SH.uploads_fail);
+        fprintf(stderr, "sondehub: sent %" PRIu64 " telemetry in %" PRIu64 " uploads (%" PRIu64 " failed)\n",
+                SH.telemetry_sent,
+                SH.uploads_ok,
+                SH.uploads_fail);
     }
 }
 
@@ -81,17 +90,12 @@ void sondehubClientCleanup(void)
 void sondehubClientSubmit(const sonde_msg_t *msg)
 {
     if (!SondehubConfig.enabled || !msg->valid_pos) return;
-
-    unsigned next = (SH.queue_head + 1) % SONDEHUB_QUEUE_SIZE;
-    if (next == SH.queue_tail) return;  // full — drop oldest
-
-    SH.queue[SH.queue_head] = *msg;
-    SH.queue_head = next;
+    SH.queue.push(*msg);
 }
 
-static unsigned queue_count(void)
+static uint32_t queue_count(void)
 {
-    return (SH.queue_head - SH.queue_tail + SONDEHUB_QUEUE_SIZE) % SONDEHUB_QUEUE_SIZE;
+    return (uint32_t)SH.queue.size();
 }
 
 // ======================== TLS HTTP PUT ========================
@@ -100,13 +104,12 @@ static unsigned queue_count(void)
 // Returns true on HTTP 2xx response.
 static bool sondehub_put(const char *path, const char *json_body, size_t body_len)
 {
-    struct addrinfo hints, *res;
+    struct addrinfo hints = {}, *res;
     int fd = -1;
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
     bool ok = false;
 
-    memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
@@ -162,8 +165,11 @@ connected:
     // TLS setup
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) goto cleanup;
+    // Load system CA trust store and enable peer verification
+    SSL_CTX_set_default_verify_paths(ctx);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
     // Force HTTP/1.1 via ALPN to prevent h2 binary framing
-    static const unsigned char alpn[] = { 8, 'h','t','t','p','/','1','.','1' };
+    static const uint8_t alpn[] = { 8, 'h','t','t','p','/','1','.','1' };
     SSL_CTX_set_alpn_protos(ctx, alpn, sizeof(alpn));
 
     ssl = SSL_new(ctx);
@@ -171,6 +177,8 @@ connected:
 
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, SONDEHUB_HOST);
+    // Enable hostname verification
+    SSL_set1_host(ssl, SONDEHUB_HOST);
 
     if (SSL_connect(ssl) <= 0) {
         fprintf(stderr, "sondehub: TLS handshake failed\n");
@@ -182,27 +190,20 @@ connected:
         // RFC 7231 Date header
         time_t now = time(NULL);
         struct tm *gmt = gmtime(&now);
-        char date_str[64];
-        strftime(date_str, sizeof(date_str), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+        char date_buf[64];
+        strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", gmt);
 
-        char header[512];
-        int hlen = snprintf(header, sizeof(header),
-            "PUT %s HTTP/1.1\r\n"
-            "Host: %s\r\n"
-            "User-Agent: %s/%s\r\n"
+        std::string header = std::string("PUT ") + path + " HTTP/1.1\r\n"
+            "Host: " SONDEHUB_HOST "\r\n"
+            "User-Agent: " SONDEHUB_SW_NAME "/" MODES_DUMP1090_VERSION "\r\n"
             "Content-Type: application/json\r\n"
-            "Content-Length: %zu\r\n"
-            "Date: %s\r\n"
+            "Content-Length: " + std::to_string(body_len) + "\r\n"
+            "Date: " + date_buf + "\r\n"
             "Connection: close\r\n"
-            "\r\n",
-            path, SONDEHUB_HOST,
-            SONDEHUB_SW_NAME, MODES_DUMP1090_VERSION,
-            body_len, date_str);
-
-        if (hlen <= 0 || hlen >= (int)sizeof(header)) goto cleanup;
+            "\r\n";
 
         // Send header
-        if (SSL_write(ssl, header, hlen) != hlen) goto cleanup;
+        if (SSL_write(ssl, header.data(), (int)header.size()) != (int)header.size()) goto cleanup;
 
         // Send body
         int total = 0;
@@ -215,19 +216,17 @@ connected:
 
     // Read response — just need status line
     {
-        char resp[256];
-        int n = SSL_read(ssl, resp, sizeof(resp) - 1);
+        char rbuf[256];
+        int n = SSL_read(ssl, rbuf, sizeof(rbuf) - 1);
         if (n > 0) {
-            resp[n] = '\0';
-            // Parse "HTTP/1.1 2xx"
+            std::string resp(rbuf, n);
             int status = 0;
-            if (sscanf(resp, "HTTP/%*d.%*d %d", &status) == 1 && status >= 200 && status < 300) {
+            if (sscanf(resp.c_str(), "HTTP/%*d.%*d %d", &status) == 1 && status >= 200 && status < 300) {
                 ok = true;
             } else {
-                // Truncate response for logging
-                char *nl = strchr(resp, '\r');
-                if (nl) *nl = '\0';
-                fprintf(stderr, "sondehub: PUT %s → %s\n", path, resp);
+                auto nl = resp.find('\r');
+                if (nl != std::string::npos) resp.resize(nl);
+                fprintf(stderr, "sondehub: PUT %s → %s\n", path, resp.c_str());
             }
         }
     }
@@ -245,39 +244,51 @@ cleanup:
 // ======================== JSON formatting ========================
 
 // Format ISO 8601 UTC timestamp for current time
-static void format_iso8601(char *buf, size_t len)
+static std::string format_iso8601(void)
 {
     time_t now = time(NULL);
     struct tm *gmt = gmtime(&now);
-    strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", gmt);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", gmt);
+    return buf;
+}
+
+// Helper: format into std::string
+static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static std::string sfmt(const char *fmt, ...) {
+    char tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0) return {};
+    if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
+    std::string s(n, '\0');
+    va_start(ap, fmt);
+    vsnprintf(&s[0], n + 1, fmt, ap);
+    va_end(ap);
+    return s;
 }
 
 // Build JSON array of telemetry messages from queue.
-// Returns malloc'd string (caller frees), or NULL on empty.
-static char *build_telemetry_json(unsigned count)
+// Returns empty string on empty queue.
+static std::string build_telemetry_json(uint32_t count)
 {
-    if (count == 0) return NULL;
+    if (count == 0) return {};
 
-    // Estimate ~512 bytes per entry
-    size_t bufsize = 128 + count * 600;
-    char *buf = malloc(bufsize);
-    if (!buf) return NULL;
+    std::string time_recv = format_iso8601();
 
-    size_t pos = 0;
-    buf[pos++] = '[';
+    std::string s = "[";
 
-    char time_recv[32];
-    format_iso8601(time_recv, sizeof(time_recv));
+    for (uint32_t i = 0; i < count; i++) {
+        sonde_msg_t item;
+        if (!SH.queue.pop(item)) break;
 
-    for (unsigned i = 0; i < count; i++) {
-        if (SH.queue_tail == SH.queue_head) break;
+        const sonde_msg_t *msg = &item;
 
-        const sonde_msg_t *msg = &SH.queue[SH.queue_tail];
-        SH.queue_tail = (SH.queue_tail + 1) % SONDEHUB_QUEUE_SIZE;
+        if (i > 0) s += ',';
 
-        if (i > 0) buf[pos++] = ',';
-
-        int n = snprintf(buf + pos, bufsize - pos,
+        s += sfmt(
             "{"
             "\"software_name\":\"%s\","
             "\"software_version\":\"%s\","
@@ -298,58 +309,39 @@ static char *build_telemetry_json(unsigned count)
             "\"frequency\":%.3f",
             SONDEHUB_SW_NAME, MODES_DUMP1090_VERSION,
             SondehubConfig.callsign,
-            time_recv,
+            time_recv.c_str(),
             msg->type,
             msg->serial,
             msg->frame_num,
-            time_recv,     // datetime = time_received (we have no sonde GPS time)
+            time_recv.c_str(),
             msg->lat, msg->lon, msg->alt,
             msg->vel_h, msg->vel_v, msg->heading,
             msg->satellites,
             (double)msg->freq);
 
-        if (n <= 0 || n >= (int)(bufsize - pos)) { free(buf); return NULL; }
-        pos += n;
+        if (Modes.bUserFlags & MODES_USER_LATLON_VALID)
+            s += sfmt(",\"uploader_position\":[%.6f,%.6f,0]", Modes.fUserLat, Modes.fUserLon);
 
-        // Optional: uploader_position if we have station coords
-        if (Modes.bUserFlags & MODES_USER_LATLON_VALID) {
-            n = snprintf(buf + pos, bufsize - pos,
-                ",\"uploader_position\":[%.6f,%.6f,0]",
-                Modes.fUserLat, Modes.fUserLon);
-            if (n > 0 && n < (int)(bufsize - pos)) pos += n;
-        }
+        if (msg->temp != 0.0)
+            s += sfmt(",\"temp\":%.1f", msg->temp);
+        if (msg->humidity != 0.0)
+            s += sfmt(",\"humidity\":%.1f", msg->humidity);
+        if (msg->snr != 0.0f)
+            s += sfmt(",\"snr\":%.1f", (double)msg->snr);
 
-        // Optional: temp/humidity if available
-        if (msg->temp != 0.0) {
-            n = snprintf(buf + pos, bufsize - pos, ",\"temp\":%.1f", msg->temp);
-            if (n > 0 && n < (int)(bufsize - pos)) pos += n;
-        }
-        if (msg->humidity != 0.0) {
-            n = snprintf(buf + pos, bufsize - pos, ",\"humidity\":%.1f", msg->humidity);
-            if (n > 0 && n < (int)(bufsize - pos)) pos += n;
-        }
-        if (msg->snr != 0.0f) {
-            n = snprintf(buf + pos, bufsize - pos, ",\"snr\":%.1f", (double)msg->snr);
-            if (n > 0 && n < (int)(bufsize - pos)) pos += n;
-        }
-
-        buf[pos++] = '}';
+        s += '}';
     }
 
-    buf[pos++] = ']';
-    buf[pos] = '\0';
-    return buf;
+    s += ']';
+    return s;
 }
 
 // Build listener station JSON (single object, NOT array)
-static char *build_listener_json(void)
+static std::string build_listener_json(void)
 {
-    if (!(Modes.bUserFlags & MODES_USER_LATLON_VALID)) return NULL;
+    if (!(Modes.bUserFlags & MODES_USER_LATLON_VALID)) return {};
 
-    char *buf = malloc(512);
-    if (!buf) return NULL;
-
-    int n = snprintf(buf, 512,
+    return sfmt(
         "{"
         "\"software_name\":\"%s\","
         "\"software_version\":\"%s\","
@@ -361,9 +353,6 @@ static char *build_listener_json(void)
         SONDEHUB_SW_NAME, MODES_DUMP1090_VERSION,
         SondehubConfig.callsign,
         Modes.fUserLat, Modes.fUserLon);
-
-    if (n <= 0 || n >= 512) { free(buf); return NULL; }
-    return buf;
 }
 
 // ======================== Periodic work ========================
@@ -385,9 +374,9 @@ void sondehubClientPeriodicWork(void)
             retry_interval = SONDEHUB_LISTENER_INTERVAL_MS;
 
         if (now - SH.last_listener_ms >= retry_interval) {
-            char *json = build_listener_json();
-            if (json) {
-                if (sondehub_put("/listeners", json, strlen(json))) {
+            std::string json = build_listener_json();
+            if (!json.empty()) {
+                if (sondehub_put("/listeners", json.c_str(), json.size())) {
                     if (!SH.listener_sent) {
                         fprintf(stderr, "sondehub: listener station registered (%s)\n",
                                 SondehubConfig.callsign);
@@ -397,7 +386,6 @@ void sondehubClientPeriodicWork(void)
                 } else {
                     SH.listener_fails++;
                 }
-                free(json);
             }
             SH.last_listener_ms = now;
         }
@@ -405,17 +393,16 @@ void sondehubClientPeriodicWork(void)
 
     // Upload telemetry batch every 30 seconds (or when queue has data)
     if (now - SH.last_upload_ms >= SONDEHUB_UPLOAD_INTERVAL_MS) {
-        unsigned count = queue_count();
+        uint32_t count = queue_count();
         if (count > 0) {
-            char *json = build_telemetry_json(count);
-            if (json) {
-                if (sondehub_put("/sondes/telemetry", json, strlen(json))) {
+            std::string json = build_telemetry_json(count);
+            if (!json.empty()) {
+                if (sondehub_put("/sondes/telemetry", json.c_str(), json.size())) {
                     SH.uploads_ok++;
                     SH.telemetry_sent += count;
                 } else {
                     SH.uploads_fail++;
                 }
-                free(json);
             }
         }
         SH.last_upload_ms = now;

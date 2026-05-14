@@ -21,6 +21,10 @@
 #ifndef SDR_RTLSDR_H
 #define SDR_RTLSDR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void rtlsdrInitConfig();
 void rtlsdrShowHelp();
 bool rtlsdrOpen();
@@ -33,5 +37,9 @@ int rtlsdrGetMaxGain();
 int rtlsdrGetTunerType();
 double rtlsdrGetGainDb(int step);
 int rtlsdrSetGain(int step);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

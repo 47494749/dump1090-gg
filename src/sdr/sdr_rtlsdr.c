@@ -276,7 +276,7 @@ bool rtlsdrOpen(void)
 
     rtlsdr_set_freq_correction(RTLSDR.dev, RTLSDR.ppm_error);
     rtlsdr_set_center_freq(RTLSDR.dev, Modes.freq);
-    rtlsdr_set_sample_rate(RTLSDR.dev, (unsigned)Modes.sample_rate);
+    rtlsdr_set_sample_rate(RTLSDR.dev, (uint32_t)Modes.sample_rate);
 
     rtlsdr_reset_buffer(RTLSDR.dev);
 
@@ -304,9 +304,9 @@ bool rtlsdrOpen(void)
     return true;
 }
 
-static void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx)
+static void rtlsdrCallback(uint8_t *buf, uint32_t len, void *ctx)
 {
-    static unsigned dropped = 0;
+    static uint32_t dropped = 0;
     static uint64_t sampleCounter = 0;
 
     MODES_NOTUSED(ctx);
@@ -318,7 +318,7 @@ static void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx)
         return;
     }
 
-    unsigned samples_read = len/2; // Drops any trailing odd sample, not much else we can do there
+    uint32_t samples_read = len/2; // Drops any trailing odd sample, not much else we can do there
     if (!samples_read)
         return; // that wasn't useful
 
@@ -349,7 +349,7 @@ static void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx)
     outbuf->sysTimestamp = mstime() - block_duration;
 
     // Convert the new data
-    unsigned to_convert = samples_read;
+    uint32_t to_convert = samples_read;
     if (to_convert + outbuf->overlap > outbuf->totalLength) {
         // how did that happen?
         to_convert = outbuf->totalLength - outbuf->overlap;

@@ -1,6 +1,6 @@
 // Part of dump1090-gg-light
 //
-// lte_tracker.c: Thread-safe LTE cell tracking and JSON export.
+// lte_tracker.cpp: Thread-safe LTE cell tracking and JSON export.
 //
 // Maintains a global table of detected LTE cells. Updated from the decoder
 // callback (reader thread) and queried from the HTTP server thread (JSON API).
@@ -11,17 +11,21 @@
 // option) any later version.
 
 #include "lte_tracker.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
 
+#include <string>
+#include <cstdarg>
+
 #define TRACKER_MAX_CELLS  64
 #define CELL_TIMEOUT_SEC   30  // Remove cells not seen for this long
 
 // Infer operator from EARFCN for Band 20 Germany (before SIB1 decode)
-static const char *lte_operator_guess(unsigned earfcn)
+static const char *lte_operator_guess(uint32_t earfcn)
 {
     switch (earfcn) {
         case 6200: return "O2";
@@ -152,16 +156,28 @@ int lteTrackerCount(void)
     return count;
 }
 
-char *lteTrackerToJSON(void)
+// Helper: format into std::string
+static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static std::string sfmt(const char *fmt, ...) {
+    char tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0) return {};
+    if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
+    std::string s(n, '\0');
+    va_start(ap, fmt);
+    vsnprintf(&s[0], n + 1, fmt, ap);
+    va_end(ap);
+    return s;
+}
+
+std::string lteTrackerToJSON(void)
 {
     pthread_mutex_lock(&tracker_mutex);
 
-    int buf_size = 256 + tracker_count * 512;
-    char *buf = malloc((size_t)buf_size);
-    if (!buf) { pthread_mutex_unlock(&tracker_mutex); return NULL; }
-
-    int pos = 0;
-    pos += snprintf(buf + pos, (size_t)(buf_size - pos), "{\"cells\":[");
+    std::string s = "{\"cells\":[";
 
     int first = 1;
     int active_count = 0;
@@ -172,10 +188,10 @@ char *lteTrackerToJSON(void)
         active_count++;
         const lte_cell_info_t *c = &tracker_cells[i].info;
 
-        if (!first) buf[pos++] = ',';
+        if (!first) s += ',';
         first = 0;
 
-        pos += snprintf(buf + pos, (size_t)(buf_size - pos),
+        s += sfmt(
             "{\"pci\":%u,\"n_id_1\":%u,\"n_id_2\":%u,"
             "\"freq\":%.0f,\"earfcn\":%u,\"band\":\"%s\","
             "\"rsrp\":%.1f,\"snr\":%.1f,\"freq_offset\":%.1f,"
@@ -198,83 +214,73 @@ char *lteTrackerToJSON(void)
             }
         }
         if (!op_name) op_name = lte_operator_guess(c->earfcn);
-        if (op_name) {
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-                ",\"operator\":\"%s\"", op_name);
-        }
+        if (op_name)
+            s += sfmt(",\"operator\":\"%s\"", op_name);
 
         if (c->mib.valid) {
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-                ",\"mib\":{\"bw\":\"%s\",\"nrb\":%d,\"sfn\":%u,\"phich_dur\":%u,\"phich_res\":%u}",
+            s += sfmt(",\"mib\":{\"bw\":\"%s\",\"nrb\":%d,\"sfn\":%u,\"phich_dur\":%u,\"phich_res\":%u}",
                 lte_bw_string(c->mib.dl_bandwidth),
                 lte_bw_to_nrb(c->mib.dl_bandwidth),
                 c->mib.sfn, c->mib.phich_duration, c->mib.phich_resources);
         }
 
         if (c->sib1.valid) {
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-                ",\"sib1\":{\"mcc\":%u,\"mnc\":%u,\"tac\":%u,\"cell_id\":%u,"
+            s += sfmt(",\"sib1\":{\"mcc\":%u,\"mnc\":%u,\"tac\":%u,\"cell_id\":%u,"
                 "\"barred\":%s,\"q_rxlevmin\":%d}",
                 c->sib1.mcc, c->sib1.mnc, c->sib1.tac, c->sib1.cell_id,
                 c->sib1.cell_barred ? "true" : "false", c->sib1.q_rxlevmin);
         }
 
-        // Cell database lookup (enriches with known info when SIB1 unavailable)
+        // Cell database lookup
         const lte_celldb_entry_t *db = lte_celldb_lookup(c->pci, c->earfcn);
         if (db && db->cell_id) {
             uint32_t enodeb_id = db->cell_id >> 8;
             uint8_t sector_id = db->cell_id & 0xFF;
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-                ",\"celldb\":{\"cell_id\":%u,\"enodeb_id\":%u,\"sector\":%u,"
+            s += sfmt(",\"celldb\":{\"cell_id\":%u,\"enodeb_id\":%u,\"sector\":%u,"
                 "\"tac\":%u,\"mcc\":%u,\"mnc\":%u",
                 db->cell_id, enodeb_id, sector_id,
                 db->tac, db->mcc, db->mnc);
-            if (db->lat != 0.0f || db->lon != 0.0f) {
-                pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-                    ",\"lat\":%.6f,\"lon\":%.6f", db->lat, db->lon);
-            }
-            if (db->enodeb_name) {
-                pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-                    ",\"name\":\"%s\"", db->enodeb_name);
-            }
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos), "}");
+            if (db->lat != 0.0f || db->lon != 0.0f)
+                s += sfmt(",\"lat\":%.6f,\"lon\":%.6f", db->lat, db->lon);
+            if (db->enodeb_name)
+                s += sfmt(",\"name\":\"%s\"", db->enodeb_name);
+            s += '}';
         }
 
-        // Alerts (ETWS/CMAS/EAB)
+        // Alerts
         if (c->alert_count > 0) {
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos), ",\"alerts\":[");
+            s += ",\"alerts\":[";
             for (int ai = 0; ai < c->alert_count; ai++) {
                 const lte_alert_t *a = &c->alerts[ai];
-                if (ai > 0) buf[pos++] = ',';
-                pos += snprintf(buf + pos, (size_t)(buf_size - pos),
+                if (ai > 0) s += ',';
+                s += sfmt(
                     "{\"type\":\"%s\",\"message_id\":%u,\"serial\":%u,"
-                    "\"category\":\"%s\",\"text\":\"%s\",\"timestamp\":%llu,\"active\":%s}",
+                    "\"category\":\"%s\",\"text\":\"%s\",\"timestamp\":%" PRIu64 ",\"active\":%s}",
                     (a->type == LTE_ALERT_ETWS) ? "ETWS" :
                     (a->type == LTE_ALERT_CMAS) ? "CMAS" :
                     (a->type == LTE_ALERT_EAB)  ? "EAB" : "unknown",
                     a->message_id, a->serial_number,
                     a->category, a->text,
-                    (unsigned long long)a->timestamp,
+                    (uint64_t)a->timestamp,
                     a->active ? "true" : "false");
             }
-            pos += snprintf(buf + pos, (size_t)(buf_size - pos), "]");
+            s += ']';
         }
 
-        pos += snprintf(buf + pos, (size_t)(buf_size - pos),
-            ",\"pss_count\":%u,\"sss_count\":%u,\"mib_count\":%u,"
+        s += sfmt(",\"pss_count\":%u,\"sss_count\":%u,\"mib_count\":%u,"
             "\"sib1_count\":%u,\"crc_errors\":%u,"
-            "\"first_seen\":%ld,\"last_seen\":%ld,\"age\":%ld}",
+            "\"first_seen\":%" PRId64 ",\"last_seen\":%" PRId64 ",\"age\":%" PRId64 "}",
             c->pss_count, c->sss_count, c->mib_count,
             c->sib1_count, c->crc_errors,
-            (long)tracker_cells[i].first_seen,
-            (long)tracker_cells[i].last_seen,
-            (long)(now - tracker_cells[i].first_seen));
+            (int64_t)tracker_cells[i].first_seen,
+            (int64_t)tracker_cells[i].last_seen,
+            (int64_t)(now - tracker_cells[i].first_seen));
     }
 
-    pos += snprintf(buf + pos, (size_t)(buf_size - pos), "],\"count\":%d}", active_count);
+    s += sfmt("],\"count\":%d}", active_count);
 
     pthread_mutex_unlock(&tracker_mutex);
-    return buf;
+    return s;
 }
 
 void lteTrackerDestroy(void)

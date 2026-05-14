@@ -37,13 +37,13 @@
 //
 
 static int modeAToCTable[4096];
-static unsigned modeCToATable[4096];
-static int internalModeAToModeC(unsigned int ModeA);
+static uint32_t modeCToATable[4096];
+static int internalModeAToModeC(uint32_t ModeA);
 
 void modeACInit()
 {
-    for (unsigned i = 0; i < 4096; ++i) {
-        unsigned modeA = indexToModeA(i);
+    for (uint32_t i = 0; i < 4096; ++i) {
+        uint32_t modeA = indexToModeA(i);
         int modeC = internalModeAToModeC(modeA);
         modeAToCTable[i] = modeC;
 
@@ -58,9 +58,9 @@ void modeACInit()
 // Given a mode A value (hex-encoded, see above)
 // return the mode C value (signed multiple of 100s of feet)
 // or INVALID_ALITITUDE if not a valid mode C value
-int modeAToModeC(unsigned modeA)
+int modeAToModeC(uint32_t modeA)
 {
-    unsigned i = modeAToIndex(modeA);
+    uint32_t i = modeAToIndex(modeA);
     if (i >= 4096)
         return INVALID_ALTITUDE;
 
@@ -69,7 +69,7 @@ int modeAToModeC(unsigned modeA)
 
 // Given a mode C value (signed multiple of 100s of feet)
 // return the mode A value, or 0 if not a valid mode C value
-unsigned modeCToModeA(int modeC)
+uint32_t modeCToModeA(int modeC)
 {
     modeC += 13;
     if (modeC < 0 || modeC >= 4096)
@@ -78,10 +78,10 @@ unsigned modeCToModeA(int modeC)
     return modeCToATable[modeC];
 }
 
-static int internalModeAToModeC(unsigned int ModeA)
+static int internalModeAToModeC(uint32_t ModeA)
 {
-    unsigned int FiveHundreds = 0;
-    unsigned int OneHundreds  = 0;
+    uint32_t FiveHundreds = 0;
+    uint32_t OneHundreds  = 0;
 
   if ((ModeA & 0xFFFF8889) != 0 ||         // check zero bits are zero, D1 set is illegal
       (ModeA & 0x000000F0) == 0) { // C1,,C4 cannot be Zero

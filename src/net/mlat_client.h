@@ -15,6 +15,10 @@
 #ifndef MLAT_CLIENT_H
 #define MLAT_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -60,8 +64,8 @@ struct mlat_aircraft {
     uint64_t last_odd_time;          // last odd CPR time (mstime)
     uint64_t even_timestamp;         // 12MHz timestamp of last even CPR msg
     uint64_t odd_timestamp;          // 12MHz timestamp of last odd CPR msg
-    unsigned char even_msg[14];      // raw even CPR message bytes
-    unsigned char odd_msg[14];       // raw odd CPR message bytes
+    uint8_t even_msg[14];      // raw even CPR message bytes
+    uint8_t odd_msg[14];       // raw odd CPR message bytes
     int      even_msgbits;           // bit length of even message
     int      odd_msgbits;            // bit length of odd message
 
@@ -154,5 +158,9 @@ void mlatClientDisconnectAll(const char *reason);
 
 // Add an MLAT server from CLI (returns 0 on success, -1 if full)
 int mlatClientAddServer(const char *hostport);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // MLAT_CLIENT_H

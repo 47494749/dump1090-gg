@@ -5,6 +5,10 @@
 #ifndef STATION_CONFIG_H
 #define STATION_CONFIG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     char    name[64];           // station name (used for OGN, MLAT, SondeHub)
     double  latitude;           // receiver latitude (degrees)
@@ -14,5 +18,9 @@ typedef struct {
 } station_config_t;
 
 extern station_config_t StationConfig;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // STATION_CONFIG_H

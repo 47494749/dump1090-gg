@@ -21,7 +21,7 @@
 
 static void convert_uc8(void *iq_data,
                         uint16_t *mag_data,
-                        unsigned nsamples,
+                        uint32_t nsamples,
                         struct converter_state *state,
                         double *out_mean_level,
                         double *out_mean_power)
@@ -45,7 +45,7 @@ static void convert_uc8(void *iq_data,
 
 static void convert_sc16(void *iq_data,
                          uint16_t *mag_data,
-                         unsigned nsamples,
+                         uint32_t nsamples,
                          struct converter_state *state,
                          double *out_mean_level,
                          double *out_mean_power)
@@ -69,7 +69,7 @@ static void convert_sc16(void *iq_data,
 
 static void convert_sc16q11(void *iq_data,
                             uint16_t *mag_data,
-                            unsigned nsamples,
+                            uint32_t nsamples,
                             struct converter_state *state,
                             double *out_mean_level,
                             double *out_mean_power)
@@ -112,7 +112,7 @@ iq_convert_fn init_converter(input_format_t format,
     case INPUT_SC16Q11:
         return convert_sc16q11;
     default:
-        fprintf(stderr, "no suitable converter for format=%u\n", (unsigned) format);
+        fprintf(stderr, "no suitable converter for format=%u\n", (uint32_t) format);
         return NULL;
     }
 }

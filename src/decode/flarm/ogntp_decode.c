@@ -91,6 +91,16 @@ static int popcount_byte(uint8_t v)
     return count;
 }
 
+static int popcount32(uint32_t v)
+{
+    int count = 0;
+    while (v) {
+        v &= v - 1;
+        count++;
+    }
+    return count;
+}
+
 uint8_t ogntp_ldpc_check(const uint8_t *data)
 {
     uint8_t errors = 0;
@@ -106,6 +116,34 @@ uint8_t ogntp_ldpc_check(const uint8_t *data)
 }
 
 // ======================== Variable-resolution decode helpers ========================
+
+static bool ogntp_header_parity_ok(uint32_t hdr)
+{
+    return (popcount32(hdr & 0x0FFFFFFFu) & 1) == 0;
+}
+
+static uint32_t gray_decode_u32(uint32_t value)
+{
+    for (uint32_t shift = value >> 1; shift != 0; shift >>= 1)
+        value ^= shift;
+    return value;
+}
+
+static int32_t sign_extend_u32(uint32_t value, uint32_t bits)
+{
+    uint32_t sign = 1u << (bits - 1);
+    if (value & sign)
+        value |= ~((1u << bits) - 1u);
+    return (int32_t)value;
+}
+
+static uint8_t unsvr_decode_4(uint8_t code)
+{
+    if (code <= 4) return code;
+    int exp = (code >> 2) - 1;
+    uint8_t mant = code & 0x03;
+    return (uint8_t)((mant + 4) << exp);
+}
 
 // Unsigned variable-resolution decode, N-bit (HalfBits = N/2)
 // UnsVRdecode<uint16_t, 12>: HalfBits=6, ThresVal=64
@@ -126,7 +164,7 @@ static uint16_t unsvr_decode_8(uint16_t code)
     return (uint16_t)((mant + 16) << exp);
 }
 
-// DecodeUR2V6: unsigned ratio-2, 6-bit mantissa
+// DecodeUR2V6: uint32_t ratio-2, 6-bit mantissa
 static uint16_t ur2v6_decode(uint8_t code)
 {
     if (code <= 63) return code;
@@ -135,7 +173,7 @@ static uint16_t ur2v6_decode(uint8_t code)
     return (uint16_t)((mant + 64) << exp);
 }
 
-// DecodeUR2V5: unsigned ratio-2, 5-bit mantissa
+// DecodeUR2V5: uint32_t ratio-2, 5-bit mantissa
 static uint16_t ur2v5_decode(uint8_t code)
 {
     if (code <= 15) return code;
@@ -162,146 +200,416 @@ static int16_t sr2v5_decode(int8_t code)
         return -(int16_t)ur2v5_decode((uint8_t)(-code));
 }
 
-// ======================== Packet decode ========================
+static double ogntp_deg_from_units(int32_t units)
+{
+    return units * (0.0001 / 60.0);
+}
 
-bool ogntp_decode_packet(const uint8_t *data, double ref_lat, double ref_lon,
-                         ogntp_message_t *msg)
+static int ogntp_rx_rate_per_min(uint8_t code)
+{
+    if (code >= 31)
+        return 0;
+    return (1 << code) - 1;
+}
+
+static void ogntp_init_message(ogntp_message_t *msg)
 {
     memset(msg, 0, sizeof(*msg));
+    msg->report_type = -1;
+    msg->status.temperature_c = NAN;
+    msg->status.humidity_percent = NAN;
+}
 
-    // ---- Header word (bytes 0-3, little-endian) ----
-    uint32_t hdr = (uint32_t)data[0]
-                 | ((uint32_t)data[1] << 8)
-                 | ((uint32_t)data[2] << 16)
-                 | ((uint32_t)data[3] << 24);
-
-    uint32_t addr       = hdr & 0x00FFFFFF;
-    uint8_t  addr_type  = (hdr >> 24) & 0x03;
-    uint8_t  nonpos     = (hdr >> 26) & 0x01;
-    uint8_t  encrypted  = (hdr >> 30) & 0x01;
-
-    // Skip non-position packets and encrypted packets
-    if (nonpos || encrypted)
+static bool ogntp_position_sane(double lat_deg, double lon_deg,
+                                double ref_lat, double ref_lon,
+                                int alt_m, float speed_ms, int fix_quality)
+{
+    if (fix_quality == 0)
+        return false;
+    if (lat_deg < -90.0 || lat_deg > 90.0)
+        return false;
+    if (lon_deg < -180.0 || lon_deg > 180.0)
+        return false;
+    if (alt_m < -1500 || alt_m > 20000)
+        return false;
+    if (speed_ms < 0.0f || speed_ms > 400.0f)
         return false;
 
-    // Skip all-zero or all-ones addresses (likely noise)
-    if (addr == 0x000000 || addr == 0xFFFFFF)
-        return false;
+    {
+        double dlat = lat_deg - ref_lat;
+        double dlon = lon_deg - ref_lon;
+        double dist2 = dlat * dlat + dlon * dlon;
+        if (dist2 > 9.0)
+            return false;
+    }
 
-    // ---- Data word 0 (bytes 4-7): Latitude:24, Time:6, FixQuality:2 ----
+    return true;
+}
+
+static bool ogntp_decode_ogn1_status(const uint8_t *data, ogntp_message_t *msg)
+{
     uint32_t d0 = (uint32_t)data[4]
                 | ((uint32_t)data[5] << 8)
                 | ((uint32_t)data[6] << 16)
                 | ((uint32_t)data[7] << 24);
-
-    // Latitude: 24-bit signed, units = 0.0001/60 deg before shift
-    int32_t lat24 = (int32_t)(d0 & 0x00FFFFFF);
-    if (lat24 & 0x00800000) lat24 |= (int32_t)0xFF000000; // sign extend
-    // DecodeLatitude(): (lat24 << 3) + 4 -> 0.0001/60 deg units
-    int32_t lat_units = (lat24 << 3) + 4;
-    double  lat_deg   = lat_units * (0.0001 / 60.0);
-
-    uint8_t fix_quality = (d0 >> 30) & 0x03;
-
-    // ---- Data word 1 (bytes 8-11): Longitude:24, DOP:6, BaroMSB:1, FixMode:1 ----
     uint32_t d1 = (uint32_t)data[8]
                 | ((uint32_t)data[9] << 8)
                 | ((uint32_t)data[10] << 16)
                 | ((uint32_t)data[11] << 24);
-
-    int32_t lon24 = (int32_t)(d1 & 0x00FFFFFF);
-    if (lon24 & 0x00800000) lon24 |= (int32_t)0xFF000000; // sign extend
-    // DecodeLongitude(): (lon24 << 4) + 8 -> 0.0001/60 deg units
-    int32_t lon_units = (lon24 << 4) + 8;
-    double  lon_deg   = lon_units * (0.0001 / 60.0);
-
-    // ---- Data word 2 (bytes 12-15): Altitude:14, Speed:10, TurnRate:8 ----
     uint32_t d2 = (uint32_t)data[12]
                 | ((uint32_t)data[13] << 8)
                 | ((uint32_t)data[14] << 16)
                 | ((uint32_t)data[15] << 24);
-
-    uint16_t alt_code   = (uint16_t)(d2 & 0x00003FFF);          // bits 0-13
-    uint16_t speed_code = (uint16_t)((d2 >> 14) & 0x000003FF);  // bits 14-23
-    int8_t   turn_code  = (int8_t)((d2 >> 24) & 0xFF);          // bits 24-31, signed
-
-    // Altitude: UnsVRdecode_12(alt_code) -> meters
-    int      alt_m    = (int)unsvr_decode_12(alt_code);
-    // Speed: UnsVRdecode_8(speed_code) -> 0.1 m/s -> m/s
-    float    speed_ms = unsvr_decode_8(speed_code) * 0.1f;
-    // TurnRate: SR2V5(turn_code) -> 0.1 deg/s -> deg/s
-    float    turn_dps = sr2v5_decode(turn_code) * 0.1f;
-
-    // ---- Data word 3 (bytes 16-19): Heading:10, ClimbRate:9, Stealth:1, AcftType:4, BaroAltDiff:8 ----
     uint32_t d3 = (uint32_t)data[16]
                 | ((uint32_t)data[17] << 8)
                 | ((uint32_t)data[18] << 16)
                 | ((uint32_t)data[19] << 24);
 
-    uint16_t heading_code = (uint16_t)(d3 & 0x000003FF);         // bits 0-9
-    uint16_t climb_code9  = (uint16_t)((d3 >> 10) & 0x000001FF); // bits 10-18, 9 bits
-    uint8_t  stealth      = (uint8_t)((d3 >> 19) & 0x01);        // bit 19
-    uint8_t  acft_type    = (uint8_t)((d3 >> 20) & 0x0F);        // bits 20-23
-
-    // Heading: (heading_code * 3600 + 512) >> 10 -> tenths of degrees
-    float heading_deg = ((heading_code * 3600u + 512u) >> 10) * 0.1f;
-
-    // ClimbRate: 9-bit field, bits 7-0 are SR2V6 encoded magnitude, bit 8 is
-    // the sign extension of bit 7 (redundant). Take bits 7-0 as int8_t.
-    int8_t   climb_code8 = (int8_t)(climb_code9 & 0xFF);
-    float    vs_ms       = sr2v6_decode(climb_code8) * 0.1f;     // m/s
-
-    // ======================== Sanity checks ========================
-
-    // Reject stealth aircraft
-    if (stealth)
+    uint8_t report_type = (uint8_t)((d3 >> 20) & 0x0F);
+    if (report_type != 0)
         return false;
 
-    // Require at least a valid fix
-    if (fix_quality == 0)
-        return false;
+    msg->report_type = 0;
+    msg->status_valid = 1;
+    msg->valid = 1;
+    msg->altitude = (int)unsvr_decode_12((uint16_t)(d2 & 0x3FFF)) - 1024;
+    msg->fix_quality = (int)((d0 >> 30) & 0x03);
 
-    // Latitude must be within ±90 degrees
-    if (lat_deg < -90.0 || lat_deg > 90.0)
-        return false;
+    msg->status.time_seconds = (int)((d0 >> 24) & 0x3F);
+    msg->status.fix_quality = msg->fix_quality;
+    msg->status.pulse_bpm = (int)(d0 & 0xFF);
+    msg->status.oxygen_percent = (int)((d0 >> 8) & 0x7F);
+    msg->status.sat_snr_db = (int)(((d0 >> 15) & 0x1F) + 8);
+    msg->status.rx_rate_per_min = ogntp_rx_rate_per_min((uint8_t)((d0 >> 20) & 0x0F));
 
-    // Longitude must be within ±180 degrees
-    if (lon_deg < -180.0 || lon_deg > 180.0)
-        return false;
+    msg->status.audio_noise_db = (int)(d1 & 0xFF);
+    msg->status.radio_noise_dbm = -0.5f * (float)((d1 >> 8) & 0xFF);
 
-    // Position must be within ~300 km of receiver
     {
-        double dlat = lat_deg - ref_lat;
-        double dlon = lon_deg - ref_lon;
-        double dist2 = dlat * dlat + dlon * dlon;
-        if (dist2 > 9.0) // 3 degrees ~ 330 km
-            return false;
+        int8_t temp_code = (int8_t)((d1 >> 16) & 0xFF);
+        if ((uint8_t)temp_code != 0x80) {
+            msg->status.has_temperature = 1;
+            msg->status.temperature_c = (200 + sr2v5_decode(temp_code)) * 0.1f;
+        }
     }
 
-    // Altitude: -500 m to 15000 m
-    if (alt_m < -500 || alt_m > 15000)
+    {
+        int8_t hum_code = (int8_t)((d1 >> 24) & 0xFF);
+        if ((uint8_t)hum_code != 0x80) {
+            msg->status.has_humidity = 1;
+            msg->status.humidity_percent = (520 + sr2v5_decode(hum_code)) * 0.1f;
+        }
+    }
+
+    msg->status.has_pressure = ((d2 >> 14) & 0x3FFF) != 0;
+    msg->status.pressure_hpa = ((float)((d2 >> 14) & 0x3FFF)) * 0.08f;
+    msg->status.satellites = (int)((d2 >> 28) & 0x0F);
+
+    msg->status.firmware = (int)(d3 & 0xFF);
+    msg->status.hardware = (int)((d3 >> 8) & 0xFF);
+    msg->status.tx_power_dbm = (int)(((d3 >> 16) & 0x0F) + 4);
+    msg->status.voltage_v = ur2v6_decode((uint8_t)((d3 >> 24) & 0xFF)) / 64.0f;
+
+    return true;
+}
+
+static bool ogntp_decode_ogn2_status(const uint8_t *data, ogntp_message_t *msg)
+{
+    uint32_t d0 = (uint32_t)data[4]
+                | ((uint32_t)data[5] << 8)
+                | ((uint32_t)data[6] << 16)
+                | ((uint32_t)data[7] << 24);
+    uint32_t d1 = (uint32_t)data[8]
+                | ((uint32_t)data[9] << 8)
+                | ((uint32_t)data[10] << 16)
+                | ((uint32_t)data[11] << 24);
+    uint32_t d2 = (uint32_t)data[12]
+                | ((uint32_t)data[13] << 8)
+                | ((uint32_t)data[14] << 16)
+                | ((uint32_t)data[15] << 24);
+    uint32_t d3 = (uint32_t)data[16]
+                | ((uint32_t)data[17] << 8)
+                | ((uint32_t)data[18] << 16)
+                | ((uint32_t)data[19] << 24);
+
+    uint8_t report_type = (uint8_t)(d0 & 0x0F);
+    if (report_type != 0)
         return false;
 
-    // Speed: 0 to 400 m/s
-    if (speed_ms < 0.0f || speed_ms > 400.0f)
+    msg->report_type = 0;
+    msg->status_valid = 1;
+    msg->valid = 1;
+    msg->altitude = (int)unsvr_decode_12((uint16_t)gray_decode_u32(d1 & 0x3FFF)) - 1024;
+    msg->fix_quality = (int)((d2 >> 30) & 0x03);
+
+    msg->status.time_seconds = (int)((d2 >> 24) & 0x3F);
+    msg->status.fix_quality = msg->fix_quality;
+    msg->status.pulse_bpm = (int)(d2 & 0xFF);
+    msg->status.oxygen_percent = (int)((d2 >> 8) & 0x7F);
+    msg->status.sat_snr_db = (int)(((d2 >> 15) & 0x1F) + 8);
+    msg->status.rx_rate_per_min = ogntp_rx_rate_per_min((uint8_t)((d2 >> 20) & 0x0F));
+
+    msg->status.audio_noise_db = (int)(d3 & 0xFF);
+    msg->status.radio_noise_dbm = -0.5f * (float)((d3 >> 8) & 0xFF);
+
+    {
+        uint8_t temp_gray = (uint8_t)((d3 >> 16) & 0xFF);
+        uint8_t temp_code = (uint8_t)gray_decode_u32(temp_gray);
+        if (temp_code != 0x80) {
+            msg->status.has_temperature = 1;
+            msg->status.temperature_c = (200 + sr2v5_decode((int8_t)temp_code)) * 0.1f;
+        }
+    }
+
+    {
+        uint8_t hum_gray = (uint8_t)((d3 >> 24) & 0xFF);
+        uint8_t hum_code = (uint8_t)gray_decode_u32(hum_gray);
+        if (hum_code != 0x80) {
+            msg->status.has_humidity = 1;
+            msg->status.humidity_percent = (525 + sr2v5_decode((int8_t)hum_code)) * 0.1f;
+        }
+    }
+
+    msg->status.has_pressure = ((d1 >> 14) & 0x3FFF) != 0;
+    msg->status.pressure_hpa = ((float)((d1 >> 14) & 0x3FFF)) * 0.08f;
+    msg->status.satellites = (int)((d1 >> 28) & 0x0F);
+
+    msg->status.tx_power_dbm = (int)(((d0 >> 4) & 0x0F) + 4);
+    msg->status.firmware = (int)((d0 >> 8) & 0xFF);
+    msg->status.hardware = (int)((d0 >> 16) & 0xFF);
+    msg->status.voltage_v = (80 + ur2v6_decode((uint8_t)gray_decode_u32((uint8_t)((d0 >> 24) & 0xFF)))) / 64.0f;
+
+    return true;
+}
+
+static bool ogntp_decode_ogn1_packet(const uint8_t *data, double ref_lat, double ref_lon,
+                                     ogntp_message_t *msg)
+{
+    ogntp_init_message(msg);
+
+    uint32_t hdr = (uint32_t)data[0]
+                 | ((uint32_t)data[1] << 8)
+                 | ((uint32_t)data[2] << 16)
+                 | ((uint32_t)data[3] << 24);
+
+    msg->addr = hdr & 0x00FFFFFF;
+    msg->addr_type = (int)((hdr >> 24) & 0x03);
+    msg->version = 1;
+    msg->nonpos = (int)((hdr >> 26) & 0x01);
+    msg->relay = (int)((hdr >> 28) & 0x03);
+    msg->encrypted = (int)((hdr >> 30) & 0x01);
+    msg->emergency = (int)((hdr >> 31) & 0x01);
+    msg->other_system = 0;
+
+    if (!ogntp_header_parity_ok(hdr))
+        return false;
+    if (msg->addr == 0x000000 || msg->addr == 0xFFFFFF)
+        return false;
+    if (msg->encrypted)
         return false;
 
-    // ======================== Fill output ========================
+    if (msg->nonpos)
+        return ogntp_decode_ogn1_status(data, msg);
 
-    msg->addr          = addr;
-    msg->addr_type     = (int)addr_type;
-    msg->aircraft_type = (int)acft_type;
-    msg->stealth       = 0;
-    msg->latitude      = lat_deg;
-    msg->longitude     = lon_deg;
-    msg->altitude      = alt_m;
-    msg->speed         = speed_ms;
-    msg->course        = heading_deg;
-    msg->vs            = vs_ms;
-    msg->turnrate      = turn_dps;
-    msg->fix_quality   = (int)fix_quality;
-    msg->signal_level  = 0.0f; // set by caller
-    msg->valid         = 1;
+    uint32_t d0 = (uint32_t)data[4]
+                | ((uint32_t)data[5] << 8)
+                | ((uint32_t)data[6] << 16)
+                | ((uint32_t)data[7] << 24);
+    uint32_t d1 = (uint32_t)data[8]
+                | ((uint32_t)data[9] << 8)
+                | ((uint32_t)data[10] << 16)
+                | ((uint32_t)data[11] << 24);
+    uint32_t d2 = (uint32_t)data[12]
+                | ((uint32_t)data[13] << 8)
+                | ((uint32_t)data[14] << 16)
+                | ((uint32_t)data[15] << 24);
+    uint32_t d3 = (uint32_t)data[16]
+                | ((uint32_t)data[17] << 8)
+                | ((uint32_t)data[18] << 16)
+                | ((uint32_t)data[19] << 24);
+
+    int32_t lat24 = sign_extend_u32(d0 & 0x00FFFFFF, 24);
+    int32_t lon24 = sign_extend_u32(d1 & 0x00FFFFFF, 24);
+    int32_t lat_units = (lat24 << 3) + 4;
+    int32_t lon_units = (lon24 << 4) + 8;
+    double lat_deg = ogntp_deg_from_units(lat_units);
+    double lon_deg = ogntp_deg_from_units(lon_units);
+    int fix_quality = (int)((d0 >> 30) & 0x03);
+    int alt_m = (int)unsvr_decode_12((uint16_t)(d2 & 0x3FFF)) - 1024;
+    float speed_ms = unsvr_decode_8((uint16_t)((d2 >> 14) & 0x03FF)) * 0.1f;
+    float turn_dps = sr2v5_decode((int8_t)((d2 >> 24) & 0xFF)) * 0.1f;
+    float heading_deg = ((float)(((d3 & 0x03FFu) * 3600u + 512u) >> 10)) * 0.1f;
+    float vs_ms = sr2v6_decode((int8_t)((d3 >> 10) & 0xFF)) * 0.1f;
+    int stealth = (int)((d3 >> 19) & 0x01);
+
+    if (stealth)
+        return false;
+    if (!ogntp_position_sane(lat_deg, lon_deg, ref_lat, ref_lon, alt_m, speed_ms, fix_quality))
+        return false;
+
+    msg->position_valid = 1;
+    msg->valid = 1;
+    msg->aircraft_type = (int)((d3 >> 20) & 0x0F);
+    msg->stealth = 0;
+    msg->latitude = lat_deg;
+    msg->longitude = lon_deg;
+    msg->altitude = alt_m;
+    msg->speed = speed_ms;
+    msg->course = heading_deg;
+    msg->vs = vs_ms;
+    msg->turnrate = turn_dps;
+    msg->fix_quality = fix_quality;
+
+    return true;
+}
+
+static bool ogntp_decode_ogn2_packet(const uint8_t *data, double ref_lat, double ref_lon,
+                                     ogntp_message_t *msg)
+{
+    ogntp_init_message(msg);
+
+    uint32_t hdr = (uint32_t)data[0]
+                 | ((uint32_t)data[1] << 8)
+                 | ((uint32_t)data[2] << 16)
+                 | ((uint32_t)data[3] << 24);
+
+    msg->addr = hdr & 0x00FFFFFF;
+    msg->addr_type = (int)((hdr >> 24) & 0x03);
+    msg->version = 2;
+    msg->relay = (int)((hdr >> 26) & 0x01);
+    msg->nonpos = (int)((hdr >> 28) & 0x01);
+    msg->other_system = (int)((hdr >> 29) & 0x01);
+    msg->encrypted = (int)((hdr >> 30) & 0x01);
+    msg->emergency = (int)((hdr >> 31) & 0x01);
+
+    if (!ogntp_header_parity_ok(hdr))
+        return false;
+    if (msg->addr == 0x000000 || msg->addr == 0xFFFFFF)
+        return false;
+    if (msg->encrypted || msg->other_system)
+        return false;
+
+    if (msg->nonpos)
+        return ogntp_decode_ogn2_status(data, msg);
+
+    uint32_t d0 = (uint32_t)data[4]
+                | ((uint32_t)data[5] << 8)
+                | ((uint32_t)data[6] << 16)
+                | ((uint32_t)data[7] << 24);
+    uint32_t d1 = (uint32_t)data[8]
+                | ((uint32_t)data[9] << 8)
+                | ((uint32_t)data[10] << 16)
+                | ((uint32_t)data[11] << 24);
+    uint32_t d2 = (uint32_t)data[12]
+                | ((uint32_t)data[13] << 8)
+                | ((uint32_t)data[14] << 16)
+                | ((uint32_t)data[15] << 24);
+    uint32_t d3 = (uint32_t)data[16]
+                | ((uint32_t)data[17] << 8)
+                | ((uint32_t)data[18] << 16)
+                | ((uint32_t)data[19] << 24);
+
+    int32_t lat_units = (int32_t)(((int64_t)sign_extend_u32(gray_decode_u32(d2 & 0x00FFFFFF), 24) * 108000000 + (1 << 23)) >> 24);
+    int32_t lon_units = (int32_t)(((int64_t)sign_extend_u32(gray_decode_u32(d3 & 0x01FFFFFF), 25) * 108000000 + (1 << 23)) >> 24);
+    double lat_deg = ogntp_deg_from_units(lat_units);
+    double lon_deg = ogntp_deg_from_units(lon_units);
+    int fix_quality = (int)((d2 >> 30) & 0x03);
+    int alt_m = (int)unsvr_decode_12((uint16_t)gray_decode_u32(d1 & 0x3FFF)) - 1024;
+    float speed_ms = unsvr_decode_8((uint16_t)gray_decode_u32((d1 >> 14) & 0x03FF)) * 0.1f;
+    uint16_t heading_code = (uint16_t)gray_decode_u32((d0 >> 4) & 0x03FF);
+    float heading_deg = ((float)((heading_code * 3600u + 512u) >> 10)) * 0.1f;
+    uint16_t climb_code = (uint16_t)((d0 >> 14) & 0x01FF);
+    uint8_t turn_code = (uint8_t)((d1 >> 24) & 0xFF);
+    float vs_ms = (climb_code == 0x0100) ? 0.0f : (sr2v6_decode((int8_t)(climb_code & 0xFF)) * 0.1f);
+    float turn_dps = (turn_code == 0x80) ? 0.0f : (sr2v5_decode((int8_t)turn_code) * 0.1f);
+    uint8_t dop = unsvr_decode_4((uint8_t)gray_decode_u32((d3 >> 25) & 0x3F));
+
+    if (dop > 80)
+        return false;
+    if (!ogntp_position_sane(lat_deg, lon_deg, ref_lat, ref_lon, alt_m, speed_ms, fix_quality))
+        return false;
+
+    msg->position_valid = 1;
+    msg->valid = 1;
+    msg->aircraft_type = (int)(d0 & 0x0F);
+    msg->latitude = lat_deg;
+    msg->longitude = lon_deg;
+    msg->altitude = alt_m;
+    msg->speed = speed_ms;
+    msg->course = heading_deg;
+    msg->vs = vs_ms;
+    msg->turnrate = turn_dps;
+    msg->fix_quality = fix_quality;
+
+    return true;
+}
+
+static int ogntp_candidate_score(const ogntp_message_t *msg, double ref_lat, double ref_lon)
+{
+    int score = 0;
+
+    if (msg->position_valid) {
+        score += 20;
+        score += msg->fix_quality > 0 ? 4 : 0;
+        if (msg->speed <= 120.0f)
+            score += 2;
+        if (fabsf(msg->vs) <= 20.0f)
+            score += 2;
+        if (msg->course >= 0.0f && msg->course < 360.0f)
+            score += 1;
+        {
+            double d = fabs(msg->latitude - ref_lat) + fabs(msg->longitude - ref_lon);
+            if (d < 0.5)
+                score += 3;
+            else if (d < 1.0)
+                score += 2;
+            else if (d < 2.0)
+                score += 1;
+        }
+    }
+
+    if (msg->status_valid) {
+        score += 18;
+        if (msg->status.satellites > 0 && msg->status.satellites <= 16)
+            score += 2;
+        if (msg->status.voltage_v > 0.5f && msg->status.voltage_v < 20.0f)
+            score += 2;
+        if (msg->status.has_temperature && msg->status.temperature_c > -60.0f && msg->status.temperature_c < 100.0f)
+            score += 1;
+        if (msg->status.has_humidity && msg->status.humidity_percent >= 0.0f && msg->status.humidity_percent <= 100.0f)
+            score += 1;
+    }
+
+    return score;
+}
+
+// ======================== Packet decode ========================
+
+bool ogntp_decode_packet(const uint8_t *data, double ref_lat, double ref_lon,
+                         ogntp_message_t *msg)
+{
+    ogntp_message_t v1;
+    ogntp_message_t v2;
+    bool ok1 = ogntp_decode_ogn1_packet(data, ref_lat, ref_lon, &v1);
+    bool ok2 = ogntp_decode_ogn2_packet(data, ref_lat, ref_lon, &v2);
+
+    if (ok1 && !ok2) {
+        *msg = v1;
+        return true;
+    }
+    if (ok2 && !ok1) {
+        *msg = v2;
+        return true;
+    }
+    if (!ok1 && !ok2) {
+        ogntp_init_message(msg);
+        return false;
+    }
+
+    if (ogntp_candidate_score(&v2, ref_lat, ref_lon) > ogntp_candidate_score(&v1, ref_lat, ref_lon))
+        *msg = v2;
+    else
+        *msg = v1;
 
     return true;
 }

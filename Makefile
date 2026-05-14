@@ -1,6 +1,6 @@
 PROGNAME=dump1090
 
-DUMP1090_VERSION ?= 1.0.4
+DUMP1090_VERSION ?= 1.0.5
 
 # ======================== Directory layout ========================
 
@@ -19,12 +19,15 @@ SRCDIR_POCSAG  := src/decode/pocsag
 SRCDIR_GSM     := src/decode/gsm
 SRCDIR_LTE     := src/decode/lte
 SRCDIR_IOT     := src/decode/iot
+SRCDIR_FANET   := src/decode/fanet
+SRCDIR_SARSAT  := src/decode/sarsat
+SRCDIR_DISPATCH := src/dispatch
 INCLUDEDIR     := include
 
 OBJDIR         := obj
 
 # VPATH: where make looks for source files
-VPATH := $(SRCDIR_MAIN):$(SRCDIR_ADSB):$(SRCDIR_UTIL):$(SRCDIR_NET):$(SRCDIR_SDR):$(SRCDIR_PANEL):$(SRCDIR_STUBS):$(SRCDIR_FLARM):$(SRCDIR_ACARS):$(SRCDIR_VDL2):$(SRCDIR_SONDE):$(SRCDIR_POCSAG):$(SRCDIR_GSM):$(SRCDIR_LTE):$(SRCDIR_IOT)
+VPATH := $(SRCDIR_MAIN):$(SRCDIR_ADSB):$(SRCDIR_UTIL):$(SRCDIR_NET):$(SRCDIR_SDR):$(SRCDIR_PANEL):$(SRCDIR_STUBS):$(SRCDIR_FLARM):$(SRCDIR_ACARS):$(SRCDIR_VDL2):$(SRCDIR_SONDE):$(SRCDIR_POCSAG):$(SRCDIR_GSM):$(SRCDIR_LTE):$(SRCDIR_IOT):$(SRCDIR_FANET):$(SRCDIR_SARSAT):$(SRCDIR_DISPATCH)
 
 # ======================== Compiler flags ========================
 
@@ -32,9 +35,12 @@ CFLAGS ?= -O3 -g
 DUMP1090_CFLAGS := -std=c11 -fno-common -Wall -Wmissing-declarations -Werror -Wformat-signedness -W
 
 # Include paths: all source directories + include/ so #include "foo.h" works from anywhere
-INCLUDE_DIRS := -I. -I$(INCLUDEDIR) -I$(SRCDIR_MAIN) -I$(SRCDIR_ADSB) -I$(SRCDIR_UTIL) -I$(SRCDIR_NET) -I$(SRCDIR_SDR) -I$(SRCDIR_PANEL) -I$(SRCDIR_STUBS) -I$(SRCDIR_FLARM) -I$(SRCDIR_ACARS) -I$(SRCDIR_VDL2) -I$(SRCDIR_SONDE) -I$(SRCDIR_POCSAG) -I$(SRCDIR_GSM) -I$(SRCDIR_LTE) -I$(SRCDIR_IOT)
+INCLUDE_DIRS := -I. -I$(INCLUDEDIR) -I$(SRCDIR_MAIN) -I$(SRCDIR_ADSB) -I$(SRCDIR_UTIL) -I$(SRCDIR_NET) -I$(SRCDIR_SDR) -I$(SRCDIR_PANEL) -I$(SRCDIR_STUBS) -I$(SRCDIR_FLARM) -I$(SRCDIR_ACARS) -I$(SRCDIR_VDL2) -I$(SRCDIR_SONDE) -I$(SRCDIR_POCSAG) -I$(SRCDIR_GSM) -I$(SRCDIR_LTE) -I$(SRCDIR_IOT) -I$(SRCDIR_FANET) -I$(SRCDIR_SARSAT) -I$(SRCDIR_DISPATCH)
 
 DUMP1090_CPPFLAGS := $(INCLUDE_DIRS) -D_POSIX_C_SOURCE=200112L -DMODES_DUMP1090_VERSION=\"$(DUMP1090_VERSION)\" -DMODES_DUMP1090_VARIANT=\"dump1090-gg-light\"
+
+CXX ?= g++
+CXXFLAGS_DISPATCH = -std=c++17 -O3 -g -Wall -Werror $(DUMP1090_CPPFLAGS)
 
 LIBS = -lpthread -lm
 SDR_OBJ = $(OBJDIR)/cpu.o $(OBJDIR)/sdr.o $(OBJDIR)/fifo.o $(OBJDIR)/sdr_ifile.o $(OBJDIR)/sdr_backend.o dsp/helpers/tables.o
@@ -287,6 +293,46 @@ $(OBJDIR)/sdr_backend_sdrgg.o: $(SRCDIR_SDR)/sdr_backend_sdrgg.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 endif
 
+# C++ rule for dispatcher
+$(OBJDIR)/dispatcher.o: $(SRCDIR_DISPATCH)/dispatcher.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+# C++ rule for msg_queue
+$(OBJDIR)/msg_queue.o: $(SRCDIR_DISPATCH)/msg_queue.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+# C++ rules for converted modules
+$(OBJDIR)/config_panel.o: $(SRCDIR_PANEL)/config_panel.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/net_io.o: $(SRCDIR_NET)/net_io.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/mlat_client.o: $(SRCDIR_NET)/mlat_client.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/ogn_client.o: $(SRCDIR_NET)/ogn_client.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/feeder_thread.o: $(SRCDIR_NET)/feeder_thread.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/piaware_client.o: $(SRCDIR_NET)/piaware_client.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+# C++ rules for tracker/decoder modules
+$(OBJDIR)/gsm_tracker.o: $(SRCDIR_GSM)/gsm_tracker.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/iot_tracker.o: $(SRCDIR_IOT)/iot_tracker.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/lte_tracker.o: $(SRCDIR_LTE)/lte_tracker.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
+$(OBJDIR)/sondehub_client.o: $(SRCDIR_NET)/sondehub_client.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
+
 # ======================== Object lists ========================
 
 DUMP1090_OBJS := \
@@ -320,11 +366,16 @@ DUMP1090_OBJS := \
 	$(OBJDIR)/opensky_client.o \
 	$(OBJDIR)/ogn_client.o \
 	$(OBJDIR)/sondehub_client.o \
+	$(OBJDIR)/airframes_feed.o \
 	$(OBJDIR)/flarm_decode.o \
 	$(OBJDIR)/flarm_demod.o \
 	$(OBJDIR)/flarm_reader.o \
 	$(OBJDIR)/ogntp_decode.o \
+	$(OBJDIR)/p3i_decode.o \
+	$(OBJDIR)/p3i_demod.o \
+	$(OBJDIR)/adsl_decode.o \
 	$(OBJDIR)/acars_demod.o \
+	$(OBJDIR)/acars_label.o \
 	$(OBJDIR)/vdl2_demod.o \
 	$(OBJDIR)/sonde_demod.o \
 	$(OBJDIR)/pocsag_demod.o \
@@ -336,9 +387,13 @@ DUMP1090_OBJS := \
 	$(OBJDIR)/lte_tracker.o \
 	$(OBJDIR)/iot_decode.o \
 	$(OBJDIR)/iot_tracker.o \
+	$(OBJDIR)/fanet_decode.o \
+	$(OBJDIR)/sarsat_decode.o \
 	$(OBJDIR)/config_panel.o \
 	$(OBJDIR)/decoder_config.o \
-	$(OBJDIR)/sdr_receiver.o
+	$(OBJDIR)/sdr_receiver.o \
+	$(OBJDIR)/dispatcher.o \
+	$(OBJDIR)/msg_queue.o
 
 VIEW1090_OBJS := \
 	$(OBJDIR)/view1090.o \
@@ -362,7 +417,9 @@ VIEW1090_OBJS := \
 	$(OBJDIR)/piaware_client.o \
 	$(OBJDIR)/feeder_thread_stub.o \
 	$(OBJDIR)/config_panel_stub.o \
-	$(OBJDIR)/sdr_stub.o
+	$(OBJDIR)/dispatcher_stub.o \
+	$(OBJDIR)/sdr_stub.o \
+	$(OBJDIR)/msg_queue.o
 
 FAUP1090_OBJS := \
 	$(OBJDIR)/faup1090.o \
@@ -384,18 +441,20 @@ FAUP1090_OBJS := \
 	$(OBJDIR)/fa_mlat.o \
 	$(OBJDIR)/feeder_thread_stub.o \
 	$(OBJDIR)/config_panel_stub.o \
-	$(OBJDIR)/sdr_stub.o
+	$(OBJDIR)/dispatcher_stub.o \
+	$(OBJDIR)/sdr_stub.o \
+	$(OBJDIR)/msg_queue.o
 
 # ======================== Link targets ========================
 
 dump1090: $(DUMP1090_OBJS) $(SDR_OBJ) $(COMPAT) $(CPUFEATURES_OBJS) $(STARCH_OBJS)
-	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_SDR) $(LIBS_CURSES) -lssl -lcrypto -lz
+	$(CXX) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_SDR) $(LIBS_CURSES) -lssl -lcrypto -lz -lstdc++
 
 view1090: $(VIEW1090_OBJS) $(COMPAT)
-	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_CURSES) -lssl -lcrypto
+	$(CXX) -g -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_CURSES) -lssl -lcrypto -lstdc++
 
 faup1090: $(FAUP1090_OBJS) $(COMPAT)
-	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS) -lssl -lcrypto
+	$(CXX) -g -o $@ $^ $(LDFLAGS) $(LIBS) -lssl -lcrypto -lstdc++
 
 starch-benchmark: $(OBJDIR)/cpu.o dsp/helpers/tables.o $(CPUFEATURES_OBJS) $(STARCH_OBJS) $(STARCH_BENCHMARK_OBJ)
 	$(CC) -g -o $@ $^ $(LDFLAGS) $(LIBS)

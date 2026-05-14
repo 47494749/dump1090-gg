@@ -60,6 +60,7 @@ tr:hover td{background:var(--hover)}
 <a href="/gsm.html">📶 GSM</a>
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
+<a href="/fanet.html">🚩 FANET</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -250,18 +251,77 @@ function getSquawkTitle(sq){
 }
 function sortAC(key){if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=1;}renderAC();}
 
+const flarmTypeInfo=[
+    {icon:'❓',label:'Unknown',col:'#888'},
+    {icon:'🛩️',label:'Glider',col:'#00cc66'},
+    {icon:'✈️',label:'Tow Plane',col:'#66aaff'},
+    {icon:'🚁',label:'Helicopter',col:'#ff8800'},
+    {icon:'🪂',label:'Parachute',col:'#ff44aa'},
+    {icon:'✈️',label:'Drop Plane',col:'#6688cc'},
+    {icon:'🪁',label:'Hang Glider',col:'#44dd88'},
+    {icon:'🪂',label:'Paraglider',col:'#88ee44'},
+    {icon:'✈️',label:'Powered Aircraft',col:'#4488ff'},
+    {icon:'🛫',label:'Jet Aircraft',col:'#aaaaff'},
+    {icon:'🛸',label:'UFO',col:'#ff00ff'},
+    {icon:'🎈',label:'Balloon',col:'#ffcc00'},
+    {icon:'🎈',label:'Airship',col:'#ddaa00'},
+    {icon:'🤖',label:'UAV/Drone',col:'#ff4444'},
+    {icon:'🚗',label:'Ground Vehicle',col:'#888888'},
+    {icon:'📍',label:'Static Object',col:'#666666'},
+];
+function getFlarmTypeIcon(a){
+    const ft=a.flarm_type;
+    if(ft==null||ft===0)return '';
+    const info=flarmTypeInfo[ft]||flarmTypeInfo[0];
+    return `<span class="tt" style="cursor:default"><span style="font-size:15px" title="${info.label}">${info.icon}</span><span class="ttbox">${info.label}</span></span>`;
+}
+
+function getFanetExtra(a){
+    if(!a.fanet_hw && !a.fanet_thermal) return '';
+    let lines=[];
+    if(a.fanet_hw){
+        lines.push(`HW: dev=0x${a.fanet_hw.dev.toString(16).padStart(2,'0')}`);
+        if(a.fanet_hw.uptime>0) lines.push(`Uptime: ${a.fanet_hw.uptime}min`);
+        if(a.fanet_hw.rssi) lines.push(`RSSI: ${a.fanet_hw.rssi}dBm`);
+    }
+    if(a.fanet_thermal){
+        const t=a.fanet_thermal;
+        lines.push(`Thermal: ${t.climb>0?'+':''}${t.climb.toFixed(1)}m/s @${t.alt}m`);
+        if(t.wind_spd>0) lines.push(`Wind: ${t.wind_spd.toFixed(0)}km/h @${t.wind_hdg.toFixed(0)}°`);
+        lines.push(`Conf: ${t.conf}/7`);
+    }
+    const tip=escapeHtml(lines.join(' | '));
+    return ` <span class="tt" style="cursor:help;color:var(--dim);font-size:11px">ℹ️<span class="ttbox" style="white-space:pre-wrap;max-width:300px">${tip}</span></span>`;
+}
 
 function getSource(a){
     const cs=(a.flight||'').trim().toUpperCase();
-    if(cs.startsWith('FLR'))return{label:'FLARM',bg:'rgba(0,200,100,0.18)',col:'#00cc66',title:'FLARM 868 MHz legacy'};
+    if(cs.startsWith('FLR'))return{label:'FLARM',bg:'rgba(0,200,100,0.18)',col:'#00cc66',title:'FLARM 868 MHz'};
     if(cs.startsWith('OGN'))return{label:'OGNTP',bg:'rgba(0,180,255,0.18)',col:'#00b4ff',title:'OGN-Tracker Protocol (868 MHz)'};
-    // 'type' is omitted from JSON when addrtype==ADDR_ADSB_ICAO (most common case)
+    if(cs.startsWith('FNT'))return{label:'FANET',bg:'rgba(180,0,255,0.18)',col:'#b44dff',title:'FANET LoRa 868.2 MHz'};
+    if(cs.startsWith('PAW'))return{label:'PAW',bg:'rgba(255,100,200,0.18)',col:'#ff64c8',title:'PilotAware P3I (869.525 MHz)'};
+    if(cs.startsWith('ADL'))return{label:'ADS-L',bg:'rgba(255,165,0,0.18)',col:'#ffa500',title:'ADS-L SRD-860 (868 MHz)'};
+    // If aircraft has a FLARM type set, it came from FLARM/FANET/OGN even if callsign is a pilot name
+    if(a.flarm_type)return{label:'FANET',bg:'rgba(180,0,255,0.18)',col:'#b44dff',title:'FANET LoRa 868.2 MHz (named)'};
+    // Use datasource (position data source) if available — this tells us WHERE the position came from
+    const ds=(a.datasource||'').toLowerCase();
+    if(ds==='mlat')return{label:'MLAT',bg:'rgba(255,120,0,0.18)',col:'#ff7800',title:'Terrestrial MLAT (multilateration)'};
+    if(ds==='tisb')return{label:'TIS-B',bg:'rgba(255,180,0,0.18)',col:'#ffb400',title:'TIS-B (ground uplink)'};
+    if(ds==='adsr')return{label:'ADS-R',bg:'rgba(150,100,255,0.18)',col:'#9664ff',title:'ADS-R (rebroadcast)'};
+    if(ds==='adsb'){
+        // Distinguish ADS-B full from ADS-B Light:
+        // ADS-B Light = has position but missing velocity (gs) or identification (flight)
+        const hasVel=(a.gs!=null||a.tas!=null||a.ias!=null);
+        const hasIdent=(a.flight!=null&&a.flight.trim()!=='');
+        if(!hasVel&&!hasIdent)return{label:'ADS-L',bg:'rgba(79,195,247,0.10)',col:'#7ecbf0',title:'ADS-B Light (position only, no velocity/ident)'};
+        if(!hasVel||!hasIdent)return{label:'ADS-L',bg:'rgba(79,195,247,0.10)',col:'#7ecbf0',title:'ADS-B Light (partial data)'};
+        return{label:'ADS-B',bg:'rgba(79,195,247,0.15)',col:'#4fc3f7',title:'ADS-B (full)'};
+    }
+    // Fallback to address type when no position/datasource is available
     const t=(a.type||'adsb_icao').toLowerCase();
-    if(t.startsWith('adsb_icao_nt'))return{label:'ADS-B',bg:'rgba(79,195,247,0.15)',col:'#4fc3f7',title:'ADS-B (no timestamp)'};
-    if(t.startsWith('adsb_icao')||t.startsWith('adsb_other'))return{label:'ADS-B',bg:'rgba(79,195,247,0.15)',col:'#4fc3f7',title:'ADS-B'};
+    if(t.startsWith('adsb'))return{label:'ADS-B',bg:'rgba(79,195,247,0.15)',col:'#4fc3f7',title:'ADS-B (no position yet)'};
     if(t.startsWith('adsr'))return{label:'ADS-R',bg:'rgba(150,100,255,0.18)',col:'#9664ff',title:'ADS-R (rebroadcast)'};
     if(t.startsWith('tisb'))return{label:'TIS-B',bg:'rgba(255,180,0,0.18)',col:'#ffb400',title:'TIS-B (uplink)'};
-    if(t==='mlat')return{label:'MLAT',bg:'rgba(255,120,0,0.18)',col:'#ff7800',title:'Multilateration'};
     if(t==='mode_s')return{label:'ModeS',bg:'rgba(120,120,120,0.18)',col:'#aaaaaa',title:'Mode S (no position)'};
     if(t==='mode_ac')return{label:'ModeA/C',bg:'rgba(100,100,100,0.15)',col:'#888',title:'Mode A/C only'};
     return{label:'?',bg:'rgba(80,80,80,0.15)',col:'#666',title:t||'unknown'};
@@ -319,7 +379,7 @@ function renderAC(){
         const ghostStyle=isGhost?'opacity:0.45':'';
         html+=`<tr style="${rowStyle}${ghostStyle}" data-icao="${safeHex}">
             <td class="icao-link" style="font-family:monospace;color:var(--accent)" onclick="lookupICAO('${safeHex}')">${safeHex}</td>
-            <td><strong>${safeFlight}</strong></td>
+            <td><strong>${safeFlight}</strong>${getFanetExtra(a)}</td>
             <td style="${sqStyle}" title="${safeSqTitle}">${safeSqStr}</td>
             <td>${a.alt_baro!=null?a.alt_baro:''}</td>
             <td>${a.gs!=null?Math.round(a.gs):''}</td>
@@ -328,7 +388,7 @@ function renderAC(){
             <td>${a.lon!=null?a.lon.toFixed(4):''}</td>
             <td>${fmtDist(calcDist(a.lat,a.lon))}</td>
             <td>${a.baro_rate!=null?a.baro_rate:''}</td>
-            <td>${safeCat}</td>
+            <td>${a.flarm_type?getFlarmTypeIcon(a):safeCat}</td>
             <td>${a.rssi!=null?a.rssi.toFixed(1):''}</td>
             <td>${a.messages||''}</td>
             <td>${a.seen!=null?a.seen.toFixed(1)+'s':''}</td>

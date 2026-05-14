@@ -21,15 +21,16 @@
 #include "elm.h"
 #include "cpdlc_decode.h"
 #include "config_panel.h"
+#include "sdr_receiver.h"
 
 // ========== Hash table helpers ==========
 
-static inline unsigned elm_hash(uint32_t addr) {
+static inline uint32_t elm_hash(uint32_t addr) {
     return (addr ^ (addr >> 8) ^ (addr >> 16)) & (ELM_TABLE_SIZE - 1);
 }
 
 static struct elm_entry *elm_find(struct elm_state *state, uint32_t addr) {
-    unsigned h = elm_hash(addr);
+    uint32_t h = elm_hash(addr);
     struct elm_entry *e = state->table[h];
     while (e) {
         if (e->addr == addr)
@@ -48,14 +49,14 @@ static struct elm_entry *elm_create(struct elm_state *state, uint32_t addr, uint
     e->last_seen = timestamp;
     e->segments_mask = 0;
 
-    unsigned h = elm_hash(addr);
+    uint32_t h = elm_hash(addr);
     e->next = state->table[h];
     state->table[h] = e;
     return e;
 }
 
 static void elm_remove(struct elm_state *state, uint32_t addr) {
-    unsigned h = elm_hash(addr);
+    uint32_t h = elm_hash(addr);
     struct elm_entry **pp = &state->table[h];
     while (*pp) {
         if ((*pp)->addr == addr) {
@@ -75,7 +76,7 @@ static void elm_remove(struct elm_state *state, uint32_t addr) {
 //   SOH (0x01) or prekey, then label (2 chars), then text ending with ETX (0x03) or ETB (0x17)
 // We also look for plain ASCII text.
 
-static void elm_decode_acars(uint32_t addr, const unsigned char *payload, int len,
+static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
                              char *outbuf, int outbuf_size) {
     // Look for ACARS framing
     int i;
@@ -136,7 +137,7 @@ static void elm_decode_acars(uint32_t addr, const unsigned char *payload, int le
                 if (stx_pos >= 0 && stx_pos < end) {
                     n += snprintf(outbuf + n, outbuf_size - n, "text=\"");
                     for (int j = stx_pos; j < end && n < outbuf_size - 4; j++) {
-                        unsigned char c = payload[j];
+                        uint8_t c = payload[j];
                         if (c >= 0x20 && c < 0x7f)
                             outbuf[n++] = c;
                         else if (c == 0x0a || c == 0x0d)
@@ -154,7 +155,7 @@ static void elm_decode_acars(uint32_t addr, const unsigned char *payload, int le
     }
 
     if (!found_acars) {
-        // Try CPDLC decode — capture output via open_memstream
+        // Try CPDLC decode â€” capture output via open_memstream
         char *cpdlc_buf = NULL;
         size_t cpdlc_len = 0;
         FILE *old_stdout = stdout;
@@ -201,7 +202,7 @@ static void elm_decode_acars(uint32_t addr, const unsigned char *payload, int le
         if (has_printable > len / 4) {
             n += snprintf(outbuf + n, outbuf_size - n, " |");
             for (i = 0; i < len && n < outbuf_size - 2; i++) {
-                unsigned char c = payload[i];
+                uint8_t c = payload[i];
                 outbuf[n++] = (c >= 0x20 && c < 0x7f) ? c : '.';
             }
             outbuf[n] = '\0';
@@ -249,7 +250,10 @@ static void *elm_decode_worker(void *arg) {
 
             // Log decoded content to panel
             if (decoded[0]) {
-                panelLogMessage("[ELM] %s", decoded);
+                int rxid = -1;
+                for (int ri = 0; ri < SdrManager.count; ri++)
+                    if (SdrManager.receivers[ri].config.role == SDR_ROLE_ADSB) { rxid = SdrManager.receivers[ri].dev_index; break; }
+                panelLogMessage("[ELM rx%d] %s", rxid, decoded);
             }
 
             free(msg);
@@ -272,19 +276,19 @@ static void *elm_decode_worker(void *arg) {
 
 // Check if payload looks like valid ACARS or CPDLC content.
 // Returns 1 if content passes validation, 0 if it looks like garbage.
-static int elm_validate_content(const unsigned char *payload, int len) {
+static int elm_validate_content(const uint8_t *payload, int len) {
     if (len < 10)
         return 0;
 
-    // Check 1: ACARS framing — SOH (0x01) present
+    // Check 1: ACARS framing â€” SOH (0x01) present
     for (int i = 0; i < len; i++) {
         if (payload[i] == 0x01) {
-            // Found SOH — likely real ACARS
+            // Found SOH â€” likely real ACARS
             return 1;
         }
     }
 
-    // Check 2: CPDLC/ASN.1 — first byte often has recognizable tag patterns
+    // Check 2: CPDLC/ASN.1 â€” first byte often has recognizable tag patterns
     // FANS-1/A CPDLC uses UPER encoding; first bits are typically small tag values
     // Accept if first byte has high bit clear (tag < 128)
     if ((payload[0] & 0x80) == 0) {
@@ -299,7 +303,7 @@ static int elm_validate_content(const unsigned char *payload, int len) {
             return 1;
     }
 
-    // Check 3: Plain text content — at least 40% printable ASCII
+    // Check 3: Plain text content â€” at least 40% printable ASCII
     int printable = 0;
     for (int i = 0; i < len; i++) {
         if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
@@ -322,7 +326,7 @@ static int elm_validate_timing(struct elm_entry *entry, int num_segments) {
             return 0;
         uint64_t gap = entry->seg_time[i] - entry->seg_time[i - 1];
         if (gap > ELM_SEG_GAP_MS)
-            return 0;  // gap too large — probably unrelated false DF24 frames
+            return 0;  // gap too large â€” probably unrelated false DF24 frames
     }
     return 1;
 }
@@ -363,12 +367,12 @@ static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry,
     int payload_len = num_segments * ELM_SEGMENT_SIZE;
 
     // Assemble payload temporarily for content validation
-    unsigned char payload[ELM_MAX_PAYLOAD];
+    uint8_t payload[ELM_MAX_PAYLOAD];
     for (int i = 0; i < num_segments; i++) {
         memcpy(payload + i * ELM_SEGMENT_SIZE, entry->data[i], ELM_SEGMENT_SIZE);
     }
 
-    // Validate content — must look like ACARS, CPDLC, or structured text
+    // Validate content â€” must look like ACARS, CPDLC, or structured text
     if (!elm_validate_content(payload, payload_len)) {
         state->messages_rejected++;
         fprintf(stderr, "ELM reject %06X: content validation failed (%d bytes, no ACARS/CPDLC/text)\n",
@@ -444,8 +448,8 @@ void elmCleanup(struct elm_state *state) {
     }
 }
 
-void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
-                   unsigned ke, const unsigned char *md, uint64_t timestamp) {
+void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
+                   uint32_t ke, const uint8_t *md, uint64_t timestamp) {
     if (nd >= ELM_MAX_SEGMENTS)
         return;
 
@@ -472,8 +476,8 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
         }
         // Accept only the next expected segment or a re-delivery of one we have.
         // This filters random ND values from misclassified frames.
-        if (nd > (unsigned)next_expected) {
-            // Segment too far ahead — not sequential, likely garbage.
+        if (nd > (uint32_t)next_expected) {
+            // Segment too far ahead â€” not sequential, likely garbage.
             // If KE=1 on a non-sequential segment, just ignore it.
             return;
         }
@@ -523,7 +527,7 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
     } else if (consecutive >= ELM_MIN_SEGMENTS && consecutive == ELM_MAX_SEGMENTS) {
         complete = 1; // all 16 segments
     } else if (consecutive >= ELM_MIN_SEGMENTS) {
-        // Check if there's a gap after our consecutive run — this means
+        // Check if there's a gap after our consecutive run â€” this means
         // we likely have everything before the gap
         int has_later = 0;
         for (int i = consecutive; i < ELM_MAX_SEGMENTS; i++) {
@@ -630,7 +634,7 @@ void elmPrintPartial(struct elm_state *state, uint64_t now) {
             for (int s = 0; s < ELM_MAX_SEGMENTS; s++) {
                 if (e->segments_mask & (1 << s)) {
                     for (int b = 0; b < ELM_SEGMENT_SIZE; b++) {
-                        unsigned char c = e->data[s][b];
+                        uint8_t c = e->data[s][b];
                         fputc((c >= 0x20 && c < 0x7f) ? c : '.', stderr);
                     }
                 } else {

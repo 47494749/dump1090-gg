@@ -20,11 +20,19 @@
 #ifndef DUMP1090_DEMOD_2400_H
 #define DUMP1090_DEMOD_2400_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 struct mag_buf;
 
 void demodulate2400(struct mag_buf *mag);
 void demodulate2400AC(struct mag_buf *mag);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

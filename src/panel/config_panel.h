@@ -10,6 +10,10 @@
 #ifndef CONFIG_PANEL_H
 #define CONFIG_PANEL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -17,7 +21,7 @@
 #define PANEL_DEFAULT_PORT    8888
 #define PANEL_LOG_LINES       2000
 #define PANEL_LOG_LINE_LEN    256
-#define PANEL_MSG_LINES       1500
+#define PANEL_MSG_LINES       10000
 #define PANEL_MSG_LINE_LEN    256
 #define PANEL_HTML_DIR        "/usr/share/dump1090-gg/panel"
 #define PANEL_CONF_PATH       "/etc/dump1090-gg/panel.conf"
@@ -74,5 +78,9 @@ void panelLoadBeastFeedState(void);
 
 // Probe and cache tuner types for all RTL-SDR devices (call before any device is opened)
 void panelProbeAllTuners(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // CONFIG_PANEL_H

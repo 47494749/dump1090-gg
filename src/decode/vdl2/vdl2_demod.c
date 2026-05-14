@@ -22,6 +22,7 @@
 #include <math.h>
 #include <complex.h>
 #include "vdl2_demod.h"
+#include "../acars/acars_label.h"
 
 // ======================== Constants ========================
 
@@ -157,7 +158,7 @@ struct vdl2_state *vdl2_create(const vdl2_config_t *config)
     // For simplicity, use a block of VDL2_DECIM samples and repeat
     double f_offset = (config->channel_freqs[0] - config->center_freq);
     s->mixer_len = VDL2_DECIM;
-    s->mixer_lo = calloc((unsigned)s->mixer_len, sizeof(float complex));
+    s->mixer_lo = calloc((uint32_t)s->mixer_len, sizeof(float complex));
     if (!s->mixer_lo) { free(s); return NULL; }
 
     for (int k = 0; k < s->mixer_len; k++) {
@@ -192,6 +193,144 @@ void vdl2_destroy(struct vdl2_state *state)
 void vdl2_get_stats(struct vdl2_state *state, vdl2_stats_t *stats)
 {
     *stats = state->stats;
+}
+
+static void vdl2_set_hex_summary(vdl2_msg_t *msg, const uint8_t *info, int info_len)
+{
+    int tlen = 0;
+
+    for (int i = 0; i < info_len && tlen < VDL2_MAX_MSG_LEN - 3; i++) {
+        int n = snprintf(msg->text + tlen, (uint32_t)(VDL2_MAX_MSG_LEN - tlen),
+                         "%02X ", info[i]);
+        if (n > 0)
+            tlen += n;
+    }
+
+    msg->text[tlen] = '\0';
+    msg->text_len = tlen;
+}
+
+static void vdl2_format_hex_bytes(char *dst, size_t dst_size,
+                                  const uint8_t *src, int len)
+{
+    int pos = 0;
+
+    if (dst_size == 0)
+        return;
+
+    dst[0] = '\0';
+    for (int i = 0; i < len && pos < (int)dst_size - 1; i++) {
+        int n = snprintf(dst + pos, dst_size - (size_t)pos,
+                         "%s%02X", i == 0 ? "" : ":", src[i]);
+        if (n <= 0 || pos + n >= (int)dst_size)
+            break;
+        pos += n;
+    }
+}
+
+static bool vdl2_describe_xid(vdl2_msg_t *msg, const uint8_t *info, int info_len)
+{
+    uint16_t group_len;
+    int params_end;
+    int pos;
+    int count = 0;
+    int out = 0;
+
+    if (info_len < 4)
+        return false;
+
+    group_len = (uint16_t)(((uint16_t)info[2] << 8) | info[3]);
+    params_end = 4 + group_len;
+    if (params_end > info_len)
+        params_end = info_len;
+
+    out = snprintf(msg->text, sizeof(msg->text),
+                   "XID fmt=0x%02X group=0x%02X len=%u",
+                   info[0], info[1], group_len);
+    if (out < 0)
+        out = 0;
+    if (out >= (int)sizeof(msg->text))
+        out = (int)sizeof(msg->text) - 1;
+
+    pos = 4;
+    while (pos + 2 <= params_end && out < (int)sizeof(msg->text) - 1) {
+        uint8_t param_id = info[pos++];
+        uint8_t param_len = info[pos++];
+        int n;
+
+        if (pos + param_len > params_end)
+            break;
+
+        n = snprintf(msg->text + out, sizeof(msg->text) - (size_t)out,
+                     "%s0x%02X(%u)", count == 0 ? " params=" : ",",
+                     param_id, param_len);
+        if (n <= 0 || out + n >= (int)sizeof(msg->text))
+            break;
+
+        out += n;
+        pos += param_len;
+        count++;
+    }
+
+    msg->text[out] = '\0';
+    msg->text_len = out;
+    return true;
+}
+
+static bool vdl2_describe_clnp(vdl2_msg_t *msg, const uint8_t *info, int info_len)
+{
+    uint8_t header_len;
+    uint8_t version;
+    uint8_t lifetime;
+    uint8_t pdu_type;
+    uint16_t pdu_len;
+    uint16_t checksum;
+    uint8_t dst_len;
+    uint8_t src_len;
+    int pos;
+    char dst_nsap[64];
+    char src_nsap[64];
+    int out;
+
+    if (info_len < 10 || info[0] != 0x81)
+        return false;
+
+    header_len = info[1];
+    version = info[2];
+    lifetime = info[3];
+    pdu_type = info[4];
+    pdu_len = (uint16_t)(((uint16_t)info[5] << 8) | info[6]);
+    checksum = (uint16_t)(((uint16_t)info[7] << 8) | info[8]);
+
+    pos = 9;
+    if (pos >= info_len)
+        return false;
+
+    dst_len = info[pos++];
+    if (pos + dst_len > info_len)
+        return false;
+    vdl2_format_hex_bytes(dst_nsap, sizeof(dst_nsap), info + pos, dst_len);
+    pos += dst_len;
+
+    if (pos >= info_len)
+        return false;
+
+    src_len = info[pos++];
+    if (pos + src_len > info_len)
+        return false;
+    vdl2_format_hex_bytes(src_nsap, sizeof(src_nsap), info + pos, src_len);
+
+    out = snprintf(msg->text, sizeof(msg->text),
+                   "CLNP hdr=%u ver=%u ttl=%u type=0x%02X len=%u cksum=0x%04X dst=%s src=%s",
+                   header_len, version, lifetime, pdu_type,
+                   pdu_len, checksum, dst_nsap, src_nsap);
+    if (out < 0)
+        out = 0;
+    if (out >= (int)sizeof(msg->text))
+        out = (int)sizeof(msg->text) - 1;
+    msg->text[out] = '\0';
+    msg->text_len = out;
+    return true;
 }
 
 // ======================== ACARS extraction from AVLC ========================
@@ -240,12 +379,34 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
 
     // Determine frame type from control byte
     uint8_t ctrl = frame[info_start - 1];
-    if ((ctrl & 0x01) == 0)
+    if ((ctrl & 0x01) == 0) {
+        // Information frame
         snprintf(msg.frame_type, sizeof(msg.frame_type), "I");
-    else if ((ctrl & 0x03) == 0x01)
-        snprintf(msg.frame_type, sizeof(msg.frame_type), "S");
-    else
-        snprintf(msg.frame_type, sizeof(msg.frame_type), "U");
+        msg.frame_subtype = VDL2_FRAME_I;
+    } else if ((ctrl & 0x03) == 0x01) {
+        // Supervisory frame
+        uint8_t ss = (ctrl >> 2) & 0x03;
+        switch (ss) {
+        case 0: snprintf(msg.frame_type, sizeof(msg.frame_type), "S-RR");   msg.frame_subtype = VDL2_FRAME_S_RR; break;
+        case 1: snprintf(msg.frame_type, sizeof(msg.frame_type), "S-RNR");  msg.frame_subtype = VDL2_FRAME_S_RNR; break;
+        case 2: snprintf(msg.frame_type, sizeof(msg.frame_type), "S-REJ");  msg.frame_subtype = VDL2_FRAME_S_REJ; break;
+        case 3: snprintf(msg.frame_type, sizeof(msg.frame_type), "S-SREJ"); msg.frame_subtype = VDL2_FRAME_S_SREJ; break;
+        }
+    } else {
+        // Unnumbered frame
+        uint8_t mmm = ((ctrl >> 2) & 0x03) | ((ctrl >> 3) & 0x1C);
+        switch (mmm) {
+        case 0x07: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-SABM"); msg.frame_subtype = VDL2_FRAME_U_SABM; break;
+        case 0x08: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-DISC"); msg.frame_subtype = VDL2_FRAME_U_DISC; break;
+        case 0x03: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-DM");   msg.frame_subtype = VDL2_FRAME_U_DM; break;
+        case 0x0C: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-UA");   msg.frame_subtype = VDL2_FRAME_U_UA; break;
+        case 0x11: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-FRMR"); msg.frame_subtype = VDL2_FRAME_U_FRMR; break;
+        case 0x17: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-XID");  msg.frame_subtype = VDL2_FRAME_U_XID; break;
+        case 0x00: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-UI");   msg.frame_subtype = VDL2_FRAME_U_UI; break;
+        case 0x1C: snprintf(msg.frame_type, sizeof(msg.frame_type), "U-TEST"); msg.frame_subtype = VDL2_FRAME_U_TEST; break;
+        default:   snprintf(msg.frame_type, sizeof(msg.frame_type), "U-?%02X", mmm); msg.frame_subtype = VDL2_FRAME_UNKNOWN; break;
+        }
+    }
 
     // Try to extract ACARS fields
     // Look for SOH (0x01) marker
@@ -259,6 +420,8 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
 
     if (acars_start >= 0 && acars_start + 12 < info_len) {
         msg.has_acars = true;
+        msg.proto = VDL2_PROTO_ACARS;
+        msg.proto_name = "ACARS";
         // Standard ACARS format after SOH
         int p = acars_start;
 
@@ -292,16 +455,57 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
         }
         msg.text[tlen] = '\0';
         msg.text_len = tlen;
+
+        // Label semantic lookup for VDL2-extracted ACARS
+        const acars_label_info_t *linfo = acars_label_lookup(msg.label);
+        msg.label_description = linfo->description;
+        msg.label_category = (int)linfo->category;
     } else {
-        // No ACARS structure found, dump raw info as hex summary
-        int tlen = 0;
-        for (int i = 0; i < info_len && tlen < VDL2_MAX_MSG_LEN - 3; i++) {
-            int n = snprintf(msg.text + tlen, (unsigned)(VDL2_MAX_MSG_LEN - tlen),
-                             "%02X ", info[i]);
-            if (n > 0) tlen += n;
+        // No ACARS structure found — identify upper-layer protocol
+        msg.has_acars = false;
+
+        // Check for XID (exchange identification) frames
+        if (msg.frame_subtype == VDL2_FRAME_U_XID) {
+            msg.proto = VDL2_PROTO_XID;
+            msg.proto_name = "XID";
+            if (!vdl2_describe_xid(&msg, info, info_len))
+                vdl2_set_hex_summary(&msg, info, info_len);
         }
-        msg.text[tlen] = '\0';
-        msg.text_len = tlen;
+        // Check for ISO 8208 / X.25 (first byte: GFI + logical channel group)
+        else if (info_len >= 3 && (info[0] & 0xF0) == 0x10) {
+            // General Format Identifier = 0001 (Modulo 8)
+            msg.proto = VDL2_PROTO_ISO8208;
+            msg.proto_name = "ISO8208/X.25";
+        }
+        // Check for CLNP (ISO 8473): Network Layer Protocol Identifier = 0x81
+        else if (info_len >= 4 && info[0] == 0x81) {
+            msg.proto = VDL2_PROTO_CLNP;
+            msg.proto_name = "CLNP/ATN";
+            if (!vdl2_describe_clnp(&msg, info, info_len))
+                vdl2_set_hex_summary(&msg, info, info_len);
+        }
+        // Check for IDRP: NLPI = 0x85
+        else if (info_len >= 4 && info[0] == 0x85) {
+            msg.proto = VDL2_PROTO_IDRP;
+            msg.proto_name = "IDRP";
+        }
+        // Check for ES-IS: NLPI = 0x82
+        else if (info_len >= 4 && info[0] == 0x82) {
+            msg.proto = VDL2_PROTO_CLNP;
+            msg.proto_name = "ES-IS/ATN";
+        }
+        // Check for SNDCF: first byte = 0xC0..0xCF
+        else if (info_len >= 1 && (info[0] & 0xF0) == 0xC0) {
+            msg.proto = VDL2_PROTO_SNDCF;
+            msg.proto_name = "SNDCF";
+        }
+        else {
+            msg.proto = VDL2_PROTO_UNKNOWN;
+            msg.proto_name = "Unknown";
+        }
+
+        if (msg.text_len == 0)
+            vdl2_set_hex_summary(&msg, info, info_len);
     }
 
     state->stats.messages_decoded++;
@@ -347,6 +551,7 @@ static void vdl2_process_bit(struct vdl2_state *state, int bit)
         // Start new frame
         state->rx_state = VDL2_SYNC;
         state->frame_len = 0;
+        state->frame_buf[0] = 0;
         state->frame_bit_idx = 0;
         state->ones_count = 0;
         state->bit_count = 0;
@@ -355,22 +560,23 @@ static void vdl2_process_bit(struct vdl2_state *state, int bit)
 
     if (state->rx_state != VDL2_SYNC) return;
 
+    // Bit unstuffing: after 5 consecutive 1s, the next 0 is a stuff bit to remove
+    if (state->ones_count == 5 && !bit) {
+        state->ones_count = 0;
+        return;  // Remove stuffed 0
+    }
+
     // Check for abort (7+ consecutive 1s)
     if (bit) {
         state->ones_count++;
         if (state->ones_count >= 7) {
             state->rx_state = VDL2_HUNT;
+            state->ones_count = 0;
             return;
         }
-    }
-
-    // Bit unstuffing: after 5 consecutive 1s, a 0 is stuffed and should be removed
-    if (state->ones_count == 5) {
+    } else {
         state->ones_count = 0;
-        if (!bit) return;  // Remove stuffed 0
-        // 6 consecutive 1s: could be flag or abort, handled above
     }
-    if (!bit) state->ones_count = 0;
 
     // Assemble byte
     if (state->frame_len < VDL2_MAX_FRAME_LEN) {
@@ -418,13 +624,13 @@ static void vdl2_process_symbol(struct vdl2_state *state, float complex sym)
 
 // ======================== IQ Processing ========================
 
-void vdl2_process(struct vdl2_state *state, const uint8_t *iq_data, unsigned len)
+void vdl2_process(struct vdl2_state *state, const uint8_t *iq_data, uint32_t len)
 {
-    unsigned samples = len / 2;
+    uint32_t samples = len / 2;
 
     state->stats.samples_processed += samples;
 
-    for (unsigned i = 0; i < samples; i++) {
+    for (uint32_t i = 0; i < samples; i++) {
         // Convert UC8 to float complex
         float r = (float)iq_data[i * 2]     - 127.5f;
         float g = (float)iq_data[i * 2 + 1] - 127.5f;

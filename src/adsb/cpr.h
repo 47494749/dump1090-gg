@@ -20,6 +20,10 @@
 #ifndef DUMP1090_CPR_H
 #define DUMP1090_CPR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int decodeCPRairborne(int even_cprlat, int even_cprlon,
                       int odd_cprlat, int odd_cprlon,
                       int fflag,
@@ -35,5 +39,9 @@ int decodeCPRrelative(double reflat, double reflon,
                       int cprlat, int cprlon,
                       int fflag, int surface,
                       double *out_lat, double *out_lon);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

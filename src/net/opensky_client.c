@@ -50,7 +50,7 @@
 // ===================== Global config =====================
 
 struct opensky_config OpenSkyConfig;
-struct feeder_msg_queue opensky_queue;
+msg_queue_t opensky_queue;
 
 // ===================== Helpers =====================
 
@@ -106,7 +106,7 @@ static int opensky_tcp_connect(const char *host, int port) {
 
 // Write all bytes to fd (blocking-style with select)
 static int opensky_write_all(int fd, const void *buf, size_t len) {
-    const unsigned char *p = buf;
+    const uint8_t *p = buf;
     size_t remaining = len;
 
     while (remaining > 0) {
@@ -132,7 +132,7 @@ static int opensky_write_all(int fd, const void *buf, size_t len) {
 
 // Read exactly n bytes from fd (with timeout)
 static int opensky_read_all(int fd, void *buf, size_t len, int timeout_sec) {
-    unsigned char *p = buf;
+    uint8_t *p = buf;
     size_t remaining = len;
 
     while (remaining > 0) {
@@ -152,7 +152,7 @@ static int opensky_read_all(int fd, void *buf, size_t len, int timeout_sec) {
 }
 
 // Store uint32 big-endian
-static void put_be32(unsigned char *p, uint32_t v) {
+static void put_be32(uint8_t *p, uint32_t v) {
     p[0] = (v >> 24) & 0xFF;
     p[1] = (v >> 16) & 0xFF;
     p[2] = (v >>  8) & 0xFF;
@@ -160,13 +160,13 @@ static void put_be32(unsigned char *p, uint32_t v) {
 }
 
 // Read uint32 big-endian
-static uint32_t get_be32(const unsigned char *p) {
+static uint32_t get_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
 }
 
 // Store IEEE 754 double big-endian
-static void put_be_double(unsigned char *p, double v) {
+static void put_be_double(uint8_t *p, double v) {
     union { double d; uint64_t u; } conv;
     conv.d = v;
     p[0] = (conv.u >> 56) & 0xFF;
@@ -214,7 +214,7 @@ static void opensky_save_serial(const char *path, int32_t serial) {
 
 // Send LOGIN frame: 1A 41 + device_type(4) + major(4) + minor(4) + patch(4) = 18 bytes
 static int opensky_send_login(int fd) {
-    unsigned char buf[18];
+    uint8_t buf[18];
     buf[0] = OPENSKY_FRAME_SYNC;
     buf[1] = OPENSKY_TYPE_LOGIN;
     put_be32(buf + 2,  OPENSKY_DEVICE_TYPE);
@@ -226,7 +226,7 @@ static int opensky_send_login(int fd) {
 
 // Send SERIAL frame: 1A 35 + serial(4) = 6 bytes
 static int opensky_send_serial(int fd, int32_t serial) {
-    unsigned char buf[6];
+    uint8_t buf[6];
     buf[0] = OPENSKY_FRAME_SYNC;
     buf[1] = OPENSKY_TYPE_SERIAL;
     put_be32(buf + 2, (uint32_t)serial);
@@ -235,7 +235,7 @@ static int opensky_send_serial(int fd, int32_t serial) {
 
 // Send SERIAL_REQ frame: 1A 42 = 2 bytes
 static int opensky_send_serial_req(int fd) {
-    unsigned char buf[2];
+    uint8_t buf[2];
     buf[0] = OPENSKY_FRAME_SYNC;
     buf[1] = OPENSKY_TYPE_SERIAL_REQ;
     return opensky_write_all(fd, buf, 2);
@@ -243,7 +243,7 @@ static int opensky_send_serial_req(int fd) {
 
 // Read server serial response: TLV header (type=2, len=2) then payload
 static int32_t opensky_recv_serial(int fd) {
-    unsigned char hdr[4];
+    uint8_t hdr[4];
     if (opensky_read_all(fd, hdr, 4, 60) != 0) {
         fprintf(stderr, "OpenSky: timeout waiting for serial number\n");
         return 0;
@@ -255,7 +255,7 @@ static int32_t opensky_recv_serial(int fd) {
     fprintf(stderr, "OpenSky: server TLV type=%u len=%u\n", type, len);
 
     // Read the payload (len includes the 4-byte header)
-    unsigned char payload[256];
+    uint8_t payload[256];
     uint16_t payload_len = len - 4;
     if (payload_len == 0 || payload_len > sizeof(payload)) {
         fprintf(stderr, "OpenSky: bad TLV payload length %u\n", payload_len);
@@ -276,7 +276,7 @@ static int32_t opensky_recv_serial(int fd) {
 
 // Send GPS frame: 1A 37 + lat(8) + lon(8) + alt(8) = 26 bytes
 static int opensky_send_gps(int fd, double lat, double lon, double alt) {
-    unsigned char buf[26];
+    uint8_t buf[26];
     buf[0] = OPENSKY_FRAME_SYNC;
     buf[1] = OPENSKY_TYPE_GPS;
     put_be_double(buf + 2,  lat);
@@ -287,7 +287,7 @@ static int opensky_send_gps(int fd, double lat, double lon, double alt) {
 
 // Send USERNAME frame: 1A 43 + username (40 bytes, null-padded)
 static int opensky_send_username(int fd, const char *username) {
-    unsigned char buf[42];
+    uint8_t buf[42];
     buf[0] = OPENSKY_FRAME_SYNC;
     buf[1] = OPENSKY_TYPE_USERNAME;
     memset(buf + 2, 0, 40);
@@ -299,9 +299,9 @@ static int opensky_send_username(int fd, const char *username) {
 
 // ===================== Beast binary encoding (same as feeder_thread.c) =====================
 
-static int opensky_encode_beast(const struct modesMessage *mm, unsigned char *buf, int bufsize) {
-    unsigned char *p = buf;
-    unsigned char *end = buf + bufsize;
+static int opensky_encode_beast(const struct modesMessage *mm, uint8_t *buf, int bufsize) {
+    uint8_t *p = buf;
+    uint8_t *end = buf + bufsize;
     int msgLen = mm->msgbits / 8;
 
     if (msgLen != MODES_SHORT_MSG_BYTES && msgLen != MODES_LONG_MSG_BYTES && msgLen != MODEAC_MSG_BYTES)
@@ -311,7 +311,7 @@ static int opensky_encode_beast(const struct modesMessage *mm, unsigned char *bu
         return 0;
 
 #define BEAST_PUSH(b) do { \
-    unsigned char _b = (unsigned char)(b); \
+    uint8_t _b = (uint8_t)(b); \
     if (p >= end) return 0; \
     *p++ = _b; \
     if (_b == 0x1a) { if (p >= end) return 0; *p++ = 0x1a; } \
@@ -353,14 +353,16 @@ void openskyClientInit(void) {
     OpenSkyConfig.port = 10004;
     strncpy(OpenSkyConfig.serial_file, "/var/lib/dump1090-gg/opensky-serial.conf",
             sizeof(OpenSkyConfig.serial_file) - 1);
+    if (!opensky_queue)
+        opensky_queue = msg_queue_create(sizeof(struct modesMessage), 4096);
 }
 
 void *opensky_thread_entry(void *arg) {
     MODES_NOTUSED(arg);
 
     struct modesMessage mm;
-    unsigned char beast_buf[256];
-    static const unsigned char heartbeat[] = { 0x1a, '1', 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t beast_buf[256];
+    static const uint8_t heartbeat[] = { 0x1a, '1', 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
     int fd = -1;
     uint64_t next_reconnect = 0;
@@ -372,7 +374,7 @@ void *opensky_thread_entry(void *arg) {
 
         // When internet is offline, drain queue and close connection
         if (!atomic_load(&net_available)) {
-            while (feeder_queue_pop(&opensky_queue, &mm)) { /* discard */ }
+            while (msg_queue_pop(opensky_queue, &mm)) { /* discard */ }
             if (fd >= 0) {
                 close(fd);
                 fd = -1;
@@ -472,7 +474,7 @@ void *opensky_thread_entry(void *arg) {
         if (fd >= 0 && logged_in) {
             int sent = 0;
 
-            while (feeder_queue_pop(&opensky_queue, &mm)) {
+            while (msg_queue_pop(opensky_queue, &mm)) {
                 int len = opensky_encode_beast(&mm, beast_buf, sizeof(beast_buf));
                 if (len <= 0) continue;
 

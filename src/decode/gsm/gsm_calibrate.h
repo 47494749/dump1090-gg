@@ -7,6 +7,10 @@
 #ifndef GSM_CALIBRATE_H
 #define GSM_CALIBRATE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "sdr_backend.h"
 
 typedef struct {
@@ -26,5 +30,9 @@ typedef struct {
 // backend:     which backend library to use (AUTO/RTLSDR/SDRGG)
 gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_db,
                                 sdr_backend_type_t backend);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

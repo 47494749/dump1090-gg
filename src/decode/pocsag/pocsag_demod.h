@@ -13,6 +13,10 @@
 #ifndef POCSAG_DEMOD_H
 #define POCSAG_DEMOD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -20,9 +24,10 @@
 
 #define POCSAG_SYNC_WORD        0x7CD215D8u
 #define POCSAG_IDLE_WORD        0x7A89C197u
-#define POCSAG_BATCH_WORDS      16       // 1 sync + 8 pairs of 2 codewords
+#define POCSAG_BATCH_WORDS      17       // 1 sync + 16 data codewords
 #define POCSAG_MSG_MAX_LEN      256      // max decoded message text length
-#define POCSAG_PREAMBLE_BITS    576      // minimum preamble bits (standard)
+#define POCSAG_PREAMBLE_BITS    576      // minimum preamble bits (ITU-R M.584)
+#define POCSAG_PREAMBLE_MIN     16       // practical minimum to gate sync acceptance
 
 #define POCSAG_MAX_CHANNELS     8        // max simultaneous POCSAG channels
 #define POCSAG_SAMPLE_RATE      2400000  // wideband sample rate for multi-channel
@@ -87,9 +92,13 @@ struct pocsag_state *pocsag_create(const pocsag_config_t *cfg);
 void pocsag_destroy(struct pocsag_state *st);
 
 // Process a block of IQ samples (interleaved uint8_t I,Q pairs).
-void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, unsigned len);
+void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, uint32_t len);
 
 // Get decoder statistics.
 void pocsag_get_stats(const struct pocsag_state *st, pocsag_stats_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // POCSAG_DEMOD_H

@@ -8,6 +8,10 @@
 #ifndef PIAWARE_CLIENT_H
 #define PIAWARE_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -69,5 +73,9 @@ extern piaware_client_t PiawareClient;
 void piawareClientInit(void);
 void piawareClientPeriodicWork(void);
 void piawareClientCleanup(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

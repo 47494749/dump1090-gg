@@ -12,6 +12,10 @@
 #ifndef OGN_CLIENT_H
 #define OGN_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include "flarm_decode.h"
 
@@ -27,5 +31,9 @@ void ognClientSubmit(const flarm_message_t *msg);
 
 // Cleanup OGN client resources
 void ognClientCleanup(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // OGN_CLIENT_H

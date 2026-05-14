@@ -12,6 +12,7 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include "dispatcher.h"
 #include "feeder_thread.h"
 #include "fa_mlat.h"
 #include "opensky_client.h"
@@ -25,6 +26,10 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/md5.h>
+#include <string>
+#include <string_view>
+
+static adsb_queue_handle_t feeder_adsb_queue = NULL;
 
 // ===================== Globals =====================
 
@@ -37,10 +42,10 @@ static pthread_t beast_feed_thread;
 static pthread_t opensky_thread;
 static pthread_t sondehub_thread;
 
-static struct feeder_msg_queue mlat_queue;
-static struct feeder_msg_queue beast_feed_queue;
-struct feeder_msg_queue mlat_inject_queue;
-struct feeder_msg_queue fa_mlat_queue;
+static msg_queue_t mlat_queue;
+static msg_queue_t beast_feed_queue;
+msg_queue_t mlat_inject_queue;
+msg_queue_t fa_mlat_queue;
 
 atomic_int feeders_running;
 atomic_int net_available = 1;
@@ -49,9 +54,9 @@ atomic_int net_available = 1;
 
 // Encode a modesMessage as Beast binary (verbatim mode).
 // buf must be at least 46 bytes.
-static int encode_beast_binary(const struct modesMessage *mm, unsigned char *buf, int bufsize) {
-    unsigned char *p = buf;
-    unsigned char *end = buf + bufsize;
+static int encode_beast_binary(const struct modesMessage *mm, uint8_t *buf, int bufsize) {
+    uint8_t *p = buf;
+    uint8_t *end = buf + bufsize;
     int msgLen = mm->msgbits / 8;
 
     if (msgLen != MODES_SHORT_MSG_BYTES && msgLen != MODES_LONG_MSG_BYTES && msgLen != MODEAC_MSG_BYTES)
@@ -61,7 +66,7 @@ static int encode_beast_binary(const struct modesMessage *mm, unsigned char *buf
         return 0;
 
 #define BEAST_PUSH(b) do { \
-    unsigned char _b = (unsigned char)(b); \
+    uint8_t _b = (uint8_t)(b); \
     if (p >= end) return 0; \
     *p++ = _b; \
     if (_b == 0x1a) { if (p >= end) return 0; *p++ = 0x1a; } \
@@ -98,16 +103,14 @@ static int encode_beast_binary(const struct modesMessage *mm, unsigned char *buf
 // ===================== TCP connect helper =====================
 
 static int feeder_tcp_connect(const char *host, int port) {
-    struct addrinfo hints, *res, *rp;
-    char port_str[16];
+    struct addrinfo hints = {}, *res, *rp;
     int fd = -1;
 
-    memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    snprintf(port_str, sizeof(port_str), "%d", port);
-    if (getaddrinfo(host, port_str, &hints, &res) != 0)
+    std::string port_str = std::to_string(port);
+    if (getaddrinfo(host, port_str.c_str(), &hints, &res) != 0)
         return -1;
 
     for (rp = res; rp; rp = rp->ai_next) {
@@ -150,11 +153,11 @@ static int feeder_tcp_connect(const char *host, int port) {
 
 // ===================== Beast feed thread (multi-destination) =====================
 
-static const unsigned char beast_heartbeat[] = { 0x1a, '1', 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static const uint8_t beast_heartbeat[] = { 0x1a, '1', 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 // Encode a modesMessage as Raw ASCII hex: *<hex>;\n
 // Returns length, or 0 if not encodable.
-static int encode_raw_ascii(const struct modesMessage *mm, unsigned char *buf, int bufsize) {
+static int encode_raw_ascii(const struct modesMessage *mm, uint8_t *buf, int bufsize) {
     int msgLen = mm->msgbits / 8;
     if (msgLen != MODES_SHORT_MSG_BYTES && msgLen != MODES_LONG_MSG_BYTES)
         return 0;
@@ -166,7 +169,7 @@ static int encode_raw_ascii(const struct modesMessage *mm, unsigned char *buf, i
     if (needed >= bufsize) return 0;
 
     static const char hex[] = "0123456789ABCDEF";
-    unsigned char *p = buf;
+    uint8_t *p = buf;
     *p++ = '*';
     for (int i = 0; i < msgLen; i++) {
         *p++ = hex[(mm->verbatim[i] >> 4) & 0x0F];
@@ -179,14 +182,14 @@ static int encode_raw_ascii(const struct modesMessage *mm, unsigned char *buf, i
 
 // Encode a modesMessage as SBS/BaseStation CSV line
 // Format: MSG,<type>,1,1,<ICAO>,1,<date>,<time>,<date>,<time>,<cs>,<alt>,<gs>,<trk>,<lat>,<lon>,<vr>,<sq>,,,,,\r\n
-// Returns length, or 0 if not encodable.
-static int encode_sbs_line(const struct modesMessage *mm, char *buf, int bufsize) {
+// Returns SBS/BaseStation CSV line, or empty string if not encodable.
+static std::string encode_sbs_line(const struct modesMessage *mm) {
     if (mm->source == SOURCE_MLAT && !Modes.forward_mlat)
-        return 0;
+        return {};
     if (mm->correctedbits >= 2)
-        return 0;
+        return {};
     if (mm->addr & MODES_NON_ICAO_ADDRESS)
-        return 0;
+        return {};
 
     // Determine SBS message type from Mode S message type
     int msgType;
@@ -200,18 +203,18 @@ static int encode_sbs_line(const struct modesMessage *mm, char *buf, int bufsize
         else if (mm->metype >= 5 && mm->metype <= 8)   msgType = 2;
         else if (mm->metype == 19)                      msgType = 4;
         else if ((mm->metype >= 9 && mm->metype <= 18) || (mm->metype >= 20 && mm->metype <= 22)) msgType = 3;
-        else return 0;
+        else return {};
         break;
-    default: return 0;
+    default: return {};
     }
 
-    char *p = buf;
-    char *end = buf + bufsize - 2; // reserve for \r\n
+    char tmp[128];
+    std::string s;
+    s.reserve(256);
 
     // Fields 1-6: MSG,type,1,1,ICAO,1,
-    int n = snprintf(p, (size_t)(end - p), "MSG,%d,1,1,%06X,1,", msgType, mm->addr);
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    snprintf(tmp, sizeof(tmp), "MSG,%d,1,1,%06X,1,", msgType, mm->addr);
+    s += tmp;
 
     // Fields 7-10: dates and times
     struct timespec now;
@@ -221,91 +224,68 @@ static int encode_sbs_line(const struct modesMessage *mm, char *buf, int bufsize
     time_t rx = (time_t)(mm->sysTimestampMsg / 1000);
     localtime_r(&rx, &stRx);
 
-    n = snprintf(p, (size_t)(end - p),
+    snprintf(tmp, sizeof(tmp),
         "%04d/%02d/%02d,%02d:%02d:%02d.%03u,%04d/%02d/%02d,%02d:%02d:%02d.%03u",
         stRx.tm_year+1900, stRx.tm_mon+1, stRx.tm_mday,
-        stRx.tm_hour, stRx.tm_min, stRx.tm_sec, (unsigned)(mm->sysTimestampMsg % 1000),
+        stRx.tm_hour, stRx.tm_min, stRx.tm_sec, (uint32_t)(mm->sysTimestampMsg % 1000),
         stNow.tm_year+1900, stNow.tm_mon+1, stNow.tm_mday,
-        stNow.tm_hour, stNow.tm_min, stNow.tm_sec, (unsigned)(now.tv_nsec / 1000000U));
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+        stNow.tm_hour, stNow.tm_min, stNow.tm_sec, (uint32_t)(now.tv_nsec / 1000000U));
+    s += tmp;
 
     // Field 11: callsign
-    if (mm->callsign_valid) { n = snprintf(p, (size_t)(end - p), ",%s", mm->callsign); }
-    else                    { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->callsign_valid) { s += ','; s += mm->callsign; }
+    else                    { s += ','; }
 
     // Field 12: altitude
-    if (mm->altitude_baro_valid)      { n = snprintf(p, (size_t)(end - p), ",%d", mm->altitude_baro); }
-    else if (mm->altitude_geom_valid) { n = snprintf(p, (size_t)(end - p), ",%d", mm->altitude_geom); }
-    else                              { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->altitude_baro_valid)      { s += ','; s += std::to_string(mm->altitude_baro); }
+    else if (mm->altitude_geom_valid) { s += ','; s += std::to_string(mm->altitude_geom); }
+    else                              { s += ','; }
 
     // Field 13: ground speed
-    if (mm->gs_valid) { n = snprintf(p, (size_t)(end - p), ",%.0f", mm->gs.selected); }
-    else              { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->gs_valid) { snprintf(tmp, sizeof(tmp), ",%.0f", mm->gs.selected); s += tmp; }
+    else              { s += ','; }
 
     // Field 14: track
     if (mm->heading_valid && mm->heading_type == HEADING_GROUND_TRACK) {
-        n = snprintf(p, (size_t)(end - p), ",%.0f", mm->heading);
-    } else { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+        snprintf(tmp, sizeof(tmp), ",%.0f", mm->heading); s += tmp;
+    } else { s += ','; }
 
     // Fields 15-16: lat/lon
-    if (mm->cpr_decoded) { n = snprintf(p, (size_t)(end - p), ",%1.5f,%1.5f", mm->decoded_lat, mm->decoded_lon); }
-    else                 { n = snprintf(p, (size_t)(end - p), ",,"); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->cpr_decoded) { snprintf(tmp, sizeof(tmp), ",%1.5f,%1.5f", mm->decoded_lat, mm->decoded_lon); s += tmp; }
+    else                 { s += ",,"; }
 
     // Field 17: vertical rate
-    if (mm->baro_rate_valid)      { n = snprintf(p, (size_t)(end - p), ",%d", mm->baro_rate); }
-    else if (mm->geom_rate_valid) { n = snprintf(p, (size_t)(end - p), ",%d", mm->geom_rate); }
-    else                          { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->baro_rate_valid)      { s += ','; s += std::to_string(mm->baro_rate); }
+    else if (mm->geom_rate_valid) { s += ','; s += std::to_string(mm->geom_rate); }
+    else                          { s += ','; }
 
     // Field 18: squawk
-    if (mm->squawk_valid) { n = snprintf(p, (size_t)(end - p), ",%04x", mm->squawk); }
-    else                  { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->squawk_valid) { snprintf(tmp, sizeof(tmp), ",%04x", mm->squawk); s += tmp; }
+    else                  { s += ','; }
 
     // Fields 19-20: alert, emergency
-    if (mm->alert_valid) { n = snprintf(p, (size_t)(end - p), ",%d", mm->alert ? -1 : 0); }
-    else                 { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->alert_valid) { s += ','; s += std::to_string(mm->alert ? -1 : 0); }
+    else                 { s += ','; }
 
     if (mm->squawk_valid && (mm->squawk == 0x7500 || mm->squawk == 0x7600 || mm->squawk == 0x7700)) {
-        n = snprintf(p, (size_t)(end - p), ",-1");
+        s += ",-1";
     } else if (mm->squawk_valid) {
-        n = snprintf(p, (size_t)(end - p), ",0");
+        s += ",0";
     } else {
-        n = snprintf(p, (size_t)(end - p), ",");
+        s += ',';
     }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
 
     // Field 21: SPI
-    if (mm->spi_valid) { n = snprintf(p, (size_t)(end - p), ",%d", mm->spi ? -1 : 0); }
-    else               { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->spi_valid) { s += ','; s += std::to_string(mm->spi ? -1 : 0); }
+    else               { s += ','; }
 
     // Field 22: on ground
-    if (mm->airground == AG_GROUND)        { n = snprintf(p, (size_t)(end - p), ",-1"); }
-    else if (mm->airground == AG_AIRBORNE) { n = snprintf(p, (size_t)(end - p), ",0"); }
-    else                                   { n = snprintf(p, (size_t)(end - p), ","); }
-    if (n < 0 || p + n >= end) return 0;
-    p += n;
+    if (mm->airground == AG_GROUND)        { s += ",-1"; }
+    else if (mm->airground == AG_AIRBORNE) { s += ",0"; }
+    else                                   { s += ','; }
 
-    *p++ = '\r'; *p++ = '\n';
-    return (int)(p - buf);
+    s += "\r\n";
+    return s;
 }
 
 struct beast_feed_conn {
@@ -322,65 +302,63 @@ struct beast_feed_conn {
 //  3. sessid = md5(ckey + skey[:-1]) + skey[-1]
 //  4. GET https://www.adsbhub.org/updateip.php?sessid=<sessid>&myip=<ipv4>&myip6=::
 
-// HTTPS GET helper: fetches response body into buf. Returns body length or -1.
-static int https_get(const char *host, const char *path, char *buf, int bufsz) {
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
+// HTTPS GET helper: fetches response body. Returns body string, empty on error.
+static std::string https_get(const char *host, const char *path) {
+    struct addrinfo hints = {}, *res;
     hints.ai_family = AF_INET; // Force IPv4 — ADSBHub server doesn't handle IPv6 ckey updates correctly
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, "443", &hints, &res) != 0) return -1;
+    if (getaddrinfo(host, "443", &hints, &res) != 0) {
+        fprintf(stderr, "ADSBHub https_get: DNS failed for %s\n", host);
+        return {};
+    }
 
     int fd = socket(res->ai_family, SOCK_STREAM, 0);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
+    if (fd < 0) { freeaddrinfo(res); return {}; }
 
     struct timeval tv = {10, 0};
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        freeaddrinfo(res); close(fd); return -1;
+        fprintf(stderr, "ADSBHub https_get: connect failed for %s: %s\n", host, strerror(errno));
+        freeaddrinfo(res); close(fd); return {};
     }
     freeaddrinfo(res);
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-    if (!ctx) { close(fd); return -1; }
-    // Force HTTP/1.1 via ALPN — without this, servers may negotiate h2 (HTTP/2 binary framing)
-    // which our plain-text HTTP/1.0 parser cannot handle.
-    static const unsigned char alpn[] = { 8, 'h','t','t','p','/','1','.','1' };
+    if (!ctx) { close(fd); return {}; }
+    SSL_CTX_set_default_verify_paths(ctx);
+    // Don't verify peer certs — some ADSBHub endpoints have cert issues
+    // and this is only used for non-sensitive IP lookups / key exchange
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    static const uint8_t alpn[] = { 8, 'h','t','t','p','/','1','.','1' };
     SSL_CTX_set_alpn_protos(ctx, alpn, sizeof(alpn));
     SSL *ssl = SSL_new(ctx);
-    if (!ssl) { SSL_CTX_free(ctx); close(fd); return -1; }
+    if (!ssl) { SSL_CTX_free(ctx); close(fd); return {}; }
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host);
+    SSL_set1_host(ssl, host);
 
     if (SSL_connect(ssl) <= 0) {
-        SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return -1;
+        unsigned long err = ERR_peek_last_error();
+        fprintf(stderr, "ADSBHub https_get: SSL_connect failed for %s: %s\n",
+                host, ERR_error_string(err, NULL));
+        SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return {};
     }
 
-    char req[1024];
-    int reqlen = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Wget/1.21\r\nConnection: close\r\n\r\n", path, host);
+    std::string req = "GET " + std::string(path) + " HTTP/1.0\r\nHost: " + host +
+                      "\r\nUser-Agent: Wget/1.21\r\nConnection: close\r\n\r\n";
 
-    int result = -1;
-    if (SSL_write(ssl, req, reqlen) > 0) {
-        char resp[4096];
-        int total = 0, r;
-        while ((r = SSL_read(ssl, resp + total, (int)sizeof(resp) - total - 1)) > 0) {
-            total += r;
-            if (total >= (int)sizeof(resp) - 1) break;
-        }
-        resp[total] = '\0';
-        // Find body after \r\n\r\n
-        char *body = strstr(resp, "\r\n\r\n");
-        if (body) {
-            body += 4;
-            int bodylen = total - (int)(body - resp);
-            if (bodylen > 0 && bodylen < bufsz) {
-                memcpy(buf, body, bodylen);
-                buf[bodylen] = '\0';
-                result = bodylen;
-            }
-        }
+    std::string result;
+    if (SSL_write(ssl, req.data(), (int)req.size()) > 0) {
+        char buf[4096];
+        std::string resp;
+        int r;
+        while ((r = SSL_read(ssl, buf, sizeof(buf))) > 0)
+            resp.append(buf, r);
+        auto pos = resp.find("\r\n\r\n");
+        if (pos != std::string::npos)
+            result = resp.substr(pos + 4);
     }
 
     SSL_shutdown(ssl);
@@ -390,22 +368,21 @@ static int https_get(const char *host, const char *path, char *buf, int bufsz) {
     return result;
 }
 
-static void url_encode(const char *src, char *dst, size_t dst_size) {
+static std::string url_encode(const std::string &src) {
     static const char hex[] = "0123456789ABCDEF";
-    char *end = dst + dst_size - 1;
-    while (*src && dst < end) {
-        unsigned char c = (unsigned char)*src;
+    std::string dst;
+    dst.reserve(src.size() * 3);
+    for (unsigned char c : src) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
             (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            *dst++ = c;
-        } else if (dst + 3 <= end) {
-            *dst++ = '%';
-            *dst++ = hex[c >> 4];
-            *dst++ = hex[c & 0x0f];
-        } else break;
-        src++;
+            dst += static_cast<char>(c);
+        } else {
+            dst += '%';
+            dst += hex[c >> 4];
+            dst += hex[c & 0x0f];
+        }
     }
-    *dst = '\0';
+    return dst;
 }
 
 // ===================== Internet Connectivity Check =====================
@@ -422,8 +399,7 @@ static void url_encode(const char *src, char *dst, size_t dst_size) {
 #endif
 
 static int check_internet(void) {
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
+    struct addrinfo hints = {}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     int rc = getaddrinfo(NET_CHECK_HOST, "443", &hints, &res);
@@ -437,83 +413,66 @@ static int check_internet(void) {
 // Returns 0 on success, -1 on failure
 static int adsbhub_update_ckey(const char *ckey) {
     // Step 1: get my IPv4
-    char myip[64];
-    if (https_get("ip4.adsbhub.org", "/getmyip.php", myip, sizeof(myip)) < 7) {
+    std::string myip = https_get("ip4.adsbhub.org", "/getmyip.php");
+    if (myip.size() < 7) {
         fprintf(stderr, "ADSBHub ckey: failed to get public IP\n");
         return -1;
     }
-    // Strip trailing whitespace
-    int len = (int)strlen(myip);
-    while (len > 0 && (myip[len-1] == '\n' || myip[len-1] == '\r' || myip[len-1] == ' '))
-        myip[--len] = '\0';
-    fprintf(stderr, "ADSBHub ckey: my IP = %s\n", myip);
+    while (!myip.empty() && (myip.back() == '\n' || myip.back() == '\r' || myip.back() == ' '))
+        myip.pop_back();
+    fprintf(stderr, "ADSBHub ckey: my IP = %s\n", myip.c_str());
 
     // Step 2: get server key
-    char skey[128];
-    int skeylen = https_get("www.adsbhub.org", "/key.php", skey, sizeof(skey));
-    fprintf(stderr, "ADSBHub ckey: skey len=%d\n", skeylen);
-    if (skeylen < 33) {
-        fprintf(stderr, "ADSBHub ckey: failed to get server key (len=%d)\n", skeylen);
+    std::string skey = https_get("www.adsbhub.org", "/key.php");
+    fprintf(stderr, "ADSBHub ckey: skey len=%zu\n", skey.size());
+    if (skey.size() < 33) {
+        fprintf(stderr, "ADSBHub ckey: failed to get server key (len=%zu)\n", skey.size());
         return -1;
     }
-    // Strip trailing whitespace
-    while (skeylen > 0 && (skey[skeylen-1] == '\n' || skey[skeylen-1] == '\r' || skey[skeylen-1] == ' '))
-        skey[--skeylen] = '\0';
-    fprintf(stderr, "ADSBHub ckey: skey=%s (len=%d)\n", skey, skeylen);
+    while (!skey.empty() && (skey.back() == '\n' || skey.back() == '\r' || skey.back() == ' '))
+        skey.pop_back();
+    fprintf(stderr, "ADSBHub ckey: skey=%s (len=%zu)\n", skey.c_str(), skey.size());
 
     // Step 3: compute sessid = md5(ckey + skey[:-1]) + skey[-1]
-    char ss = skey[skeylen - 1]; // last char of skey
-    skey[skeylen - 1] = '\0';   // skey without last char
+    char ss = skey.back();
+    std::string concat = std::string(ckey) + skey.substr(0, skey.size() - 1);
 
-    // Concatenate ckey + skey_trimmed
-    char concat[512];
-    int clen = snprintf(concat, sizeof(concat), "%s%s", ckey, skey);
-    if (clen < 0 || clen >= (int)sizeof(concat)) return -1;
+    uint8_t md5_raw[MD5_DIGEST_LENGTH];
+    MD5(reinterpret_cast<const uint8_t *>(concat.data()), concat.size(), md5_raw);
 
-    // MD5
-    unsigned char md5_raw[MD5_DIGEST_LENGTH];
-    MD5((unsigned char *)concat, clen, md5_raw);
-
-    char sessid[64];
-    for (int i = 0; i < MD5_DIGEST_LENGTH; i++)
-        sprintf(sessid + i*2, "%02x", md5_raw[i]);
-    // Append the last char of original skey
-    int slen = (int)strlen(sessid);
-    sessid[slen] = ss;
-    sessid[slen+1] = '\0';
-    fprintf(stderr, "ADSBHub ckey: sessid=%s\n", sessid);
+    static const char hexchars[] = "0123456789abcdef";
+    std::string sessid;
+    sessid.reserve(MD5_DIGEST_LENGTH * 2 + 2);
+    for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
+        sessid += hexchars[md5_raw[i] >> 4];
+        sessid += hexchars[md5_raw[i] & 0x0f];
+    }
+    sessid += ss;
+    fprintf(stderr, "ADSBHub ckey: sessid=%s\n", sessid.c_str());
 
     // Step 3b: get my IPv6 (best-effort, fall back to ::)
-    char myip6[128];
-    strcpy(myip6, "::");
-    int ip6len = https_get("ip6.adsbhub.org", "/getmyip.php", myip6, sizeof(myip6));
-    if (ip6len > 1) {
-        while (ip6len > 0 && (myip6[ip6len-1] == '\n' || myip6[ip6len-1] == '\r' || myip6[ip6len-1] == ' '))
-            myip6[--ip6len] = '\0';
+    std::string myip6 = https_get("ip6.adsbhub.org", "/getmyip.php");
+    if (myip6.size() > 1) {
+        while (!myip6.empty() && (myip6.back() == '\n' || myip6.back() == '\r' || myip6.back() == ' '))
+            myip6.pop_back();
     } else {
-        strcpy(myip6, "::");
+        myip6 = "::";
     }
 
     // Step 4: call updateip.php
-    char myip_enc[128], myip6_enc[256];
-    url_encode(myip, myip_enc, sizeof(myip_enc));
-    url_encode(myip6, myip6_enc, sizeof(myip6_enc));
+    std::string path = "/updateip.php?sessid=" + sessid +
+                       "&myip=" + url_encode(myip) + "&myip6=" + url_encode(myip6);
 
-    char path[512];
-    snprintf(path, sizeof(path), "/updateip.php?sessid=%s&myip=%s&myip6=%s", sessid, myip_enc, myip6_enc);
-
-    char result[256];
-    int rlen = https_get("www.adsbhub.org", path, result, sizeof(result));
-    fprintf(stderr, "ADSBHub ckey: updateip response len=%d\n", rlen);
-    if (rlen > 0) {
-        // Strip trailing whitespace
-        while (rlen > 0 && (result[rlen-1] == '\n' || result[rlen-1] == '\r' || result[rlen-1] == ' '))
-            result[--rlen] = '\0';
-        if (strcmp(result, sessid) == 0) {
-            fprintf(stderr, "ADSBHub ckey: IP update OK (ip=%s, ip6=%s)\n", myip, myip6);
+    std::string result = https_get("www.adsbhub.org", path.c_str());
+    fprintf(stderr, "ADSBHub ckey: updateip response len=%zu\n", result.size());
+    if (!result.empty()) {
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
+            result.pop_back();
+        if (result == sessid) {
+            fprintf(stderr, "ADSBHub ckey: IP update OK (ip=%s, ip6=%s)\n", myip.c_str(), myip6.c_str());
             return 0;
         }
-        fprintf(stderr, "ADSBHub ckey: server returned '%s', expected '%s'\n", result, sessid);
+        fprintf(stderr, "ADSBHub ckey: server returned '%s', expected '%s'\n", result.c_str(), sessid.c_str());
     } else {
         fprintf(stderr, "ADSBHub ckey: updateip request failed\n");
     }
@@ -623,28 +582,27 @@ static void *beast_feed_thread_entry(void *arg) {
 
         // Drain queue, send to all connected feeds
         int sent = 0;
-        while (feeder_queue_pop(&beast_feed_queue, &mm)) {
+        while (msg_queue_pop(beast_feed_queue, &mm)) {
             if (!any_connected) continue; // drain but don't send
 
             // Encode once per format type (lazy)
-            unsigned char beast_buf_enc[256];
+            uint8_t beast_buf_enc[256];
             int beast_len = -1; // -1 = not yet encoded
-            unsigned char raw_buf[64];
+            uint8_t raw_buf[64];
             int raw_len = -1;
-            char sbs_buf[512];
-            int sbs_len = -1;
+            std::string sbs_str;
 
             for (int i = 0; i < n; i++) {
                 if (conns[i].fd < 0) continue;
                 int len;
-                void *buf;
+                const void *buf;
 
                 if (Modes.beast_feeds[i].format == FEED_FORMAT_RAW) {
                     if (raw_len < 0) raw_len = encode_raw_ascii(&mm, raw_buf, sizeof(raw_buf));
                     len = raw_len; buf = raw_buf;
                 } else if (Modes.beast_feeds[i].format == FEED_FORMAT_SBS) {
-                    if (sbs_len < 0) sbs_len = encode_sbs_line(&mm, sbs_buf, sizeof(sbs_buf));
-                    len = sbs_len; buf = sbs_buf;
+                    if (sbs_str.empty()) sbs_str = encode_sbs_line(&mm);
+                    len = (int)sbs_str.size(); buf = sbs_str.data();
                 } else {
                     if (beast_len < 0) beast_len = encode_beast_binary(&mm, beast_buf_enc, sizeof(beast_buf_enc));
                     len = beast_len; buf = beast_buf_enc;
@@ -729,7 +687,7 @@ static void *mlat_thread_entry(void *arg) {
         // When internet is offline, drain queue without processing
         // (real-time data is useless when buffered for later)
         if (!atomic_load(&net_available)) {
-            while (feeder_queue_pop(&mlat_queue, &mm)) { /* discard */ }
+            while (msg_queue_pop(mlat_queue, &mm)) { /* discard */ }
             //mlatClientDisconnectAll("internet offline");
             usleep(500000); // 500ms sleep while offline
             continue;
@@ -737,7 +695,7 @@ static void *mlat_thread_entry(void *arg) {
 
         int got_msg = 0;
 
-        while (feeder_queue_pop(&mlat_queue, &mm)) {
+        while (msg_queue_pop(mlat_queue, &mm)) {
             mlatClientProcessMessage(&mm);
             got_msg = 1;
         }
@@ -819,16 +777,24 @@ static void *sondehub_thread_entry(void *arg) {
 
 void feederProcessInjectedMessages(void) {
     struct modesMessage mm;
-    while (feeder_queue_pop(&mlat_inject_queue, &mm)) {
-        useModesMessage(&mm);
+    while (msg_queue_pop(mlat_inject_queue, &mm)) {
+        dispatcher_push_adsb(feeder_adsb_queue, &mm);
     }
 }
 
 void feederThreadsStart(void) {
-    feeder_queue_init(&mlat_queue);
-    feeder_queue_init(&beast_feed_queue);
-    feeder_queue_init(&mlat_inject_queue);
-    feeder_queue_init(&fa_mlat_queue);
+    if (!mlat_queue) mlat_queue = msg_queue_create(sizeof(struct modesMessage), 4096);
+    if (!beast_feed_queue) beast_feed_queue = msg_queue_create(sizeof(struct modesMessage), 4096);
+    if (!mlat_inject_queue) mlat_inject_queue = msg_queue_create(sizeof(struct modesMessage), 4096);
+    if (!fa_mlat_queue) fa_mlat_queue = msg_queue_create(sizeof(struct modesMessage), 4096);
+    msg_queue_clear(mlat_queue);
+    msg_queue_clear(beast_feed_queue);
+    msg_queue_clear(mlat_inject_queue);
+    msg_queue_clear(fa_mlat_queue);
+
+    if (!feeder_adsb_queue)
+        feeder_adsb_queue = dispatcher_register_adsb_queue("feeder");
+
     atomic_store(&feeders_running, 1);
 
     // MLAT thread: start if we have servers or PiAware (FA may add server dynamically)
@@ -870,7 +836,7 @@ void feederThreadsStart(void) {
     // PlaneFinder, FR24, RadarBox feeders removed in light version
 
     if (OpenSkyConfig.enabled) {
-        feeder_queue_init(&opensky_queue);
+        msg_queue_clear(opensky_queue);
         if (pthread_create(&opensky_thread, NULL, opensky_thread_entry, NULL) != 0) {
             fprintf(stderr, "feeder: failed to create OpenSky thread: %s\n", strerror(errno));
         } else {
@@ -891,17 +857,17 @@ void feederThreadsStart(void) {
 
 void feederDispatchMessage(struct modesMessage *mm) {
     if (MlatConfig.server_count > 0 || PiawareClient.enabled) {
-        feeder_queue_push(&mlat_queue, mm);
+        msg_queue_push(mlat_queue, mm);
     }
     if (Modes.beast_feed_count > 0) {
-        feeder_queue_push(&beast_feed_queue, mm);
+        msg_queue_push(beast_feed_queue, mm);
     }
     if (OpenSkyConfig.enabled) {
-        feeder_queue_push(&opensky_queue, mm);
+        msg_queue_push(opensky_queue, mm);
     }
     // FA MLAT thread reads from its own queue (enabled dynamically by PiAware)
     if (FaMlat.enabled) {
-        feeder_queue_push(&fa_mlat_queue, mm);
+        msg_queue_push(fa_mlat_queue, mm);
     }
 }
 

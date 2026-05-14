@@ -8,7 +8,7 @@
 // to the FLARM protocol decoder for XXTEA decryption.
 //
 // Demodulation pipeline:
-//   IQ samples (1.6 MSPS) -> NCO channelization -> FIR LPF (65-tap)
+//   IQ samples (1.6 MSPS) -> NCO channelization -> FIR LPF (33-tap)
 //   -> FM discriminator -> DC block -> sample-level matched filter (NCC)
 //   -> payload extraction -> Manchester decode -> CRC -> decrypt/decode
 //
@@ -23,6 +23,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -31,31 +32,46 @@
 #include "flarm_demod.h"
 #include "flarm_decode.h"
 #include "ogntp_decode.h"
+#include "p3i_decode.h"
+#include "adsl_decode.h"
 
 // ======================== Constants ========================
 
-// At 1.6 MSPS with 100 kbps on-air chip rate, each chip is 16 samples
-#define SAMPLES_PER_BIT     16
+// FLARM on-air chip rate: 100 kbps
+#define FLARM_CHIP_RATE     100000
 
-// Sync template length in samples (64 chips x 16 samp/chip)
-#define SYNC_TEMPLATE_LEN   (FLARM_SYNCWORD_SIZE * 8 * SAMPLES_PER_BIT)  // 1024
+// At default 1.6 MSPS with 100 kbps on-air chip rate, each chip is 16 samples
+// At 2.4 MSPS (P3I mode), each chip is 24 samples
+// We use MAX for static array sizing, actual value is stored per-instance
+#define SAMPLES_PER_BIT_DEFAULT 16
+#define MAX_SAMPLES_PER_BIT     24
+
+// Sync template length in samples (64 chips x max_samples/chip)
+// Static arrays are sized for MAX; runtime uses actual length from state
+#define SYNC_TEMPLATE_LEN_DEFAULT (FLARM_SYNCWORD_SIZE * 8 * SAMPLES_PER_BIT_DEFAULT)  // 1024
+#define SYNC_TEMPLATE_LEN_MAX     (FLARM_SYNCWORD_SIZE * 8 * MAX_SAMPLES_PER_BIT)      // 1536
 
 // After sync: 26 bytes x 8 bits x 2 (Manchester) = 416 chips
 #define PAYLOAD_CHIPS       (FLARM_PACKET_TOTAL * 8 * 2)
 
-// Payload length in samples
-#define PAYLOAD_SAMPLES     (PAYLOAD_CHIPS * SAMPLES_PER_BIT)  // 6656
+// ADS-L: 24 bytes x 8 bits x 2 (Manchester) = 384 chips
+#define ADSL_PAYLOAD_CHIPS  (ADSL_PACKET_TOTAL * 8 * 2)
+
+// Payload length in samples (default; runtime uses state->payload_samples)
+#define PAYLOAD_SAMPLES_DEFAULT (PAYLOAD_CHIPS * SAMPLES_PER_BIT_DEFAULT)  // 6656
+#define PAYLOAD_SAMPLES_MAX     (PAYLOAD_CHIPS * MAX_SAMPLES_PER_BIT)      // 9984
 
 // FM sample ring buffer: power of 2, must hold sync + payload + margin
-#define FM_RING_BITS        14
-#define FM_RING_SIZE        (1 << FM_RING_BITS)   // 16384
+// At max 24 spb: sync=1536 + payload=9984 = 11520, need margin → 32768
+#define FM_RING_BITS        15
+#define FM_RING_SIZE        (1 << FM_RING_BITS)   // 32768
 #define FM_RING_MASK        (FM_RING_SIZE - 1)
 
 // Sync NCC threshold.  Noise floor: std = 1/sqrt(1024) = 0.031.
 // Peak noise over 100K trials (5s at 400K checks/s): ~4.5 sigma = 0.14.
-// Weakest real signals: ~0.30 (from Python v7 decoder).
-// Threshold at 0.20 catches everything; CRC rejects noise.
-#define SYNC_NCC_THRESHOLD  0.30f
+// Real FLARM signals in captures show NCC 0.25-0.39.
+// Threshold at 0.25 catches weak signals; CRC-16 provides final validation.
+#define SYNC_NCC_THRESHOLD  0.25f
 
 // Check correlation every N samples (timing resolution: +/-N/2 samples)
 // Larger interval reduces CPU but may miss some peaks; refine compensates.
@@ -65,7 +81,9 @@
 #define SYNC_REFINE_RANGE   8
 
 // Minimum samples between sync detections to prevent re-triggering
-#define SYNC_LOCKOUT_SAMPLES (SYNC_TEMPLATE_LEN + PAYLOAD_SAMPLES + 128)
+// Short lockout: just skip past current sync pattern. The 'collecting' flag
+// prevents re-detection during payload collection (6656+ samples).
+#define SYNC_LOCKOUT_SAMPLES_DEFAULT (SYNC_TEMPLATE_LEN_DEFAULT + 128)
 
 // DC-blocking filter coefficient (time constant ~6ms at 1.6 Msps)
 #define DC_BLOCK_ALPHA      0.9999f
@@ -80,7 +98,9 @@ static const uint32_t FLARM_CHANNEL_FREQS[FLARM_NUM_CHANNELS] = {
 };
 
 // Channel filter: 65-tap FIR low-pass, Hamming window, 120 kHz cutoff.
-// Linear phase: no waveform distortion.  Matches Python v7 decoder exactly.
+// Linear phase: no waveform distortion.  Used for payload extraction only
+// (NCC sync detection uses unfiltered FM for maximum correlation).
+// Tight filtering maximizes noise rejection for bit decisions.
 #define FIR_TAPS             65
 #define CHANNEL_LPF_CUTOFF   120000.0
 
@@ -120,51 +140,70 @@ typedef struct {
     float nco_sin;           // current sin(phase)
     float nco_cos_inc;       // cos(phase_increment)
     float nco_sin_inc;       // sin(phase_increment)
-    unsigned nco_count;      // counter for periodic renormalization
+    uint32_t nco_count;      // counter for periodic renormalization
 
     // LPF (FIR)
     fir_state_t fir;
 
-    // FM discriminator
-    float prev_i, prev_q;
+    // FM discriminator (raw path — no FIR, for NCC sync detection)
+    float prev_i_raw, prev_q_raw;
+
+    // FM discriminator (filtered path — with FIR, for payload extraction)
+    float prev_i_filt, prev_q_filt;
 
     // DC block
     float dc_avg;
 
-    // FM sample ring buffer
+    // FM sample ring buffers:
+    //   fm_ring[]      = raw FM (no filter) — used for NCC sync detection
+    //   fm_filt_ring[] = FIR-filtered FM — used for payload bit extraction
     float fm_ring[FM_RING_SIZE];
-    unsigned ring_wr;
+    float fm_filt_ring[FM_RING_SIZE];
+    uint32_t ring_wr;
 
     // Correlation timing
-    unsigned corr_countdown;
+    uint32_t corr_countdown;
 
     // Sync lockout
-    unsigned lockout_remaining;
+    uint32_t lockout_remaining;
 
     // FLARM packet state
     int      flarm_collecting;
     int      flarm_polarity;
     float    flarm_det_ncc;     // NCC at detection for diagnostics
-    unsigned flarm_payload_start;
-    unsigned flarm_samples_needed;
+    uint32_t flarm_payload_start;
+    uint32_t flarm_samples_needed;
 
     // OGNTP packet state
     int      ogntp_collecting;
     int      ogntp_polarity;
-    unsigned ogntp_payload_start;
-    unsigned ogntp_samples_needed;
+    uint32_t ogntp_payload_start;
+    uint32_t ogntp_samples_needed;
+
+    // ADS-L packet state
+    int      adsl_collecting;
+    int      adsl_polarity;
+    uint32_t adsl_payload_start;
+    uint32_t adsl_samples_needed;
 
     // Diagnostics
     float    diag_best_flarm_ncc;
     float    diag_best_ogntp_ncc;
+    float    diag_best_adsl_ncc;
     float    diag_fm_sum;
-    unsigned diag_fm_count;
+    uint32_t diag_fm_count;
 } flarm_channel_t;
 
 // ======================== Overall state ========================
 
 struct flarm_state {
     flarm_demod_config_t config;
+    uint32_t sample_rate;           // actual SDR sample rate
+    int      samples_per_bit;       // sample_rate / FLARM_CHIP_RATE
+    int      sync_template_len;     // 64 * samples_per_bit
+    int      payload_samples;       // PAYLOAD_CHIPS * samples_per_bit
+    int      adsl_payload_samples;  // ADSL_PAYLOAD_CHIPS * samples_per_bit
+    int      sync_lockout;          // sync_template_len + 128
     flarm_channel_t channels[FLARM_NUM_CHANNELS];
     uint64_t diag_report_interval;
     uint64_t diag_last_report;
@@ -200,21 +239,29 @@ static inline void fir_process(fir_state_t *fir, float in_i, float in_q,
 
 // ======================== Sync templates ========================
 
-static float flarm_sync_template[SYNC_TEMPLATE_LEN];
-static float ogntp_sync_template[SYNC_TEMPLATE_LEN];
+static float flarm_sync_template[SYNC_TEMPLATE_LEN_MAX];
+static float ogntp_sync_template[SYNC_TEMPLATE_LEN_MAX];
+static float adsl_sync_template[SYNC_TEMPLATE_LEN_MAX];
 static float flarm_template_energy;   // sum(template²)
 static float ogntp_template_energy;
+static float adsl_template_energy;
 static int templates_initialized = 0;
+static int templates_spb = 0;          // samples_per_bit used for templates
+static int templates_sync_len = 0;     // actual sync template length
 
 // (No pre-filtering needed: FIR has linear phase, rectangular ±1 template works directly)
 
-static void init_templates(void)
+static void init_templates(uint32_t sample_rate)
 {
-    if (templates_initialized) return;
+    int spb = sample_rate / FLARM_CHIP_RATE;
+    int sync_len = FLARM_SYNCWORD_SIZE * 8 * spb;
+
+    // Reinitialize if sample rate changed
+    if (templates_initialized && templates_spb == spb) return;
 
     // Initialize FIR coefficients (once, shared by all channels)
-    if (!fir_initialized) {
-        design_fir_lpf(fir_coeffs, FIR_TAPS, CHANNEL_LPF_CUTOFF, FLARM_SAMPLE_RATE);
+    if (!fir_initialized || templates_spb != spb) {
+        design_fir_lpf(fir_coeffs, FIR_TAPS, CHANNEL_LPF_CUTOFF, (float)sample_rate);
         fir_initialized = 1;
     }
 
@@ -224,8 +271,8 @@ static void init_templates(void)
         pattern = (pattern << 8) | FLARM_SYNCWORD[i];
     for (int chip = 0; chip < 64; chip++) {
         float val = ((pattern >> (63 - chip)) & 1) ? 1.0f : -1.0f;
-        for (int s = 0; s < SAMPLES_PER_BIT; s++)
-            flarm_sync_template[chip * SAMPLES_PER_BIT + s] = val;
+        for (int s = 0; s < spb; s++)
+            flarm_sync_template[chip * spb + s] = val;
     }
 
     // Generate ideal ±1 OGNTP sync template
@@ -234,14 +281,27 @@ static void init_templates(void)
         ogntp_pattern = (ogntp_pattern << 8) | OGNTP_SYNCWORD[i];
     for (int chip = 0; chip < 64; chip++) {
         float val = ((ogntp_pattern >> (63 - chip)) & 1) ? 1.0f : -1.0f;
-        for (int s = 0; s < SAMPLES_PER_BIT; s++)
-            ogntp_sync_template[chip * SAMPLES_PER_BIT + s] = val;
+        for (int s = 0; s < spb; s++)
+            ogntp_sync_template[chip * spb + s] = val;
     }
 
-    // Template energy = SYNC_TEMPLATE_LEN since all values are ±1
-    flarm_template_energy = (float)SYNC_TEMPLATE_LEN;
-    ogntp_template_energy = (float)SYNC_TEMPLATE_LEN;
+    // Generate ideal ±1 ADS-L sync template
+    uint64_t adsl_pattern = 0;
+    for (int i = 0; i < ADSL_SYNCWORD_SIZE; i++)
+        adsl_pattern = (adsl_pattern << 8) | ADSL_SYNCWORD[i];
+    for (int chip = 0; chip < 64; chip++) {
+        float val = ((adsl_pattern >> (63 - chip)) & 1) ? 1.0f : -1.0f;
+        for (int s = 0; s < spb; s++)
+            adsl_sync_template[chip * spb + s] = val;
+    }
 
+    // Template energy = sync_len since all values are ±1
+    flarm_template_energy = (float)sync_len;
+    ogntp_template_energy = (float)sync_len;
+    adsl_template_energy = (float)sync_len;
+
+    templates_spb = spb;
+    templates_sync_len = sync_len;
     templates_initialized = 1;
 }
 
@@ -250,47 +310,47 @@ static void init_templates(void)
 // Since template is zero-mean (sum=0), numerator is unaffected by signal DC.
 // NCC = Σ(s·t) / sqrt((Σs² - (Σs)²/N) · N)
 
-static float compute_ncc_flat(const float *signal, const float *tmpl, float tmpl_energy)
+static float compute_ncc_flat(const float *signal, const float *tmpl, float tmpl_energy, int tmpl_len)
 {
     float corr = 0, energy = 0, sig_sum = 0;
-    for (int i = 0; i < SYNC_TEMPLATE_LEN; i++) {
+    for (int i = 0; i < tmpl_len; i++) {
         float v = signal[i];
         corr += v * tmpl[i];
         energy += v * v;
         sig_sum += v;
     }
     // Remove DC component from energy: var = E[x²] - E[x]²
-    float mean_sq = (sig_sum * sig_sum) / (float)SYNC_TEMPLATE_LEN;
+    float mean_sq = (sig_sum * sig_sum) / (float)tmpl_len;
     float var_energy = energy - mean_sq;
     if (var_energy < 1e-10f) return 0;
     return corr / sqrtf(var_energy * tmpl_energy);
 }
 
-static float compute_ncc_ring(const float *ring, unsigned start,
-                              const float *tmpl, float tmpl_energy)
+static float compute_ncc_ring(const float *ring, uint32_t start,
+                              const float *tmpl, float tmpl_energy, int tmpl_len)
 {
     start &= FM_RING_MASK;
-    if (start + SYNC_TEMPLATE_LEN <= FM_RING_SIZE) {
-        return compute_ncc_flat(&ring[start], tmpl, tmpl_energy);
+    if (start + (uint32_t)tmpl_len <= FM_RING_SIZE) {
+        return compute_ncc_flat(&ring[start], tmpl, tmpl_energy, tmpl_len);
     }
-    float temp[SYNC_TEMPLATE_LEN];
-    unsigned first_part = FM_RING_SIZE - start;
+    float temp[SYNC_TEMPLATE_LEN_MAX];
+    uint32_t first_part = FM_RING_SIZE - start;
     memcpy(temp, &ring[start], first_part * sizeof(float));
-    memcpy(temp + first_part, ring, (SYNC_TEMPLATE_LEN - first_part) * sizeof(float));
-    return compute_ncc_flat(temp, tmpl, tmpl_energy);
+    memcpy(temp + first_part, ring, ((uint32_t)tmpl_len - first_part) * sizeof(float));
+    return compute_ncc_flat(temp, tmpl, tmpl_energy, tmpl_len);
 }
 
-static unsigned refine_sync(const float *ring, unsigned initial_start,
-                            const float *tmpl, float tmpl_energy,
+static uint32_t refine_sync(const float *ring, uint32_t initial_start,
+                            const float *tmpl, float tmpl_energy, int tmpl_len,
                             float *best_ncc_out)
 {
-    unsigned best_pos = initial_start;
-    float best_ncc = fabsf(compute_ncc_ring(ring, initial_start, tmpl, tmpl_energy));
+    uint32_t best_pos = initial_start;
+    float best_ncc = fabsf(compute_ncc_ring(ring, initial_start, tmpl, tmpl_energy, tmpl_len));
 
     for (int offset = -SYNC_REFINE_RANGE; offset <= SYNC_REFINE_RANGE; offset++) {
         if (offset == 0) continue;
-        unsigned pos = (initial_start + offset) & FM_RING_MASK;
-        float ncc = fabsf(compute_ncc_ring(ring, pos, tmpl, tmpl_energy));
+        uint32_t pos = (initial_start + offset) & FM_RING_MASK;
+        float ncc = fabsf(compute_ncc_ring(ring, pos, tmpl, tmpl_energy, tmpl_len));
         if (ncc > best_ncc) {
             best_ncc = ncc;
             best_pos = pos;
@@ -302,43 +362,44 @@ static unsigned refine_sync(const float *ring, unsigned initial_start,
 
 // ======================== Payload extraction ========================
 
-static void extract_payload_bits(const float *ring, unsigned start, int polarity,
-                                 uint8_t *manchester_bits)
+static void extract_payload_bits(const float *ring, uint32_t start, int polarity,
+                                 uint8_t *manchester_bits, int samples_per_bit,
+                                 int num_chips)
 {
     // Compute local DC estimate over the full payload region.
     // Manchester encoding is balanced (equal +1 and -1 chips), so the mean ≈ DC offset.
     float dc_sum = 0;
-    for (int s = 0; s < PAYLOAD_CHIPS * SAMPLES_PER_BIT; s++) {
+    for (int s = 0; s < num_chips * samples_per_bit; s++) {
         dc_sum += ring[(start + s) & FM_RING_MASK];
     }
-    float dc_offset = dc_sum / (float)(PAYLOAD_CHIPS * SAMPLES_PER_BIT);
+    float dc_offset = dc_sum / (float)(num_chips * samples_per_bit);
 
-    for (int chip = 0; chip < PAYLOAD_CHIPS; chip++) {
-        unsigned chip_start = (start + chip * SAMPLES_PER_BIT) & FM_RING_MASK;
+    for (int chip = 0; chip < num_chips; chip++) {
+        uint32_t chip_start = (start + chip * samples_per_bit) & FM_RING_MASK;
         float acc = 0;
-        for (int s = 0; s < SAMPLES_PER_BIT; s++) {
+        for (int s = 0; s < samples_per_bit; s++) {
             acc += ring[(chip_start + s) & FM_RING_MASK];
         }
-        acc -= dc_offset * SAMPLES_PER_BIT;  // remove DC bias
+        acc -= dc_offset * samples_per_bit;  // remove DC bias
         manchester_bits[chip] = ((acc * polarity) > 0) ? 1 : 0;
     }
 }
 
 // ======================== Manchester decode ========================
 
-static bool manchester_decode_payload(const uint8_t *manchester_bits, unsigned n_bits,
-                                      uint8_t *out_bytes, unsigned *out_len,
-                                      unsigned *violations)
+static bool manchester_decode_payload(const uint8_t *manchester_bits, uint32_t n_bits,
+                                      uint8_t *out_bytes, uint32_t *out_len,
+                                      uint32_t *violations)
 {
-    unsigned n_data_bits = n_bits / 2;
-    unsigned n_bytes = n_data_bits / 8;
+    uint32_t n_data_bits = n_bits / 2;
+    uint32_t n_bytes = n_data_bits / 8;
     if (n_data_bits % 8 != 0) return false;
 
     *out_len = n_bytes;
     *violations = 0;
     memset(out_bytes, 0, n_bytes);
 
-    for (unsigned i = 0; i < n_data_bits; i++) {
+    for (uint32_t i = 0; i < n_data_bits; i++) {
         uint8_t first  = manchester_bits[i * 2];
         uint8_t second = manchester_bits[i * 2 + 1];
 
@@ -361,17 +422,17 @@ static bool manchester_decode_payload(const uint8_t *manchester_bits, unsigned n
 
 // Try CRC with up to max_corrections bit flips on the payload (excluding CRC bytes).
 // Returns the number of corrections applied (0 = no error, -1 = uncorrectable).
-static int try_bit_correction(uint8_t *payload, unsigned len, unsigned max_corrections)
+static int try_bit_correction(uint8_t *payload, uint32_t len, uint32_t max_corrections)
 {
     // 0 corrections: direct check
     if (flarm_check_crc(payload, len))
         return 0;
 
-    unsigned data_bits = (len - 2) * 8;
+    uint32_t data_bits = (len - 2) * 8;
 
     // 1-bit correction
     if (max_corrections >= 1) {
-        for (unsigned b1 = 0; b1 < data_bits; b1++) {
+        for (uint32_t b1 = 0; b1 < data_bits; b1++) {
             payload[b1 / 8] ^= (0x80 >> (b1 % 8));
             if (flarm_check_crc(payload, len))
                 return 1;
@@ -381,9 +442,9 @@ static int try_bit_correction(uint8_t *payload, unsigned len, unsigned max_corre
 
     // 2-bit correction
     if (max_corrections >= 2) {
-        for (unsigned b1 = 0; b1 < data_bits - 1; b1++) {
+        for (uint32_t b1 = 0; b1 < data_bits - 1; b1++) {
             payload[b1 / 8] ^= (0x80 >> (b1 % 8));
-            for (unsigned b2 = b1 + 1; b2 < data_bits; b2++) {
+            for (uint32_t b2 = b1 + 1; b2 < data_bits; b2++) {
                 payload[b2 / 8] ^= (0x80 >> (b2 % 8));
                 if (flarm_check_crc(payload, len))
                     return 2;
@@ -401,12 +462,13 @@ static int try_bit_correction(uint8_t *payload, unsigned len, unsigned max_corre
 static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
 {
     uint8_t manchester_bits[PAYLOAD_CHIPS];
-    extract_payload_bits(ch->fm_ring, ch->flarm_payload_start,
-                         ch->flarm_polarity, manchester_bits);
+    extract_payload_bits(ch->fm_filt_ring, ch->flarm_payload_start,
+                         ch->flarm_polarity, manchester_bits, state->samples_per_bit,
+                         PAYLOAD_CHIPS);
 
     uint8_t payload[FLARM_PACKET_TOTAL];
-    unsigned payload_len = 0;
-    unsigned violations = 0;
+    uint32_t payload_len = 0;
+    uint32_t violations = 0;
 
     if (!manchester_decode_payload(manchester_bits, PAYLOAD_CHIPS, payload, &payload_len, &violations)) {
         state->stats.packets_failed++;
@@ -419,10 +481,26 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
 
     // Try up to 2-bit correction for signals with few violations (likely real)
     // With >5 violations, it's likely noise — skip expensive correction
-    unsigned max_corr = (violations <= 5) ? 2 : 0;
+    uint32_t max_corr = (violations <= 5) ? 2 : 0;
     int corrections = try_bit_correction(payload, FLARM_PACKET_TOTAL, max_corr);
 
     if (corrections < 0) {
+        // CRC failed. Type=3/4 packets use an undocumented protocol variant
+        // with unknown encryption keys - log for analysis but cannot decode
+        uint8_t type_field = (payload[3] & 0x0F);
+        if (violations <= 2 && (type_field == 3 || type_field == 4)) {
+            uint32_t addr = payload[0] | (payload[1] << 8) | (payload[2] << 16);
+            if (type_field == 3) {
+                state->stats.packets_type3++;
+                fprintf(stderr, "flarm: type=3 addr=%06X (undocumented protocol, not decodable)\n", addr);
+            } else {
+                state->stats.packets_type4++;
+                fprintf(stderr, "flarm: type=%u addr=%06X (unknown protocol, not decodable)\n",
+                        type_field, addr);
+            }
+            state->stats.packets_failed++;
+            return;
+        }
         // Debug: dump failed payload for analysis
         fprintf(stderr, "flarm-crc-fail ncc=%.3f pol=%d viol=%u start=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x"
                 "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
@@ -439,17 +517,19 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
 
     state->stats.packets_crc_ok++;
     fprintf(stderr, "FLARM CRC OK! corrections=%d ncc=%.3f payload=%02x%02x%02x%02x%02x%02x "
-            "(detected=%llu crc_ok=%llu)\n",
+            "(detected=%" PRIu64 " crc_ok=%" PRIu64 ")\n",
             corrections, ch->flarm_det_ncc,
             payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
-            (unsigned long long)state->stats.packets_detected,
-            (unsigned long long)state->stats.packets_crc_ok);
+            (uint64_t)state->stats.packets_detected,
+            (uint64_t)state->stats.packets_crc_ok);
 
     uint32_t now = state->time_override ? state->time_override : (uint32_t)time(NULL);
     flarm_message_t msg;
 
-    // When replaying a file, scan a wider time window (file mtime = end of capture)
-    int scan_range = state->time_override ? 35 : 1;
+    // When replaying a file, scan a wider time window (file mtime = start of capture)
+    // File duration up to ~120s + GPS/UTC offset ~18s + margin → scan ±150s
+    // V7 tstamp field validation prevents false positives despite wide range
+    int scan_range = state->time_override ? 150 : 1;
 
     for (int dt = 0; dt <= scan_range; dt++) {
         // Try dt=0 first, then -1,+1,-2,+2,...
@@ -460,22 +540,36 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
                                     state->config.ref_alt_geoid, now + offsets[k], &msg)) {
                 msg.signal_level = 0;
 
-                // Validation: wrong timestamp produces garbage — try next
-                // Skip stealth check for file replay (time_override != 0)
-                if (msg.stealth && !state->time_override) continue;
+                // Address sanity checks (apply to all types)
                 if (msg.addr == 0x000000 || msg.addr == 0xFFFFFF) continue;
                 if ((msg.addr & 0xFF) == ((msg.addr >> 8) & 0xFF) &&
                     (msg.addr & 0xFF) == ((msg.addr >> 16) & 0xFF)) continue;
+
+                state->stats.packets_decoded++;
+
+                // Type 1 = non-traffic message (header-only, no position)
+                // Cannot validate position fields — deliver based on address only
+                if (msg.header_only) {
+                    state->stats.packets_type1++;
+                    fprintf(stderr, "FLARM TYPE1 addr=%06X addr_type=%u (non-traffic message, header only)\n",
+                            msg.addr, msg.addr_type);
+                    if (state->config.callback)
+                        state->config.callback(&msg, state->config.callback_ctx);
+                    return;
+                }
+
+                // Position validation for type 0/2: wrong timestamp produces garbage
+                // Skip stealth check for file replay (time_override != 0)
+                if (msg.stealth && !state->time_override) continue;
                 if (msg.altitude < -500 || msg.altitude > 15000) continue;
-                if (msg.speed < 0 || msg.speed > 500) continue;
-                // Skip distance filter for file replay (time_override != 0)
-                if (!state->time_override) {
+                if (msg.speed < 0 || msg.speed > 150) continue;  // 150 m/s ≈ 540 km/h max
+                // Distance filter: max ~3° (≈330km) from receiver
+                {
                     double dlat = msg.latitude - state->config.ref_lat;
                     double dlon = msg.longitude - state->config.ref_lon;
                     if (sqrt(dlat*dlat + dlon*dlon) > 3.0) continue;
                 }
 
-                state->stats.packets_decoded++;
                 fprintf(stderr, "FLARM DECODED! addr=%06X lat=%.4f lon=%.4f alt=%d vs=%.0f spd=%.0f dt=%d\n",
                         msg.addr, msg.latitude, msg.longitude,
                         msg.altitude, (double)msg.vs, msg.speed, offsets[k]);
@@ -494,13 +588,14 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
 static void try_decode_ogntp(struct flarm_state *state, flarm_channel_t *ch)
 {
     uint8_t manchester_bits[PAYLOAD_CHIPS];
-    extract_payload_bits(ch->fm_ring, ch->ogntp_payload_start,
-                         ch->ogntp_polarity, manchester_bits);
+    extract_payload_bits(ch->fm_filt_ring, ch->ogntp_payload_start,
+                         ch->ogntp_polarity, manchester_bits, state->samples_per_bit,
+                         PAYLOAD_CHIPS);
 
     uint8_t payload[OGNTP_PACKET_TOTAL];
-    unsigned payload_len = 0;
+    uint32_t payload_len = 0;
 
-    unsigned ogntp_violations = 0;
+    uint32_t ogntp_violations = 0;
     if (!manchester_decode_payload(manchester_bits, PAYLOAD_CHIPS, payload, &payload_len, &ogntp_violations)) {
         state->stats.ogntp_packets_failed++;
         return;
@@ -527,6 +622,57 @@ static void try_decode_ogntp(struct flarm_state *state, flarm_channel_t *ch)
     }
 }
 
+// ======================== Try decode ADS-L ========================
+
+static void try_decode_adsl(struct flarm_state *state, flarm_channel_t *ch)
+{
+    uint8_t manchester_bits[ADSL_PAYLOAD_CHIPS];
+    extract_payload_bits(ch->fm_filt_ring, ch->adsl_payload_start,
+                         ch->adsl_polarity, manchester_bits, state->samples_per_bit,
+                         ADSL_PAYLOAD_CHIPS);
+
+    uint8_t payload[ADSL_PACKET_TOTAL];
+    uint32_t payload_len = 0;
+    uint32_t violations = 0;
+
+    if (!manchester_decode_payload(manchester_bits, ADSL_PAYLOAD_CHIPS, payload, &payload_len, &violations)) {
+        state->stats.adsl_packets_failed++;
+        return;
+    }
+    if (payload_len < ADSL_PACKET_TOTAL) {
+        state->stats.adsl_packets_failed++;
+        return;
+    }
+
+    // ADS-L payload is INVERTED on-air: flip all bytes
+    for (uint32_t i = 0; i < ADSL_PACKET_TOTAL; i++) {
+        payload[i] ^= 0xFF;
+    }
+
+    // CRC-24 check
+    if (!adsl_check_crc(payload)) {
+        state->stats.adsl_packets_failed++;
+        return;
+    }
+    state->stats.adsl_packets_crc_ok++;
+
+    adsl_message_t msg;
+    if (adsl_decode_packet(payload, state->config.ref_lat, state->config.ref_lon,
+                           state->config.ref_alt_geoid, &msg)) {
+        state->stats.adsl_packets_decoded++;
+        msg.signal_level = 0.0f;
+
+        fprintf(stderr, "ADSL DECODED! addr=%06X lat=%.4f lon=%.4f alt=%d spd=%.1f crs=%.0f vs=%.1f\n",
+                msg.addr, msg.latitude, msg.longitude, msg.altitude,
+                (double)msg.speed, (double)msg.course, (double)msg.vs);
+
+        if (state->config.adsl_callback)
+            state->config.adsl_callback(&msg, state->config.adsl_callback_ctx);
+    } else {
+        state->stats.adsl_packets_failed++;
+    }
+}
+
 // ======================== Create / Destroy ========================
 
 struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
@@ -534,8 +680,21 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
     struct flarm_state *s = calloc(1, sizeof(struct flarm_state));
     if (!s) return NULL;
 
-    init_templates();
     s->config = *config;
+
+    // Determine actual sample rate
+    uint32_t sr = config->sample_rate;
+    if (sr == 0) sr = FLARM_SAMPLE_RATE;
+    s->sample_rate = sr;
+
+    // Compute runtime timing parameters
+    s->samples_per_bit = sr / FLARM_CHIP_RATE;
+    s->sync_template_len = FLARM_SYNCWORD_SIZE * 8 * s->samples_per_bit;
+    s->payload_samples = PAYLOAD_CHIPS * s->samples_per_bit;
+    s->adsl_payload_samples = ADSL_PAYLOAD_CHIPS * s->samples_per_bit;
+    s->sync_lockout = s->sync_template_len + 128;
+
+    init_templates(sr);
 
     uint32_t center = config->center_freq;
     if (center == 0) center = FLARM_CENTER_FREQ;
@@ -544,7 +703,7 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
         flarm_channel_t *c = &s->channels[ch];
 
         double offset_hz = (double)FLARM_CHANNEL_FREQS[ch] - (double)center;
-        double phase_inc = -2.0 * M_PI * offset_hz / FLARM_SAMPLE_RATE;
+        double phase_inc = -2.0 * M_PI * offset_hz / (double)sr;
         c->nco_cos = 1.0f;
         c->nco_sin = 0.0f;
         c->nco_cos_inc = (float)cos(phase_inc);
@@ -554,30 +713,35 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
         memset(&c->fir, 0, sizeof(c->fir));
         c->fir.pos = 0;
 
-        c->prev_i = 0;
-        c->prev_q = 0;
+        c->prev_i_raw = 0;
+        c->prev_q_raw = 0;
+        c->prev_i_filt = 0;
+        c->prev_q_filt = 0;
         c->dc_avg = 0;
 
         memset(c->fm_ring, 0, sizeof(c->fm_ring));
+        memset(c->fm_filt_ring, 0, sizeof(c->fm_filt_ring));
         c->ring_wr = 0;
         c->corr_countdown = CORR_CHECK_INTERVAL;
         c->lockout_remaining = 0;
 
         c->flarm_collecting = 0;
         c->ogntp_collecting = 0;
+        c->adsl_collecting = 0;
 
         c->diag_best_flarm_ncc = 0;
         c->diag_best_ogntp_ncc = 0;
+        c->diag_best_adsl_ncc = 0;
         c->diag_fm_sum = 0;
         c->diag_fm_count = 0;
 
         fprintf(stderr, "flarm-ch%d: %.3f MHz, NCO offset %+.1f kHz, LPF %.0f kHz, "
-                "NCC threshold %.2f, check every %d samp\n",
+                "NCC threshold %.2f, %d samp/bit, check every %d samp\n",
                 ch, FLARM_CHANNEL_FREQS[ch] / 1e6, offset_hz / 1e3,
-                CHANNEL_LPF_CUTOFF / 1e3, SYNC_NCC_THRESHOLD, CORR_CHECK_INTERVAL);
+                CHANNEL_LPF_CUTOFF / 1e3, SYNC_NCC_THRESHOLD, s->samples_per_bit, CORR_CHECK_INTERVAL);
     }
 
-    s->diag_report_interval = 5 * FLARM_SAMPLE_RATE;
+    s->diag_report_interval = 5 * (uint64_t)sr;
     s->diag_last_report = 0;
 
     return s;
@@ -607,12 +771,12 @@ void flarm_demod_get_stats(struct flarm_state *state, flarm_demod_stats_t *stats
 
 // ======================== Main IQ processing ========================
 
-void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsigned len)
+void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint32_t len)
 {
-    unsigned n_samples = len / 2;
+    uint32_t n_samples = len / 2;
     state->stats.samples_processed += n_samples;
 
-    for (unsigned i = 0; i < n_samples; i++) {
+    for (uint32_t i = 0; i < n_samples; i++) {
         float raw_i = (float)((int)iq_data[i * 2]     - 128);
         float raw_q = (float)((int)iq_data[i * 2 + 1] - 128);
 
@@ -642,24 +806,31 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
             float filt_i, filt_q;
             fir_process(&ch->fir, mix_i, mix_q, &filt_i, &filt_q);
 
-            // ---- FM discriminator ----
-            float cross = filt_q * ch->prev_i - filt_i * ch->prev_q;
-            float dot   = filt_i * ch->prev_i + filt_q * ch->prev_q;
-            ch->prev_i = filt_i;
-            ch->prev_q = filt_q;
-            float fm_out = atan2f(cross, dot);
+            // ---- FM discriminator (RAW path — no filter, for NCC) ----
+            float cross_raw = mix_q * ch->prev_i_raw - mix_i * ch->prev_q_raw;
+            float dot_raw   = mix_i * ch->prev_i_raw + mix_q * ch->prev_q_raw;
+            ch->prev_i_raw = mix_i;
+            ch->prev_q_raw = mix_q;
+            float fm_raw = atan2f(cross_raw, dot_raw);
+
+            // ---- FM discriminator (FILTERED path — with FIR, for payload) ----
+            float cross_filt = filt_q * ch->prev_i_filt - filt_i * ch->prev_q_filt;
+            float dot_filt   = filt_i * ch->prev_i_filt + filt_q * ch->prev_q_filt;
+            ch->prev_i_filt = filt_i;
+            ch->prev_q_filt = filt_q;
+            float fm_filt = atan2f(cross_filt, dot_filt);
 
             // ---- Store raw FM in ring buffer (no DC block) ----
             // DC is handled per-window in NCC (robust formula) and in payload extraction
-            float fm = fm_out;
-            ch->dc_avg = DC_BLOCK_ALPHA * ch->dc_avg + (1.0f - DC_BLOCK_ALPHA) * fm_out;  // track for diagnostics only
+            ch->dc_avg = DC_BLOCK_ALPHA * ch->dc_avg + (1.0f - DC_BLOCK_ALPHA) * fm_raw;  // track for diagnostics only
 
-            // ---- Store in ring buffer ----
-            ch->fm_ring[ch->ring_wr] = fm;
+            // ---- Store in ring buffers ----
+            ch->fm_ring[ch->ring_wr] = fm_raw;
+            ch->fm_filt_ring[ch->ring_wr] = fm_filt;
             ch->ring_wr = (ch->ring_wr + 1) & FM_RING_MASK;
 
             // ---- Diagnostics ----
-            ch->diag_fm_sum += fabsf(fm);
+            ch->diag_fm_sum += fabsf(fm_raw);
             ch->diag_fm_count++;
 
             // ---- Payload collection countdown ----
@@ -677,6 +848,13 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
                     ch->ogntp_collecting = 0;
                 }
             }
+            if (ch->adsl_collecting) {
+                ch->adsl_samples_needed--;
+                if (ch->adsl_samples_needed == 0) {
+                    try_decode_adsl(state, ch);
+                    ch->adsl_collecting = 0;
+                }
+            }
 
             // ---- Lockout ----
             if (ch->lockout_remaining > 0) {
@@ -690,13 +868,15 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
                 continue;
             ch->corr_countdown = CORR_CHECK_INTERVAL;
 
-            // Sync would end at current ring_wr, starts SYNC_TEMPLATE_LEN before
-            unsigned sync_start = (ch->ring_wr - SYNC_TEMPLATE_LEN) & FM_RING_MASK;
+            int stl = state->sync_template_len;
+
+            // Sync would end at current ring_wr, starts sync_template_len before
+            uint32_t sync_start = (ch->ring_wr - stl) & FM_RING_MASK;
 
             // ---- FLARM sync detection ----
             if (!ch->flarm_collecting) {
                 float ncc = compute_ncc_ring(ch->fm_ring, sync_start,
-                                            flarm_sync_template, flarm_template_energy);
+                                            flarm_sync_template, flarm_template_energy, stl);
                 float abs_ncc = fabsf(ncc);
 
                 if (abs_ncc > ch->diag_best_flarm_ncc)
@@ -705,27 +885,28 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
                 if (abs_ncc >= SYNC_NCC_THRESHOLD) {
                     // Refine to single-sample accuracy
                     float refined_ncc;
-                    unsigned best_start = refine_sync(ch->fm_ring, sync_start,
+                    uint32_t best_start = refine_sync(ch->fm_ring, sync_start,
                                                      flarm_sync_template,
-                                                     flarm_template_energy, &refined_ncc);
+                                                     flarm_template_energy, stl, &refined_ncc);
                     float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
                                                        flarm_sync_template,
-                                                       flarm_template_energy);
+                                                       flarm_template_energy, stl);
 
                     state->stats.packets_detected++;
                     ch->flarm_collecting = 1;
                     ch->flarm_polarity = (signed_ncc > 0) ? 1 : -1;
                     ch->flarm_det_ncc = refined_ncc;
-                    ch->flarm_payload_start = (best_start + SYNC_TEMPLATE_LEN) & FM_RING_MASK;
-                    ch->flarm_samples_needed = PAYLOAD_SAMPLES;
-                    ch->lockout_remaining = SYNC_LOCKOUT_SAMPLES;
+                    // Compensate FIR group delay: filtered ring is delayed by (FIR_TAPS-1)/2 samples
+                    ch->flarm_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
+                    ch->flarm_samples_needed = state->payload_samples;
+                    ch->lockout_remaining = state->sync_lockout;
                 }
             }
 
             // ---- OGNTP sync detection ----
             if (!ch->ogntp_collecting) {
                 float oncc = compute_ncc_ring(ch->fm_ring, sync_start,
-                                             ogntp_sync_template, ogntp_template_energy);
+                                             ogntp_sync_template, ogntp_template_energy, stl);
                 float abs_oncc = fabsf(oncc);
 
                 if (abs_oncc > ch->diag_best_ogntp_ncc)
@@ -733,18 +914,45 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
 
                 if (abs_oncc >= SYNC_NCC_THRESHOLD) {
                     float refined_ncc;
-                    unsigned best_start = refine_sync(ch->fm_ring, sync_start,
+                    uint32_t best_start = refine_sync(ch->fm_ring, sync_start,
                                                      ogntp_sync_template,
-                                                     ogntp_template_energy, &refined_ncc);
+                                                     ogntp_template_energy, stl, &refined_ncc);
                     float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
                                                        ogntp_sync_template,
-                                                       ogntp_template_energy);
+                                                       ogntp_template_energy, stl);
 
                     state->stats.ogntp_packets_detected++;
                     ch->ogntp_collecting = 1;
                     ch->ogntp_polarity = (signed_ncc > 0) ? 1 : -1;
-                    ch->ogntp_payload_start = (best_start + SYNC_TEMPLATE_LEN) & FM_RING_MASK;
-                    ch->ogntp_samples_needed = PAYLOAD_SAMPLES;
+                    // Compensate FIR group delay: filtered ring is delayed by (FIR_TAPS-1)/2 samples
+                    ch->ogntp_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
+                    ch->ogntp_samples_needed = state->payload_samples;
+                }
+            }
+
+            // ---- ADS-L sync detection ----
+            if (!ch->adsl_collecting) {
+                float ancc = compute_ncc_ring(ch->fm_ring, sync_start,
+                                             adsl_sync_template, adsl_template_energy, stl);
+                float abs_ancc = fabsf(ancc);
+
+                if (abs_ancc > ch->diag_best_adsl_ncc)
+                    ch->diag_best_adsl_ncc = abs_ancc;
+
+                if (abs_ancc >= SYNC_NCC_THRESHOLD) {
+                    float refined_ncc;
+                    uint32_t best_start = refine_sync(ch->fm_ring, sync_start,
+                                                     adsl_sync_template,
+                                                     adsl_template_energy, stl, &refined_ncc);
+                    float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
+                                                       adsl_sync_template,
+                                                       adsl_template_energy, stl);
+
+                    state->stats.adsl_packets_detected++;
+                    ch->adsl_collecting = 1;
+                    ch->adsl_polarity = (signed_ncc > 0) ? 1 : -1;
+                    ch->adsl_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
+                    ch->adsl_samples_needed = state->adsl_payload_samples;
                 }
             }
         }
@@ -756,16 +964,17 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, unsi
             flarm_channel_t *c = &state->channels[ch];
             float avg_fm = (c->diag_fm_count > 0) ?
                             c->diag_fm_sum / c->diag_fm_count : 0;
-            fprintf(stderr, "flarm-diag ch%d (%.1fMHz): best_ncc=%.3f ogntp_ncc=%.3f "
-                    "avg_fm=%.4f dc=%.4f det=%llu crc=%llu fail=%llu\n",
+            fprintf(stderr, "flarm-diag ch%d (%.1fMHz): best_ncc=%.3f ogntp_ncc=%.3f adsl_ncc=%.3f "
+                    "avg_fm=%.4f dc=%.4f det=%" PRIu64 " crc=%" PRIu64 " fail=%" PRIu64 "\n",
                     ch, FLARM_CHANNEL_FREQS[ch] / 1e6,
-                    c->diag_best_flarm_ncc, c->diag_best_ogntp_ncc,
+                    c->diag_best_flarm_ncc, c->diag_best_ogntp_ncc, c->diag_best_adsl_ncc,
                     avg_fm, c->dc_avg,
-                    (unsigned long long)state->stats.packets_detected,
-                    (unsigned long long)state->stats.packets_crc_ok,
-                    (unsigned long long)state->stats.packets_failed);
+                    (uint64_t)state->stats.packets_detected,
+                    (uint64_t)state->stats.packets_crc_ok,
+                    (uint64_t)state->stats.packets_failed);
             c->diag_best_flarm_ncc = 0;
             c->diag_best_ogntp_ncc = 0;
+            c->diag_best_adsl_ncc = 0;
             c->diag_fm_sum = 0;
             c->diag_fm_count = 0;
         }

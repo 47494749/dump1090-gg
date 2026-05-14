@@ -1,4 +1,4 @@
-﻿// Part of dump1090, a Mode S message decoder for RTLSDR devices.
+// Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
 // gsm_decode.c: GSM broadcast channel decoder implementation.
 //
@@ -138,12 +138,12 @@ static inline float wrap_phase(float p) {
 // Convert IQ uint8 pairs to phase (radians).
 // iq_data: interleaved I,Q uint8 pairs. len: total bytes (n_samples = len/2)
 // phase_out: output phase array, must hold len/2 floats.
-static void iq_to_phase(const uint8_t *iq_data, unsigned len, float *phase_out)
+static void iq_to_phase(const uint8_t *iq_data, uint32_t len, float *phase_out)
     __attribute__((unused));
-static void iq_to_phase(const uint8_t *iq_data, unsigned len, float *phase_out)
+static void iq_to_phase(const uint8_t *iq_data, uint32_t len, float *phase_out)
 {
-    unsigned n = len / 2;
-    for (unsigned i = 0; i < n; i++) {
+    uint32_t n = len / 2;
+    for (uint32_t i = 0; i < n; i++) {
         float I = (float)iq_data[2*i]   - 127.5f;
         float Q = (float)iq_data[2*i+1] - 127.5f;
         phase_out[i] = atan2f(Q, I);
@@ -154,13 +154,13 @@ static void iq_to_phase(const uint8_t *iq_data, unsigned len, float *phase_out)
 // This removes the IF offset carrier and rejects out-of-band noise.
 // Writes filtered phase samples to phase_out (n_samples floats).
 static void iq_to_phase_filtered(struct gsm_state *st,
-                                  const uint8_t *iq_data, unsigned n_samples,
+                                  const uint8_t *iq_data, uint32_t n_samples,
                                   float *phase_out)
 {
     int ntaps = st->filt_taps;
     int half = ntaps / 2;
 
-    for (unsigned i = 0; i < n_samples; i++) {
+    for (uint32_t i = 0; i < n_samples; i++) {
         float raw_I = (float)iq_data[2*i]   - 127.5f;
         float raw_Q = (float)iq_data[2*i+1] - 127.5f;
 
@@ -861,6 +861,34 @@ static void decode_lai(const uint8_t *data, uint16_t *mcc, uint16_t *mnc, uint16
     *lac = (uint16_t)((data[3] << 8) | data[4]);
 }
 
+static int decode_bitmap0_arfcn_list(const uint8_t *desc, uint16_t *list, int max_list)
+{
+    int count = 0;
+    int arfcn = 1;
+
+    for (int byte_idx = 0; byte_idx < 16 && arfcn <= 124; byte_idx++) {
+        int start_bit = (byte_idx == 0) ? 5 : 7;
+        for (int bit = start_bit; bit >= 0 && arfcn <= 124; bit--, arfcn++) {
+            if ((desc[byte_idx] & (1u << bit)) && count < max_list) {
+                list[count++] = (uint16_t)arfcn;
+            }
+        }
+    }
+
+    return count;
+}
+
+static void decode_rach_control(const uint8_t *data, uint8_t *max_retrans,
+                                uint8_t *tx_integer, bool *cell_barred,
+                                bool *re_not_allowed, uint16_t *ac_class)
+{
+    *max_retrans = (data[0] >> 6) & 0x03;
+    *tx_integer = (data[0] >> 4) & 0x03;
+    *cell_barred = ((data[0] >> 3) & 0x01) != 0;
+    *re_not_allowed = ((data[0] >> 2) & 0x01) != 0;
+    *ac_class = (uint16_t)(((uint16_t)data[1] << 8) | data[2]);
+}
+
 // SI3 Message Type = 0x1B
 bool gsm_parse_si3(const uint8_t *l3, int len, gsm_si3_t *out)
 {
@@ -884,28 +912,25 @@ bool gsm_parse_si3(const uint8_t *l3, int len, gsm_si3_t *out)
     // LAI: octets 4-8 (5 bytes)
     decode_lai(&l3[4], &out->mcc, &out->mnc, &out->lac);
 
-    // Control Channel Description: octets 9-11 (3 bytes, TS 04.08 10.5.2.11)
+    // Control Channel Description: octets 9-11 (3 bytes, TS 44.018 10.5.2.11)
     out->ccch_conf       = l3[9] & 0x07;
     out->bs_ag_blks_res  = (l3[9] >> 3) & 0x07;
-    out->bs_pa_mfrms     = (l3[10] >> 0) & 0x07;
+    out->bs_pa_mfrms     = (uint8_t)(((l3[10] >> 4) & 0x07) + 2);
     out->t3212           = l3[11];
 
-    // Cell Options (BCCH): octet 12 (TS 04.08 10.5.2.3)
-    out->radio_link_timeout = (l3[12] >> 4) & 0x0F;
-    out->dtx               = (l3[12] >> 1) & 0x03; // DTX bits
-    out->pwrc              = (l3[12] >> 6) & 0x01;
+    // Cell Options (BCCH): octet 12 (TS 44.018 10.5.2.3)
+    out->radio_link_timeout = l3[12] & 0x0F;
+    out->dtx                = (l3[12] >> 4) & 0x03;
+    out->pwrc               = ((l3[12] >> 6) & 0x01) != 0;
 
-    // Cell Selection Parameters: octets 13-14 (TS 04.08 10.5.2.4)
-    out->ms_txpwr_max_cch    = (l3[13] >> 0) & 0x1F;
+    // Cell Selection Parameters: octets 13-14 (TS 44.018 10.5.2.4)
+    out->ms_txpwr_max_cch         = l3[13] & 0x1F;
     out->cell_reselect_hysteresis = (l3[13] >> 5) & 0x07;
-    out->rxlev_access_min    = l3[14] & 0x3F;
+    out->rxlev_access_min         = l3[14] & 0x3F;
 
-    // RACH Control Parameters: octets 15-17 (TS 04.08 10.5.2.29)
-    out->max_retrans  = (l3[15] >> 6) & 0x03;
-    out->tx_integer   = (l3[15] >> 2) & 0x0F;
-    out->cell_barred  = (l3[15] >> 1) & 0x01;
-    out->re_not_allowed = l3[15] & 0x01;
-    out->ac_class     = (uint16_t)((l3[16] << 8) | l3[17]);
+    // RACH Control Parameters: octets 15-17 (TS 44.018 10.5.2.29)
+    decode_rach_control(&l3[15], &out->max_retrans, &out->tx_integer,
+                        &out->cell_barred, &out->re_not_allowed, &out->ac_class);
 
     out->valid = true;
     return true;
@@ -925,25 +950,9 @@ bool gsm_parse_si1(const uint8_t *l3, int len, gsm_si1_t *out)
     // Bit 0 of octet 2 is the format ID
     const uint8_t *ca = &l3[2];
 
-    // Simplest case: bitmap format 0 (bit map 0)
-    // Bit 7 of ca[0] = 0 means bitmap format 0
-    if ((ca[0] & 0x80) == 0) {
-        // Bitmap format 0: ARFCN 1-124 mapped to bits
-        // ca[0] bits 6..0 → ARFCN 1..7 (inverted or normal?)
-        // Actually: the Cell Allocation IE uses the "Cell Channel" format:
-        // Format 0: bit map 0 — ARFCN(n) present if bit n is set
-        // 128 bits available (16 octets), ARFCN 0-127
-        out->n_arfcn = 0;
-        for (int byte_idx = 0; byte_idx < 16; byte_idx++) {
-            for (int bit = 7; bit >= 0; bit--) {
-                int arfcn = byte_idx * 8 + (7 - bit);
-                if (arfcn > 0 && (ca[byte_idx] & (1 << bit))) {
-                    if (out->n_arfcn < 64) {
-                        out->arfcn_list[out->n_arfcn++] = (uint16_t)arfcn;
-                    }
-                }
-            }
-        }
+    // Bitmap 0 format: format identifier bits 8..7 of octet 3 are 00.
+    if ((ca[0] & 0xC0) == 0x00) {
+        out->n_arfcn = decode_bitmap0_arfcn_list(ca, out->arfcn_list, 64);
     }
     // Other formats (range 1024, range 512, etc.) — TODO for extended ARFCNs
 
@@ -967,19 +976,9 @@ bool gsm_parse_si2(const uint8_t *l3, int len, gsm_si2_t *out)
     // Same bitmap format as SI1 Cell Channel Description
     const uint8_t *ba = &l3[2];
 
-    if ((ba[0] & 0x80) == 0) {
-        // Bitmap format 0
-        out->n_neighbours = 0;
-        for (int byte_idx = 0; byte_idx < 16; byte_idx++) {
-            for (int bit = 7; bit >= 0; bit--) {
-                int arfcn = byte_idx * 8 + (7 - bit);
-                if (arfcn > 0 && (ba[byte_idx] & (1 << bit))) {
-                    if (out->n_neighbours < GSM_MAX_NEIGHBOURS) {
-                        out->neighbour_arfcn[out->n_neighbours++] = (uint16_t)arfcn;
-                    }
-                }
-            }
-        }
+    if ((ba[0] & 0xC0) == 0x00) {
+        out->n_neighbours = decode_bitmap0_arfcn_list(ba, out->neighbour_arfcn,
+                                                      GSM_MAX_NEIGHBOURS);
     }
 
     // NCC Permitted: octet 18
@@ -996,7 +995,7 @@ bool gsm_parse_si4(const uint8_t *l3, int len, gsm_si4_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    if (len < 11) return false;
+    if (len < 12) return false;
     if ((l3[0] & 0x0F) != 0x06) return false;
     if (l3[1] != 0x1C) return false;
 
@@ -1009,7 +1008,7 @@ bool gsm_parse_si4(const uint8_t *l3, int len, gsm_si4_t *out)
     // RACH Control Parameters: octets 9-11
     // (same format as SI3)
 
-    // Optional: CBCH Channel Description (TLV, IEI=0x64)
+    // Optional: CBCH Channel Description (TLV/TV, IEI=0x64)
     int pos = 12;
     while (pos < len - 1) {
         uint8_t iei = l3[pos];
@@ -1063,25 +1062,29 @@ bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out)
 
     if (coding_group == 0x00 || coding_group == 0x01) {
         // Default 7-bit GSM alphabet
-        // GSM 7-bit packing: 7 bits per character, packed into octets
+        // GSM 7-bit packing: characters are packed LSB-first into octets
         int out_pos = 0;
-        int bit_offset = 0;
-        for (int i = 0; i < content_len && out_pos < GSM_CB_PAGE_LEN; i++) {
-            int shift = bit_offset % 7;
-            // Characters span byte boundaries
-            uint8_t ch = (data[6 + i] >> shift) & 0x7F;
-            if (shift > 1 && i > 0) {
-                ch = (uint8_t)(((data[6 + i] << (7 - shift)) | (data[6 + i - 1] >> (8 - (7 - shift))))) & 0x7F;
-            }
+        int bit_pos = 0;
+        const uint8_t *src = &data[6];
+        int max_chars = (content_len * 8) / 7;
+
+        for (int n = 0; n < max_chars && out_pos < GSM_CB_PAGE_LEN; n++) {
+            int byte_off = bit_pos / 8;
+            int bit_off = bit_pos % 8;
+            if (byte_off >= content_len) break;
+
+            uint8_t ch = (uint8_t)(src[byte_off] >> bit_off);
+            if (bit_off > 1 && byte_off + 1 < content_len)
+                ch |= (uint8_t)(src[byte_off + 1] << (8 - bit_off));
+            ch &= 0x7F;
+
             // Simple GSM default alphabet → ASCII subset mapping
-            // (full mapping would require a 128-entry table)
             if (ch == 0) ch = '@';
-            else if (ch < 0x20) ch = '?'; // control chars
+            else if (ch < 0x20) ch = '?';
             else if (ch == 0x7F) ch = '?';
-            // Most printable ASCII maps 1:1 in GSM 7-bit
 
             out->text[out_pos++] = (char)ch;
-            bit_offset += 7;
+            bit_pos += 7;
         }
         out->text_len = out_pos;
     } else {
@@ -1642,29 +1645,29 @@ static bool process_normal_burst(struct gsm_state *st, int sample_pos,
 }
 
 // Main sample processing — called from the SDR reader thread
-void gsm_process(struct gsm_state *st, const uint8_t *iq_data, unsigned len)
+void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
 {
-    unsigned n_samples = len / 2;
+    uint32_t n_samples = len / 2;
     st->stats.samples_processed += n_samples;
 
     // Debug: log every ~30 seconds (30M samples at 1MHz)
-    static unsigned long long dbg_total = 0;
-    static unsigned long long dbg_last = 0;
+    static uint64_t dbg_total = 0;
+    static uint64_t dbg_last = 0;
     dbg_total += n_samples;
     if (dbg_total - dbg_last >= 30000000) {
         fprintf(stderr, "GSM: process called, %u samples, total=%.1fM, state=%u, fcch=%u, sch=%u, bcch=%u, phase_buf=%d/%d\n",
                 n_samples, (double)dbg_total/1e6, st->sync_state,
-                (unsigned)st->stats.fcch_detected, (unsigned)st->stats.sch_decoded, (unsigned)st->stats.bcch_decoded,
+                (uint32_t)st->stats.fcch_detected, (uint32_t)st->stats.sch_decoded, (uint32_t)st->stats.bcch_decoded,
                 st->phase_buf_len, st->phase_buf_size);
         dbg_last = dbg_total;
     }
 
     // Convert IQ to phase
     // We work in chunks that fit in our phase buffer
-    unsigned offset = 0;
+    uint32_t offset = 0;
     while (offset < n_samples) {
-        unsigned chunk = n_samples - offset;
-        unsigned avail = (unsigned)(st->phase_buf_size - st->phase_buf_len);
+        uint32_t chunk = n_samples - offset;
+        uint32_t avail = (uint32_t)(st->phase_buf_size - st->phase_buf_len);
         if (chunk > avail) chunk = avail;
         if (chunk == 0) {
             // Buffer full: shift left by half
@@ -1695,8 +1698,8 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, unsigned len)
 
         // Debug: dump freq_buf stats once per second
         {
-            static unsigned long long fcch_dbg_total = 0;
-            static unsigned long long fcch_dbg_last = 0;
+            static uint64_t fcch_dbg_total = 0;
+            static uint64_t fcch_dbg_last = 0;
             fcch_dbg_total += n_samples;
             if (fcch_dbg_total - fcch_dbg_last >= 10000000) {
                 int n_freq = st->phase_buf_len - 1;
@@ -1724,8 +1727,8 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, unsigned len)
 
         // Debug: show best run regardless of detection
         {
-            static unsigned long long run_dbg = 0;
-            static unsigned long long run_dbg_last = 0;
+            static uint64_t run_dbg = 0;
+            static uint64_t run_dbg_last = 0;
             run_dbg += n_samples;
             if (run_dbg - run_dbg_last >= 10000000) {
                 float exp2 = (float)(st->carrier_offset_hz * 2.0 * M_PI / st->cfg.sample_rate)

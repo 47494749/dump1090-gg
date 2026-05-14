@@ -136,7 +136,7 @@ bool limesdrHandleOption(int argc, char **argv, int *jptr)
     if (!strcmp(argv[j], "--limesdr-verbosity") && more) {
         LimeSDR.verbosity = atoi(argv[++j]);
     } else if (!strcmp(argv[j], "--limesdr-serial") && more) {
-        strcpy(LimeSDR.serial, argv[++j]);
+        snprintf(LimeSDR.serial, sizeof(LimeSDR.serial), "%s", argv[++j]);
     } else if (!strcmp(argv[j], "--limesdr-channel") && more) {
         LimeSDR.stream.channel = atoi(argv[++j]);
     } else if (!strcmp(argv[j], "--limesdr-oversample") && more) {
@@ -334,7 +334,7 @@ bool limesdrOpen(void)
     return false;
 }
 
-static void limesdrCallback(unsigned char *buf, uint32_t len, void *ctx)
+static void limesdrCallback(uint8_t *buf, uint32_t len, void *ctx)
 {
     static int dropped = 0;
     static uint64_t sampleCounter = 0;
@@ -343,7 +343,7 @@ static void limesdrCallback(unsigned char *buf, uint32_t len, void *ctx)
 
     sdrMonitor();
 
-    unsigned samples_read = len / LimeSDR.bytes_in_sample; // Drops any trailing odd sample, not much else we can do there
+    uint32_t samples_read = len / LimeSDR.bytes_in_sample; // Drops any trailing odd sample, not much else we can do there
 
     struct mag_buf *outbuf = fifo_acquire(0 /* don't wait */);
     if (!outbuf) {
@@ -368,11 +368,11 @@ static void limesdrCallback(unsigned char *buf, uint32_t len, void *ctx)
     sampleCounter += samples_read;
 
     // Get the approx system time for the start of this block
-    unsigned block_duration = 1e3 * samples_read / Modes.sample_rate;
+    uint32_t block_duration = 1e3 * samples_read / Modes.sample_rate;
     outbuf->sysTimestamp = mstime() - block_duration;
 
     // Convert the new data
-    unsigned to_convert = samples_read;
+    uint32_t to_convert = samples_read;
     if (to_convert + outbuf->overlap > outbuf->totalLength) {
         // how did that happen?
         to_convert = outbuf->totalLength - outbuf->overlap;
@@ -408,7 +408,7 @@ void limesdrRun()
         }
 
         if (sampleCnt) {
-            limesdrCallback((unsigned char *)buffer, sampleCnt * LimeSDR.bytes_in_sample, NULL);
+            limesdrCallback((uint8_t *)buffer, sampleCnt * LimeSDR.bytes_in_sample, NULL);
         }
     }
 

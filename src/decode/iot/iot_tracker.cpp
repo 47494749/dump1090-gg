@@ -1,16 +1,20 @@
 // Part of dump1090-gg-light
 //
-// iot_tracker.c: ISM 868 MHz IoT device tracking for web panel.
+// iot_tracker.cpp: ISM 868 MHz IoT device tracking for web panel.
 //
 // Thread-safe device list updated from IoT decoder callbacks.
 
 #include "iot_tracker.h"
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
+
+#include <string>
+#include <cstdarg>
 
 static iot_tracked_device_t devices[IOT_TRACKER_MAX_DEVICES];
 static pthread_mutex_t tracker_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -123,29 +127,39 @@ int iotTrackerActiveCount(void)
     return count;
 }
 
-// Convert payload to hex string
-static void hex_encode(char *dst, int maxlen, const uint8_t *data, int len)
-{
-    char *p = dst;
-    char *end = dst + maxlen - 1;
-    for (int i = 0; i < len && p + 2 < end; i++) {
-        p += snprintf(p, (size_t)(end - p), "%02x", data[i]);
-    }
-    *p = '\0';
+// Helper: format into std::string
+static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static std::string sfmt(const char *fmt, ...) {
+    char tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0) return {};
+    if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
+    std::string s(n, '\0');
+    va_start(ap, fmt);
+    vsnprintf(&s[0], n + 1, fmt, ap);
+    va_end(ap);
+    return s;
 }
 
-char *iotTrackerToJSON(void)
+// Convert payload to hex string
+static std::string hex_encode(const uint8_t *data, int len)
 {
-    int bufsize = 4096 + IOT_TRACKER_MAX_DEVICES * 512;
-    char *buf = malloc((size_t)bufsize);
-    if (!buf) return NULL;
+    std::string out;
+    out.reserve(len * 2);
+    for (int i = 0; i < len; i++)
+        out += sfmt("%02x", data[i]);
+    return out;
+}
 
-    char *p = buf;
-    char *end = buf + bufsize;
+std::string iotTrackerToJSON(void)
+{
     uint64_t ts = now_ms();
     uint64_t cutoff = ts - (uint64_t)IOT_DEVICE_TIMEOUT * 1000;
 
-    p += snprintf(p, (size_t)(end - p), "{\"now\":%.1f,\"devices\":[\n", ts / 1000.0);
+    std::string s = sfmt("{\"now\":%.1f,\"devices\":[\n", ts / 1000.0);
 
     pthread_mutex_lock(&tracker_mutex);
 
@@ -156,13 +170,12 @@ char *iotTrackerToJSON(void)
 
         bool stale = (d->last_seen_ms < cutoff);
 
-        if (!first) p += snprintf(p, (size_t)(end - p), ",\n");
+        if (!first) s += ",\n";
         first = 0;
 
-        char hex_payload[130];
-        hex_encode(hex_payload, (int)sizeof(hex_payload), d->payload, d->payload_len);
+        std::string hex_payload = hex_encode(d->payload, d->payload_len);
 
-        p += snprintf(p, (size_t)(end - p),
+        s += sfmt(
             "{\"protocol\":\"%s\",\"modulation\":\"%s\","
             "\"device_id\":\"%06X\",\"channel\":%d,"
             "\"temperature\":%.1f,\"humidity\":%.1f,"
@@ -170,34 +183,33 @@ char *iotTrackerToJSON(void)
             "\"rain\":%.1f,\"power\":%.1f,\"energy\":%.2f,"
             "\"battery_v\":%.2f,\"battery_ok\":%d,"
             "\"rssi\":%.1f,\"freq_offset\":%.0f,\"freq_mhz\":%.3f,"
-            "\"msg_count\":%llu,"
+            "\"msg_count\":%" PRIu64 ","
             "\"first_seen\":%.1f,\"last_seen\":%.1f,\"age\":%.1f,"
             "\"stale\":%s,\"payload\":\"%s\"}",
             iotProtocolName(d->protocol),
             iotModulationName(d->modulation),
             d->device_id, d->channel,
-            isnan(d->temperature_c) ? -999.0 : d->temperature_c,
-            isnan(d->humidity_pct) ? -1.0 : d->humidity_pct,
-            isnan(d->pressure_hpa) ? -1.0 : d->pressure_hpa,
-            isnan(d->wind_speed_ms) ? -1.0 : d->wind_speed_ms,
-            isnan(d->wind_dir_deg) ? -1.0 : d->wind_dir_deg,
-            isnan(d->rain_mm) ? -1.0 : d->rain_mm,
-            isnan(d->power_w) ? -1.0 : d->power_w,
-            isnan(d->energy_kwh) ? -1.0 : d->energy_kwh,
-            isnan(d->battery_v) ? -1.0 : d->battery_v,
+            isnan(d->temperature_c) ? -999.0 : (double)d->temperature_c,
+            isnan(d->humidity_pct) ? -1.0 : (double)d->humidity_pct,
+            isnan(d->pressure_hpa) ? -1.0 : (double)d->pressure_hpa,
+            isnan(d->wind_speed_ms) ? -1.0 : (double)d->wind_speed_ms,
+            isnan(d->wind_dir_deg) ? -1.0 : (double)d->wind_dir_deg,
+            isnan(d->rain_mm) ? -1.0 : (double)d->rain_mm,
+            isnan(d->power_w) ? -1.0 : (double)d->power_w,
+            isnan(d->energy_kwh) ? -1.0 : (double)d->energy_kwh,
+            isnan(d->battery_v) ? -1.0 : (double)d->battery_v,
             (int)d->battery_ok,
-            d->rssi_db, d->freq_offset_hz, d->freq_hz / 1e6,
-            (unsigned long long)d->msg_count,
+            (double)d->rssi_db, (double)d->freq_offset_hz, d->freq_hz / 1e6,
+            (uint64_t)d->msg_count,
             d->first_seen_ms / 1000.0,
             d->last_seen_ms / 1000.0,
             (ts - d->last_seen_ms) / 1000.0,
             stale ? "true" : "false",
-            hex_payload);
+            hex_payload.c_str());
     }
 
     pthread_mutex_unlock(&tracker_mutex);
 
-    p += snprintf(p, (size_t)(end - p), "\n]}");
-
-    return buf;
+    s += "\n]}";
+    return s;
 }

@@ -212,7 +212,7 @@ bool hackRFOpen()
 
 static int handle_hackrf_samples(hackrf_transfer *transfer)
 {
-    static unsigned dropped = 0;
+    static uint32_t dropped = 0;
     static uint64_t sampleCounter = 0;
 
     sdrMonitor();
@@ -221,14 +221,14 @@ static int handle_hackrf_samples(hackrf_transfer *transfer)
         return -1;
 
     uint8_t *buf = transfer->buffer;
-    unsigned len = transfer->valid_length;
+    uint32_t len = transfer->valid_length;
 
-    // Values returned by HackRF need conversion from signed to unsigned
-    for (unsigned i = 0; i < len; i++) {
+    // Values returned by HackRF need conversion from signed to uint32_t
+    for (uint32_t i = 0; i < len; i++) {
         buf[i] ^= (uint8_t)0x80;
     }
 
-    unsigned samples_read = len / 2; // Drops any trailing odd sample, that's OK
+    uint32_t samples_read = len / 2; // Drops any trailing odd sample, that's OK
 
     struct mag_buf *outbuf = fifo_acquire(0 /* don't wait */);
     if (!outbuf) {
@@ -257,7 +257,7 @@ static int handle_hackrf_samples(hackrf_transfer *transfer)
     outbuf->sysTimestamp = mstime() - block_duration;
 
     // Convert the new data
-    unsigned to_convert = samples_read;
+    uint32_t to_convert = samples_read;
     if (to_convert + outbuf->overlap > outbuf->totalLength) {
         // how did that happen?
         to_convert = outbuf->totalLength - outbuf->overlap;

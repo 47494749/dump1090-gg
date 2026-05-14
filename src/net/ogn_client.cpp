@@ -16,6 +16,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
+#include <string_view>
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
@@ -45,8 +47,8 @@ static struct {
     uint64_t      last_beacon;
 
     flarm_message_t queue[OGN_QUEUE_SIZE];
-    unsigned      queue_head;
-    unsigned      queue_tail;
+    uint32_t      queue_head;
+    uint32_t      queue_tail;
 
     uint64_t      packets_sent;
 
@@ -55,17 +57,17 @@ static struct {
         uint32_t addr;
         time_t   last_seen;
     } acft[OGN_ACFT_HASH_SIZE];
-    unsigned      acft_total;      // total positions received since last beacon
+    uint32_t      acft_total;      // total positions received since last beacon
     float         signal_max;      // max signal level since last beacon
     float         signal_sum;      // sum of signal levels
-    unsigned      signal_count;    // number of signal samples
+    uint32_t      signal_count;    // number of signal samples
 } OgnClient;
 
 // ======================== Init ========================
 
 void ognClientInit(void)
 {
-    memset(&OgnClient, 0, sizeof(OgnClient));
+    OgnClient = {};
     OgnClient.fd = -1;
     OgnClient.connected = 0;
     OgnClient.next_reconnect = 0;
@@ -77,14 +79,14 @@ void ognClientSubmit(const flarm_message_t *msg)
 {
     if (!FlarmConfig.enabled || FlarmConfig.ogn_station[0] == '\0') return;
 
-    unsigned next = (OgnClient.queue_head + 1) % OGN_QUEUE_SIZE;
+    uint32_t next = (OgnClient.queue_head + 1) % OGN_QUEUE_SIZE;
     if (next == OgnClient.queue_tail) return;  // full
 
     OgnClient.queue[OgnClient.queue_head] = *msg;
     OgnClient.queue_head = next;
 
     // Track unique aircraft (simple hash table)
-    unsigned slot = msg->addr % OGN_ACFT_HASH_SIZE;
+    uint32_t slot = msg->addr % OGN_ACFT_HASH_SIZE;
     OgnClient.acft[slot].addr = msg->addr;
     OgnClient.acft[slot].last_seen = time(NULL);
     OgnClient.acft_total++;
@@ -102,16 +104,14 @@ void ognClientSubmit(const flarm_message_t *msg)
 
 static int ogn_connect(void)
 {
-    struct addrinfo hints, *res, *rp;
-    char port_str[16];
+    struct addrinfo hints = {}, *res, *rp;
 
-    memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    snprintf(port_str, sizeof(port_str), "%d", FlarmConfig.ogn_port);
+    std::string port_str = std::to_string(FlarmConfig.ogn_port);
 
-    int err = getaddrinfo(FlarmConfig.ogn_server, port_str, &hints, &res);
+    int err = getaddrinfo(FlarmConfig.ogn_server, port_str.c_str(), &hints, &res);
     if (err != 0) {
         fprintf(stderr, "ogn: DNS resolution failed for %s: %s\n",
                 FlarmConfig.ogn_server, gai_strerror(err));
@@ -170,19 +170,16 @@ static int ogn_connect(void)
 static int aprs_passcode(const char *callsign)
 {
     int hash = 0x73e2;
-    int i = 0;
-    int len = 0;
-    char call[16];
+    std::string call;
 
     // Copy callsign without SSID (strip everything after '-'), uppercase
-    for (len = 0; len < 15 && callsign[len] && callsign[len] != '-'; len++)
-        call[len] = toupper((unsigned char)callsign[len]);
-    call[len] = 0;
+    for (int i = 0; callsign[i] && callsign[i] != '-' && i < 15; i++)
+        call += (char)toupper((uint8_t)callsign[i]);
 
-    for (i = 0; i < len; i += 2) {
-        hash ^= ((unsigned char)call[i]) << 8;
-        if (i + 1 < len)
-            hash ^= (unsigned char)call[i + 1];
+    for (size_t i = 0; i < call.size(); i += 2) {
+        hash ^= ((uint8_t)call[i]) << 8;
+        if (i + 1 < call.size())
+            hash ^= (uint8_t)call[i + 1];
     }
     return hash & 0x7FFF;
 }
@@ -192,20 +189,19 @@ static int aprs_passcode(const char *callsign)
 static bool ogn_login(int fd)
 {
     int passcode = aprs_passcode(FlarmConfig.ogn_station);
-    char login[256];
-    int n = snprintf(login, sizeof(login),
-                     "user %s pass %d vers dump1090-gg " MODES_DUMP1090_VERSION
-                     " filter r/%.4f/%.4f/100\r\n",
-                     FlarmConfig.ogn_station,
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp),
+             "user %s pass %d vers dump1090-gg " MODES_DUMP1090_VERSION
+             " filter r/%.4f/%.4f/100\r\n",
+             FlarmConfig.ogn_station,
                      passcode,
                      Modes.fUserLat, Modes.fUserLon);
-
-    if (n <= 0 || n >= (int)sizeof(login)) return false;
+    std::string login(tmp);
 
     // Blocking send for login line
-    int sent = 0;
-    while (sent < n) {
-        int w = write(fd, login + sent, n - sent);
+    size_t sent = 0;
+    while (sent < login.size()) {
+        int w = write(fd, login.data() + sent, login.size() - sent);
         if (w <= 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return false;
@@ -249,7 +245,7 @@ static const char *flarm_acft_symbol(uint8_t acft_type)
     }
 }
 
-static int format_aprs_position(const flarm_message_t *msg, char *buf, size_t bufsize)
+static std::string format_aprs_position(const flarm_message_t *msg)
 {
     time_t now = time(NULL);
     struct tm *utc = gmtime(&now);
@@ -284,8 +280,8 @@ static int format_aprs_position(const flarm_message_t *msg, char *buf, size_t bu
     const char *prefix = flarm_addr_prefix(msg->addr_type);
     const char *symbol = flarm_acft_symbol(msg->aircraft_type);
 
-    // Do NOT include qAS in path — the APRS-IS server adds qAS,login automatically
-    int n = snprintf(buf, bufsize,
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp),
                      "%s%06X>OGFLR:/%02d%02d%02dh%02d%05.2f%c%c%03d%05.2f%c%c%03d/%03d/A=%06d !W00! id%02X%06X %+d0fpm +0.0rot\r\n",
                      prefix, msg->addr,
                      utc->tm_hour, utc->tm_min, utc->tm_sec,
@@ -294,11 +290,11 @@ static int format_aprs_position(const flarm_message_t *msg, char *buf, size_t bu
                      lon_deg, lon_min, lon_ew,
                      symbol[1],
                      course, speed_kts, alt_feet,
-                     (unsigned)(((msg->stealth & 1) << 7) | ((msg->no_track & 1) << 6) | ((msg->addr_type & 3) << 4) | (msg->aircraft_type & 0x0F)),
+                     (uint32_t)(((msg->stealth & 1) << 7) | ((msg->no_track & 1) << 6) | ((msg->addr_type & 3) << 4) | (msg->aircraft_type & 0x0F)),
                      msg->addr,
                      climb_fpm / 10);
 
-    return n;
+    return tmp;
 }
 
 // ======================== System info helpers ========================
@@ -347,20 +343,21 @@ static void read_ntp_info(float *offset_ms, float *ppm)
         // chronyc: "System time     : 0.000001234 seconds slow of NTP time"
         // chronyc: "Frequency       : 1.234 ppm slow"
         float val;
+        std::string_view line_sv(line);
         if (sscanf(line, "System time : %f seconds", &val) == 1) {
             *offset_ms = val * 1000.0f;
         } else if (sscanf(line, "Frequency : %f ppm", &val) == 1) {
             *ppm = val;
-            if (strstr(line, "slow")) *ppm = -*ppm;
+            if (line_sv.find("slow") != std::string_view::npos) *ppm = -*ppm;
         }
         // ntpq: offset=1.234, frequency=5.678
-        char *p;
-        if ((p = strstr(line, "offset=")) != NULL) {
-            if (sscanf(p, "offset=%f", &val) == 1)
+        size_t pos;
+        if ((pos = line_sv.find("offset=")) != std::string_view::npos) {
+            if (sscanf(line + pos, "offset=%f", &val) == 1)
                 *offset_ms = val;
         }
-        if ((p = strstr(line, "frequency=")) != NULL) {
-            if (sscanf(p, "frequency=%f", &val) == 1)
+        if ((pos = line_sv.find("frequency=")) != std::string_view::npos) {
+            if (sscanf(line + pos, "frequency=%f", &val) == 1)
                 *ppm = val;
         }
     }
@@ -371,7 +368,7 @@ static int count_unique_aircraft(void)
 {
     time_t now = time(NULL);
     int count = 0;
-    for (unsigned i = 0; i < OGN_ACFT_HASH_SIZE; i++) {
+    for (uint32_t i = 0; i < OGN_ACFT_HASH_SIZE; i++) {
         if (OgnClient.acft[i].addr != 0 &&
             (now - OgnClient.acft[i].last_seen) < OGN_ACFT_MAX_AGE) {
             count++;
@@ -406,17 +403,18 @@ static void ogn_send_station_beacon(void)
     int alt_feet = (MlatConfig.alt > 0) ? (int)(MlatConfig.alt * 3.28084) : 1631;
 
     // Position beacon: symbol table 'I' (overlay IGate) + symbol '&' = OGN receiver
-    char beacon[512];
-    int n = snprintf(beacon, sizeof(beacon),
+    char bcn_tmp[512];
+    snprintf(bcn_tmp, sizeof(bcn_tmp),
                      "%s>OGNSDR,TCPIP*:/%02d%02d%02dh%02d%05.2f%cI%03d%05.2f%c&/A=%06d\r\n",
                      FlarmConfig.ogn_station,
                      utc->tm_hour, utc->tm_min, utc->tm_sec,
                      lat_deg, lat_min, lat_ns,
                      lon_deg, lon_min, lon_ew,
                      alt_feet);
+    std::string beacon(bcn_tmp);
 
-    if (n > 0 && n < (int)sizeof(beacon)) {
-        int w = write(OgnClient.fd, beacon, n);
+    {
+        int w = write(OgnClient.fd, beacon.data(), beacon.size());
         if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
             fprintf(stderr, "ogn: beacon write error: %s\n", strerror(errno));
             close(OgnClient.fd);
@@ -454,60 +452,59 @@ static void ogn_send_station_beacon(void)
         if (noise > 0) noise_db = (float)(10.0 * log10(noise));
     }
 
-    // Build OGN standard status beacon
-    // Format: STATION>OGNSDR,TCPIP*:>HHMMSSh vSOFTWARE CPU:load RAM:used/totalMB NTP:offset/ppm +tempC N/NAcfts[1h] RF:noise+ppm/avgdB/peakdB
-    char status[512];
-    int pos = 0;
-    pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                    "%s>OGNSDR,TCPIP*:>%02d%02d%02dh",
-                    FlarmConfig.ogn_station,
-                    utc->tm_hour, utc->tm_min, utc->tm_sec);
+    // Build OGN standard status beacon using std::string
+    char st_tmp[128];
+    snprintf(st_tmp, sizeof(st_tmp), "%s>OGNSDR,TCPIP*:>%02d%02d%02dh",
+             FlarmConfig.ogn_station, utc->tm_hour, utc->tm_min, utc->tm_sec);
+    std::string status(st_tmp);
 
     // Software version
-    pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                    " vdump1090-gg " MODES_DUMP1090_VERSION);
+    status += " vdump1090-gg " MODES_DUMP1090_VERSION;
 
     // CPU load
-    pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                    " CPU:%.1f", cpu_load);
+    snprintf(st_tmp, sizeof(st_tmp), " CPU:%.1f", cpu_load);
+    status += st_tmp;
 
     // RAM
     if (ram_total > 0) {
-        pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                        " RAM:%.1f/%.1fMB", ram_used, ram_total);
+        snprintf(st_tmp, sizeof(st_tmp), " RAM:%.1f/%.1fMB", ram_used, ram_total);
+        status += st_tmp;
     }
 
     // NTP
-    pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                    " NTP:%.1fms/%+.1fppm", ntp_offset, ntp_ppm);
+    snprintf(st_tmp, sizeof(st_tmp), " NTP:%.1fms/%+.1fppm", ntp_offset, ntp_ppm);
+    status += st_tmp;
 
     // Temperature
     if (cpu_temp > 0) {
-        pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                        " %+.1fC", cpu_temp);
+        snprintf(st_tmp, sizeof(st_tmp), " %+.1fC", cpu_temp);
+        status += st_tmp;
     }
 
     // Aircraft count
-    pos += snprintf(status + pos, sizeof(status) - (size_t)pos,
-                    " %d/%dAcfts[1h]", acft_unique, acft_total);
+    status += " " + std::to_string(acft_unique) + "/" + std::to_string(acft_total) + "Acfts[1h]";
 
     // RF stats
     if (noise_db > -999 || signal_avg_db > -999) {
-        pos += snprintf(status + pos, sizeof(status) - (size_t)pos, " RF:");
-        if (noise_db > -999)
-            pos += snprintf(status + pos, sizeof(status) - (size_t)pos, "%+.0f", noise_db);
-        pos += snprintf(status + pos, sizeof(status) - (size_t)pos, "+0.0ppm");
-        if (signal_avg_db > -999)
-            pos += snprintf(status + pos, sizeof(status) - (size_t)pos, "/%.1fdB", signal_avg_db);
-        if (signal_peak_db > -999)
-            pos += snprintf(status + pos, sizeof(status) - (size_t)pos, "/%.1fdB", signal_peak_db);
+        status += " RF:";
+        if (noise_db > -999) {
+            snprintf(st_tmp, sizeof(st_tmp), "%+.0f", noise_db);
+            status += st_tmp;
+        }
+        status += "+0.0ppm";
+        if (signal_avg_db > -999) {
+            snprintf(st_tmp, sizeof(st_tmp), "/%.1fdB", signal_avg_db);
+            status += st_tmp;
+        }
+        if (signal_peak_db > -999) {
+            snprintf(st_tmp, sizeof(st_tmp), "/%.1fdB", signal_peak_db);
+            status += st_tmp;
+        }
     }
 
-    pos += snprintf(status + pos, sizeof(status) - (size_t)pos, "\r\n");
+    status += "\r\n";
 
-    if (pos > 0 && pos < (int)sizeof(status)) {
-        if (write(OgnClient.fd, status, (size_t)pos) < 0) { /* ignore */ }
-    }
+    if (write(OgnClient.fd, status.data(), status.size()) < 0) { /* ignore */ }
 
     // Reset signal stats for next period
     OgnClient.signal_max = 0;
@@ -525,14 +522,13 @@ static void ogn_send_queued(void)
     while (OgnClient.queue_tail != OgnClient.queue_head) {
         flarm_message_t *msg = &OgnClient.queue[OgnClient.queue_tail];
 
-        char aprs_line[512];
-        int len = format_aprs_position(msg, aprs_line, sizeof(aprs_line));
-        if (len <= 0 || len >= (int)sizeof(aprs_line)) {
+        std::string aprs_line = format_aprs_position(msg);
+        if (aprs_line.empty()) {
             OgnClient.queue_tail = (OgnClient.queue_tail + 1) % OGN_QUEUE_SIZE;
             continue;
         }
 
-        int w = write(OgnClient.fd, aprs_line, len);
+        int w = write(OgnClient.fd, aprs_line.data(), aprs_line.size());
         if (w < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // Socket buffer full, try later
@@ -629,7 +625,7 @@ void ognClientCleanup(void)
     OgnClient.connected = 0;
 
     if (OgnClient.packets_sent > 0) {
-        fprintf(stderr, "ogn: total packets sent: %llu\n",
-                (unsigned long long)OgnClient.packets_sent);
+        fprintf(stderr, "ogn: total packets sent: %" PRIu64 "\n",
+                (uint64_t)OgnClient.packets_sent);
     }
 }

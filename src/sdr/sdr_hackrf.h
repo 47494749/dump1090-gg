@@ -20,11 +20,19 @@
 #ifndef HACKRF_H
 #define HACKRF_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void hackRFInitConfig();
 void hackRFShowHelp();
 bool hackRFHandleOption(int argc, char **argv, int *jptr);
 bool hackRFOpen();
 void hackRFRun();
 void hackRFClose();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

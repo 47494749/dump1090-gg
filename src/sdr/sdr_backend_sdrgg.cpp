@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <pthread.h>
 
 extern "C" {
@@ -138,7 +139,7 @@ static sdr_device_t *gg_open_by_index(int index)
     sdrgg_dev_t *dev = sdr::open(ctx, (int32_t)index);
     if (!dev) return nullptr;
 
-    auto *sdev = static_cast<sdr_device_t *>(calloc(1, sizeof(sdr_device_t)));
+    auto *sdev = new (std::nothrow) sdr_device_t{};
     if (!sdev) { sdr::close(dev); return nullptr; }
 
     sdev->handle = dev;
@@ -197,11 +198,11 @@ static void gg_close(sdr_device_t *dev)
     // Free adapter + ring after close ensures no more callbacks
     if (dev && dev->ctx) {
         auto *adapter = static_cast<stream_adapter *>(dev->ctx);
-        if (adapter->ring) free(adapter->ring);
-        free(adapter);
+        delete adapter->ring;
+        delete adapter;
         dev->ctx = nullptr;
     }
-    free(dev);
+    delete dev;
 }
 
 static int gg_set_frequency(sdr_device_t *dev, uint32_t freq_hz)
@@ -345,12 +346,12 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
                          uint32_t buf_count, uint32_t buf_size)
 {
     // Allocate ring buffer (large — ~2MB per device)
-    auto *ring = static_cast<struct sdrgg_ring *>(calloc(1, sizeof(struct sdrgg_ring)));
+    auto *ring = new (std::nothrow) sdrgg_ring{};
     if (!ring) return -1;
 
     // Allocate stream adapter
-    auto *adapter = static_cast<stream_adapter *>(malloc(sizeof(stream_adapter)));
-    if (!adapter) { free(ring); return -1; }
+    auto *adapter = new (std::nothrow) stream_adapter;
+    if (!adapter) { delete ring; return -1; }
     adapter->user_cb = cb;
     adapter->user_ctx = ctx;
     adapter->stopping = 0;
@@ -367,8 +368,8 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     pthread_mutex_unlock(&g_stream_mutex);
     if (rc != SDRGG_OK) {
         dev->ctx = nullptr;
-        free(ring);
-        free(adapter);
+        delete ring;
+        delete adapter;
         return rc;
     }
     dev->async_running = 1;
@@ -399,8 +400,9 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     pthread_mutex_unlock(&g_stream_mutex);
 
     // Free ring and adapter
-    if (adapter->ring) { free(adapter->ring); adapter->ring = nullptr; }
-    free(adapter);
+    delete adapter->ring;
+    adapter->ring = nullptr;
+    delete adapter;
     dev->ctx = nullptr;
 
     dev->async_running = 0;
@@ -432,7 +434,7 @@ static int gg_get_tuner_caps(sdr_device_t *dev, sdr_tuner_caps_t *out)
     int32_t rc = sdr::get_tuner_caps(static_cast<sdrgg_dev_t *>(dev->handle), &caps);
     if (rc != SDRGG_OK || !caps) return -1;
 
-    memset(out, 0, sizeof(*out));
+    *out = {};
     out->tuner = dev->tuner_type;
     out->chip_name = caps->chip_name;
     out->freq_min_hz = caps->freq_min_hz;

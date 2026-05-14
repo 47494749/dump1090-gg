@@ -24,6 +24,10 @@
 #ifndef GSM_DECODE_H
 #define GSM_DECODE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -299,7 +303,7 @@ struct gsm_state *gsm_create(const gsm_config_t *cfg);
 void gsm_destroy(struct gsm_state *st);
 
 // Process a block of IQ samples (interleaved uint8_t I,Q pairs).
-void gsm_process(struct gsm_state *st, const uint8_t *iq_data, unsigned len);
+void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len);
 
 // Get current cell information (aggregated from decoded SI messages).
 void gsm_get_cell_info(const struct gsm_state *st, gsm_cell_info_t *out);
@@ -380,5 +384,9 @@ gsm_chan_type_t gsm_get_channel_type(int fn_mod51);
 int detect_fcch(const float *freq_buf, int n_freq,
                 float samples_per_symbol, float carrier_rps,
                 double *freq_offset_out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // GSM_DECODE_H

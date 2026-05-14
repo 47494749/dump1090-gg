@@ -25,8 +25,11 @@
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
 #include "iot_tracker.h"
+#include "fanet_decode.h"
+#include "sarsat_decode.h"
 #include "pocsag_demod.h"
 #include "decoder_config.h"
+#include "airframes_feed.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,7 +43,29 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <limits.h>
+
+#include <string>
+#include <string_view>
+#include <cstdio>
+
+// Helper: format into std::string (like sprintf but returns std::string)
+static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
+static std::string sfmt(const char *fmt, ...) {
+    char tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0) return {};
+    if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
+    std::string s(n, '\0');
+    va_start(ap, fmt);
+    vsnprintf(&s[0], n + 1, fmt, ap);
+    va_end(ap);
+    return s;
+}
 
 panel_state_t PanelState;
 
@@ -234,8 +259,15 @@ static void *diag_thread_entry(void *arg)
         }
 
         // Open device via backend layer
-        const sdr_backend_ops_t *ops = sdrBackendResolve(devinfo[d].backend);
-        sdr_device_t *dev = ops ? ops->open_by_serial(devinfo[d].serial) : NULL;
+        const sdr_backend_ops_t *ops;
+        sdr_device_t *dev;
+        int ttype;
+        int gains[64];
+        int n_gains;
+        int meas_idx;
+
+        ops = sdrBackendResolve(devinfo[d].backend);
+        dev = ops ? ops->open_by_serial(devinfo[d].serial) : NULL;
         if (!dev) {
             pthread_mutex_lock(&DiagState.mutex);
             snprintf(dr->error, sizeof(dr->error), "Failed to open device %s", devinfo[d].serial);
@@ -246,7 +278,7 @@ static void *diag_thread_entry(void *arg)
         dev->ops = ops;
 
         // Get tuner info from backend
-        int ttype = sdr_get_tuner_type(dev);
+        ttype = sdr_get_tuner_type(dev);
         pthread_mutex_lock(&DiagState.mutex);
         dr->tuner_type = ttype;
         snprintf(dr->tuner, sizeof(dr->tuner), "%s", tuner_name_sdr((sdr_tuner_type_t)ttype));
@@ -254,8 +286,7 @@ static void *diag_thread_entry(void *arg)
         pthread_mutex_unlock(&DiagState.mutex);
 
         // Get gain info
-        int gains[64];
-        int n_gains = sdr_get_tuner_gains(dev, gains, 64);
+        n_gains = sdr_get_tuner_gains(dev, gains, 64);
         if (n_gains > 0) {
             dr->max_gain_steps = n_gains;
             dr->max_gain_db = gains[n_gains - 1] / 10.0f;
@@ -270,7 +301,7 @@ static void *diag_thread_entry(void *arg)
         }
 
         // Run frequency sweep at default sample rate (2.4 MSPS)
-        int meas_idx = 0;
+        meas_idx = 0;
         for (int f = 0; f < num_freqs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; f++) {
             diag_measurement_t m = {0};
             diag_measure(dev, test_freqs[f], 2400000, &m);
@@ -334,13 +365,12 @@ restore:
 
 static void api_get_diagnostics(int fd)
 {
-    char *buf = malloc(65536);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
-    int pos = 0;
+    std::string buf;
+    buf.reserve(4096);
 
     pthread_mutex_lock(&DiagState.mutex);
 
-    pos += snprintf(buf + pos, 65536 - pos,
+    buf += sfmt(
         "{\"running\":%s,\"complete\":%s,\"device_count\":%d,"
         "\"librtlsdr_version\":\"%s\",\"devices\":[",
         DiagState.running ? "true" : "false",
@@ -350,8 +380,8 @@ static void api_get_diagnostics(int fd)
 
     for (int d = 0; d < DiagState.device_count && d < DIAG_MAX_DEVICES; d++) {
         diag_device_result_t *dr = &DiagState.devices[d];
-        if (d > 0) pos += snprintf(buf + pos, 65536 - pos, ",");
-        pos += snprintf(buf + pos, 65536 - pos,
+        if (d > 0) buf += ',';
+        buf += sfmt(
             "{\"serial\":\"%s\",\"tuner\":\"%s\",\"freq_range\":\"%s\","
             "\"tuner_type\":%d,\"max_gain_db\":%.1f,\"max_gain_steps\":%d,"
             "\"gain_list\":[",
@@ -359,18 +389,18 @@ static void api_get_diagnostics(int fd)
             dr->tuner_type, dr->max_gain_db, dr->max_gain_steps);
 
         for (int g = 0; g < dr->max_gain_steps && g < 64; g++) {
-            if (g > 0) pos += snprintf(buf + pos, 65536 - pos, ",");
-            pos += snprintf(buf + pos, 65536 - pos, "%.1f", dr->gain_list[g] / 10.0f);
+            if (g > 0) buf += ',';
+            buf += sfmt("%.1f", dr->gain_list[g] / 10.0f);
         }
 
-        pos += snprintf(buf + pos, 65536 - pos,
+        buf += sfmt(
             "],\"complete\":%s,\"error\":\"%s\",\"measurements\":[",
             dr->complete ? "true" : "false", dr->error);
 
         for (int m = 0; m < dr->num_measurements; m++) {
             diag_measurement_t *meas = &dr->measurements[m];
-            if (m > 0) pos += snprintf(buf + pos, 65536 - pos, ",");
-            pos += snprintf(buf + pos, 65536 - pos,
+            if (m > 0) buf += ',';
+            buf += sfmt(
                 "{\"freq\":%d,\"sr\":%d,\"pll\":%s,"
                 "\"noise\":%.1f,\"dc_offset\":%.2f,\"iq_spread\":%.2f}",
                 meas->freq_hz, meas->sample_rate,
@@ -378,15 +408,14 @@ static void api_get_diagnostics(int fd)
                 meas->noise_floor_db, meas->dc_offset, meas->iq_spread);
         }
 
-        pos += snprintf(buf + pos, 65536 - pos, "]}");
+        buf += "]}";
     }
 
-    pos += snprintf(buf + pos, 65536 - pos, "]}");
+    buf += "]}";
 
     pthread_mutex_unlock(&DiagState.mutex);
 
-    http_send_json(fd, buf, pos);
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 static void api_post_diagnostics_start(int fd)
@@ -432,16 +461,17 @@ bool panelHandleOption(int argc, char **argv, int *jptr)
 {
     int j = *jptr;
     bool more = (j + 1 < argc);
+    std::string_view arg(argv[j]);
 
-    if (!strcmp(argv[j], "--panel")) {
+    if (arg == "--panel") {
         PanelState.enabled = 1;
-    } else if (!strcmp(argv[j], "--panel-port") && more) {
+    } else if (arg == "--panel-port" && more) {
         PanelState.enabled = 1;
         PanelState.port = atoi(argv[++j]);
-    } else if (!strcmp(argv[j], "--panel-password") && more) {
+    } else if (arg == "--panel-password" && more) {
         PanelState.enabled = 1;
         snprintf(PanelState.password, sizeof(PanelState.password), "%s", argv[++j]);
-    } else if (!strcmp(argv[j], "--panel-html-dir") && more) {
+    } else if (arg == "--panel-html-dir" && more) {
         snprintf(PanelState.html_dir, sizeof(PanelState.html_dir), "%s", argv[++j]);
     } else {
         return false;
@@ -514,28 +544,30 @@ void panelLogMessage(const char *fmt, ...)
 
 // ============================= Base64 decode =============================
 
-static const unsigned char b64_table[256] = {
-    ['A']=0,['B']=1,['C']=2,['D']=3,['E']=4,['F']=5,['G']=6,['H']=7,
-    ['I']=8,['J']=9,['K']=10,['L']=11,['M']=12,['N']=13,['O']=14,['P']=15,
-    ['Q']=16,['R']=17,['S']=18,['T']=19,['U']=20,['V']=21,['W']=22,['X']=23,
-    ['Y']=24,['Z']=25,['a']=26,['b']=27,['c']=28,['d']=29,['e']=30,['f']=31,
-    ['g']=32,['h']=33,['i']=34,['j']=35,['k']=36,['l']=37,['m']=38,['n']=39,
-    ['o']=40,['p']=41,['q']=42,['r']=43,['s']=44,['t']=45,['u']=46,['v']=47,
-    ['w']=48,['x']=49,['y']=50,['z']=51,['0']=52,['1']=53,['2']=54,['3']=55,
-    ['4']=56,['5']=57,['6']=58,['7']=59,['+']=60,['/']=61
-};
+static uint8_t b64_table[256];
+static bool b64_table_init = false;
+
+static void init_b64_table(void) {
+    if (b64_table_init) return;
+    memset(b64_table, 0, sizeof(b64_table));
+    const char *chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (int i = 0; chars[i]; i++)
+        b64_table[(uint8_t)chars[i]] = (uint8_t)i;
+    b64_table_init = true;
+}
 
 static int base64_decode(const char *in, char *out, int outlen)
 {
+    init_b64_table();
     int i = 0, o = 0;
     int len = (int)strlen(in);
     while (i < len && o < outlen - 1) {
         if (i + 3 >= len) break;
-        unsigned a = b64_table[(unsigned char)in[i++]];
-        unsigned b = b64_table[(unsigned char)in[i++]];
-        unsigned c = b64_table[(unsigned char)in[i++]];
-        unsigned d = b64_table[(unsigned char)in[i++]];
-        unsigned triple = (a << 18) | (b << 12) | (c << 6) | d;
+        uint32_t a = b64_table[(uint8_t)in[i++]];
+        uint32_t b = b64_table[(uint8_t)in[i++]];
+        uint32_t c = b64_table[(uint8_t)in[i++]];
+        uint32_t d = b64_table[(uint8_t)in[i++]];
+        uint32_t triple = (a << 18) | (b << 12) | (c << 6) | d;
         if (o < outlen - 1) out[o++] = (char)((triple >> 16) & 0xFF);
         if (o < outlen - 1 && in[i-2] != '=') out[o++] = (char)((triple >> 8) & 0xFF);
         if (o < outlen - 1 && in[i-1] != '=') out[o++] = (char)(triple & 0xFF);
@@ -581,9 +613,9 @@ static void http_send_json(int fd, const char *json, int len)
 // Constant-time comparison to prevent timing attacks
 static bool timing_safe_equal(const char *a, const char *b, size_t len)
 {
-    volatile unsigned char result = 0;
+    volatile uint8_t result = 0;
     for (size_t i = 0; i < len; i++)
-        result |= (unsigned char)a[i] ^ (unsigned char)b[i];
+        result |= (uint8_t)a[i] ^ (uint8_t)b[i];
     return result == 0;
 }
 
@@ -618,7 +650,7 @@ static char *json_escape(char *out, int outlen, const char *in)
 {
     int o = 0;
     for (int i = 0; in[i] && o < outlen - 8; i++) {
-        unsigned char c = (unsigned char)in[i];
+        uint8_t c = (uint8_t)in[i];
         switch (c) {
             case '"':  out[o++] = '\\'; out[o++] = '"'; break;
             case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
@@ -677,8 +709,9 @@ static bool json_get_bool(const char *json, const char *key, bool def)
     const char *v = json_find_key(json, key);
     if (!v) return def;
     while (*v == ' ') v++;
-    if (strncmp(v, "true", 4) == 0) return true;
-    if (strncmp(v, "false", 5) == 0) return false;
+    std::string_view sv(v);
+    if (sv.substr(0, 4) == "true") return true;
+    if (sv.substr(0, 5) == "false") return false;
     return def;
 }
 
@@ -716,7 +749,7 @@ static void panelApplyConfig(const char *body)
                 if (e && (e - v) > 0 && (e - v) < 64) {
                     free(MlatConfig.user);
                     int nlen = (int)(e - v);
-                    MlatConfig.user = malloc(nlen + 1);
+                    MlatConfig.user = (char*)malloc(nlen + 1);
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
                     panelLog("Panel: station name set to '%s'", MlatConfig.user);
                     // Sync OGN station name from station.name
@@ -770,9 +803,8 @@ static void panelApplyConfig(const char *body)
 
     // Beast feeds enabled/disabled
     for (int i = 0; i < Modes.beast_feed_count; i++) {
-        char needle[64];
-        snprintf(needle, sizeof(needle), "\"name\":\"%s\"", Modes.beast_feeds[i].name);
-        const char *pos = strstr(body, needle);
+        std::string needle = std::string("\"name\":\"") + Modes.beast_feeds[i].name + "\"";
+        const char *pos = strstr(body, needle.c_str());
         if (!pos) continue;
         const char *en_false = strstr(pos, "\"enabled\":false");
         const char *en_true = strstr(pos, "\"enabled\":true");
@@ -808,7 +840,7 @@ static void panelApplyConfig(const char *body)
                 if (e && (e - v) > 0 && (e - v) < 256) {
                     free(Modes.adsbhub_ckey);
                     int clen = (int)(e - v);
-                    Modes.adsbhub_ckey = malloc(clen + 1);
+                    Modes.adsbhub_ckey = (char*)malloc(clen + 1);
                     if (Modes.adsbhub_ckey) { memcpy(Modes.adsbhub_ckey, v, clen); Modes.adsbhub_ckey[clen] = '\0'; }
                     panelLog("Panel: ADSBHub ckey updated");
                 } else if (e && e == v) {
@@ -868,6 +900,64 @@ static void panelApplyConfig(const char *body)
         panelLog("Panel: IoT 868 output %s", IotOutputEnabled ? "enabled" : "disabled");
     }
 
+    // FANET decoder output toggle
+    const char *fanet = json_find_obj(body, "sdr_fanet");
+    if (fanet) {
+        FanetOutputEnabled = json_get_bool(fanet, "enabled", FanetOutputEnabled) ? 1 : 0;
+        panelLog("Panel: FANET output %s", FanetOutputEnabled ? "enabled" : "disabled");
+    }
+
+    // Sarsat decoder output toggle
+    const char *sarsat = json_find_obj(body, "sdr_sarsat");
+    if (sarsat) {
+        SarsatOutputEnabled = json_get_bool(sarsat, "enabled", SarsatOutputEnabled) ? 1 : 0;
+        panelLog("Panel: Sarsat output %s", SarsatOutputEnabled ? "enabled" : "disabled");
+    }
+
+    // Airframes.io ACARS/VDL2 feeds
+    const char *airframes = json_find_obj(body, "airframes");
+    if (airframes) {
+        // Station ID
+        const char *sid = json_find_key(airframes, "station_id");
+        if (sid) {
+            while (*sid == ' ') sid++;
+            if (*sid == '"') {
+                sid++;
+                const char *e = strchr(sid, '"');
+                if (e && (e - sid) < (int)sizeof(Modes.airframes_station_id) - 1) {
+                    memcpy(Modes.airframes_station_id, sid, e - sid);
+                    Modes.airframes_station_id[e - sid] = '\0';
+                }
+            }
+        }
+
+        // ACARS feed
+        const char *af_acars = json_find_obj(airframes, "acars");
+        if (af_acars) {
+            int was_enabled = Modes.airframes_acars_feed.enabled;
+            Modes.airframes_acars_feed.enabled = json_get_bool(af_acars, "enabled", Modes.airframes_acars_feed.enabled) ? 1 : 0;
+            if (was_enabled != Modes.airframes_acars_feed.enabled) {
+                panelLog("Panel: Airframes ACARS feed %s",
+                         Modes.airframes_acars_feed.enabled ? "enabled" : "disabled");
+                if (Modes.airframes_acars_feed.enabled)
+                    airframesFeedInit();
+            }
+        }
+
+        // VDL2 feed
+        const char *af_vdl2 = json_find_obj(airframes, "vdl2");
+        if (af_vdl2) {
+            int was_enabled = Modes.airframes_vdl2_feed.enabled;
+            Modes.airframes_vdl2_feed.enabled = json_get_bool(af_vdl2, "enabled", Modes.airframes_vdl2_feed.enabled) ? 1 : 0;
+            if (was_enabled != Modes.airframes_vdl2_feed.enabled) {
+                panelLog("Panel: Airframes VDL2 feed %s",
+                         Modes.airframes_vdl2_feed.enabled ? "enabled" : "disabled");
+                if (Modes.airframes_vdl2_feed.enabled)
+                    airframesFeedInit();
+            }
+        }
+    }
+
     panelLog("Panel: configuration applied at runtime (no restart)");
 }
 
@@ -924,7 +1014,7 @@ void panelLoadBeastFeedState(void)
     fseek(f, 0, SEEK_SET);
     if (sz <= 0 || sz > 131072) { fclose(f); return; }
 
-    char *data = malloc((size_t)sz + 1);
+    char *data = (char*)malloc((size_t)sz + 1);
     if (!data) { fclose(f); return; }
     size_t rd = fread(data, 1, (size_t)sz, f);
     fclose(f);
@@ -933,9 +1023,8 @@ void panelLoadBeastFeedState(void)
     // For each beast feed, look for its name in saved config and restore enabled state
     for (int i = 0; i < Modes.beast_feed_count; i++) {
         // Search for "name":"<feedname>" in the JSON
-        char needle[64];
-        snprintf(needle, sizeof(needle), "\"name\":\"%s\"", Modes.beast_feeds[i].name);
-        const char *pos = strstr(data, needle);
+        std::string needle = std::string("\"name\":\"") + Modes.beast_feeds[i].name + "\"";
+        const char *pos = strstr(data, needle.c_str());
         if (!pos) continue;
 
         // Use the closing brace of this JSON object as the boundary
@@ -969,7 +1058,7 @@ void panelLoadBeastFeedState(void)
                 if (e && (e - v) > 0 && (e - v) < 64) {
                     free(MlatConfig.user);
                     int nlen = (int)(e - v);
-                    MlatConfig.user = malloc(nlen + 1);
+                    MlatConfig.user = (char*)malloc(nlen + 1);
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
                     strncpy(FlarmConfig.ogn_station, MlatConfig.user, sizeof(FlarmConfig.ogn_station) - 1);
                     FlarmConfig.ogn_station[sizeof(FlarmConfig.ogn_station) - 1] = '\0';
@@ -1025,6 +1114,35 @@ void panelLoadBeastFeedState(void)
     const char *wetter = json_find_obj(data, "wettersonde");
     if (wetter) WettersondeEnabled = json_get_bool(wetter, "enabled", false);
 
+    // Restore airframes.io feed settings
+    const char *airframes = json_find_obj(data, "airframes");
+    if (airframes) {
+        const char *sid = json_find_key(airframes, "station_id");
+        if (sid) {
+            while (*sid == ' ') sid++;
+            if (*sid == '"') {
+                sid++;
+                const char *e = strchr(sid, '"');
+                if (e && (e - sid) < (int)sizeof(Modes.airframes_station_id) - 1) {
+                    memcpy(Modes.airframes_station_id, sid, e - sid);
+                    Modes.airframes_station_id[e - sid] = '\0';
+                }
+            }
+        }
+        const char *af_acars = json_find_obj(airframes, "acars");
+        if (af_acars) {
+            Modes.airframes_acars_feed.enabled = json_get_bool(af_acars, "enabled", false) ? 1 : 0;
+            fprintf(stderr, "Panel: Airframes ACARS %s by saved config\n",
+                    Modes.airframes_acars_feed.enabled ? "enabled" : "disabled");
+        }
+        const char *af_vdl2 = json_find_obj(airframes, "vdl2");
+        if (af_vdl2) {
+            Modes.airframes_vdl2_feed.enabled = json_get_bool(af_vdl2, "enabled", false) ? 1 : 0;
+            fprintf(stderr, "Panel: Airframes VDL2 %s by saved config\n",
+                    Modes.airframes_vdl2_feed.enabled ? "enabled" : "disabled");
+        }
+    }
+
     free(data);
 }
 
@@ -1032,18 +1150,14 @@ void panelLoadBeastFeedState(void)
 
 static void api_get_config(int fd)
 {
-    // 64KB buffer for config JSON
-    char *buf = malloc(65536);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
-
-    char *p = buf;
-    char *end = buf + 65536;
+    std::string buf;
+    buf.reserve(8192);
     char esc[256];
 
-    p += snprintf(p, (size_t)(end - p), "{\n");
+    buf += "{\n";
 
     // Station
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"station\":{\"lat\":%.6f,\"lon\":%.6f,\"max_range\":%.0f,\"name\":\"%s\"},\n",
         Modes.fUserLat, Modes.fUserLon, Modes.maxRange / 1852.0,
         MlatConfig.user ? json_escape(esc, sizeof(esc), MlatConfig.user) : "");
@@ -1051,9 +1165,9 @@ static void api_get_config(int fd)
     // SDR ADS-B and FLARM hardware details moved to /api/receivers and /api/decoders
 
     // Beast feeds
-    p += snprintf(p, (size_t)(end - p), "\"beast_feeds\":[\n");
+    buf += "\"beast_feeds\":[\n";
     for (int i = 0; i < Modes.beast_feed_count; i++) {
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"name\":\"%s\",\"host\":\"%s\",\"port\":%d,\"format\":\"%s\",\"enabled\":%s}",
             i ? "," : "",
             json_escape(esc, sizeof(esc), Modes.beast_feeds[i].name),
@@ -1062,12 +1176,12 @@ static void api_get_config(int fd)
             Modes.beast_feeds[i].format == FEED_FORMAT_RAW ? "raw" : Modes.beast_feeds[i].format == FEED_FORMAT_SBS ? "sbs" : "beast",
             Modes.beast_feeds[i].enabled ? "true" : "false");
     }
-    p += snprintf(p, (size_t)(end - p), "],\n");
+    buf += "],\n";
 
     // FR24, PlaneFinder, RadarBox feeders removed in light version
 
     // OpenSky
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"opensky\":{\"enabled\":%s,\"username\":\"%s\","
         "\"serial\":%d,\"host\":\"%s\",\"port\":%d},\n",
         OpenSkyConfig.enabled ? "true" : "false",
@@ -1077,13 +1191,13 @@ static void api_get_config(int fd)
         OpenSkyConfig.port);
 
     // PiAware
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"piaware\":{\"enabled\":%s,\"feeder_id\":\"%s\","
-        "\"state\":%d,\"msgs_sent\":%llu},\n",
+        "\"state\":%d,\"msgs_sent\":%" PRIu64 "},\n",
         PiawareClient.enabled ? "true" : "false",
         json_escape(esc, sizeof(esc), PiawareClient.feeder_id),
         PiawareClient.state,
-        (unsigned long long)PiawareClient.msgs_sent);
+        (uint64_t)PiawareClient.msgs_sent);
 
     // Radiosonde SDR status (derived from SdrManager)
     {
@@ -1094,7 +1208,7 @@ static void api_get_config(int fd)
                 break;
             }
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "\"sdr_radiosonde\":{\"enabled\":%s},\n",
             sonde_active ? "true" : "false");
     }
@@ -1110,7 +1224,7 @@ static void api_get_config(int fd)
                 break;
             }
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "\"sdr_pocsag\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\"},\n",
             pocsag_active ? "true" : "false",
             PocsagOutputEnabled ? "true" : "false",
@@ -1128,7 +1242,7 @@ static void api_get_config(int fd)
                 break;
             }
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "\"sdr_gsm\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\",\"cells\":%d},\n",
             gsm_active ? "true" : "false",
             GsmOutputEnabled ? "true" : "false",
@@ -1147,7 +1261,7 @@ static void api_get_config(int fd)
                 break;
             }
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "\"sdr_lte\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\",\"hop\":true,\"cells\":%d},\n",
             lte_active ? "true" : "false",
             LteOutputEnabled ? "true" : "false",
@@ -1166,7 +1280,7 @@ static void api_get_config(int fd)
                 break;
             }
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "\"sdr_iot868\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\",\"devices\":%d},\n",
             iot_active ? "true" : "false",
             IotOutputEnabled ? "true" : "false",
@@ -1174,92 +1288,149 @@ static void api_get_config(int fd)
             iotTrackerActiveCount());
     }
 
+    // FANET SDR status
+    {
+        int fanet_active = 0;
+        double fanet_freq = 868.200;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_FANET) {
+                fanet_active = 1;
+                fanet_freq = SdrManager.receivers[i].config.freq / 1e6;
+                break;
+            }
+        }
+        buf += sfmt(
+            "\"sdr_fanet\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\"},\n",
+            fanet_active ? "true" : "false",
+            FanetOutputEnabled ? "true" : "false",
+            fanet_freq);
+    }
+
+    // Sarsat SDR status
+    {
+        int sarsat_active = 0;
+        double sarsat_freq = 406.040;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_SARSAT) {
+                sarsat_active = 1;
+                sarsat_freq = SdrManager.receivers[i].config.freq / 1e6;
+                break;
+            }
+        }
+        buf += sfmt(
+            "\"sdr_sarsat\":{\"active\":%s,\"enabled\":%s,\"freq_mhz\":\"%.3f\"},\n",
+            sarsat_active ? "true" : "false",
+            SarsatOutputEnabled ? "true" : "false",
+            sarsat_freq);
+    }
+
     // Sonde feeds
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"sondehub\":{\"enabled\":%s,\"callsign\":\"%s\"},\n",
         SondehubConfig.enabled ? "true" : "false",
         json_escape(esc, sizeof(esc), SondehubConfig.callsign));
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"radiosondy\":{\"enabled\":%s},\n",
         RadiosondyEnabled ? "true" : "false");
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"wettersonde\":{\"enabled\":%s},\n",
         WettersondeEnabled ? "true" : "false");
 
     // MLAT
-    p += snprintf(p, (size_t)(end - p), "\"mlat\":{\"servers\":[\n");
+    buf += "\"mlat\":{\"servers\":[\n";
     for (int i = 0; i < MlatConfig.server_count; i++) {
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"host\":\"%s\",\"port\":%d,\"state\":%d}",
             i ? "," : "",
             MlatConfig.servers[i].host ? json_escape(esc, sizeof(esc), MlatConfig.servers[i].host) : "",
             MlatConfig.servers[i].port,
             (int)MlatConfig.servers[i].state);
     }
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "],\"alt\":%.0f,\"return_results\":%s},\n",
         MlatConfig.alt,
         MlatConfig.return_results ? "true" : "false");
 
     // OGN
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"ogn\":{\"server\":\"%s\",\"port\":%d},\n",
         json_escape(esc, sizeof(esc), FlarmConfig.ogn_server),
         FlarmConfig.ogn_port);
 
     // ADSBHub
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"adsbhub\":{\"ckey\":\"%s\"},\n",
         Modes.adsbhub_ckey ? json_escape(esc, sizeof(esc), Modes.adsbhub_ckey) : "");
 
     // Keys moved to /api/decoders
 
     // Network ports
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"network\":{\"raw_out\":\"%s\",\"raw_in\":\"%s\","
         "\"sbs_out\":\"%s\",\"beast_in\":\"%s\",\"beast_out\":\"%s\","
-        "\"json_dir\":\"%s\",\"json_interval\":%llu},\n",
+        "\"json_dir\":\"%s\",\"json_interval\":%" PRIu64 "},\n",
         Modes.net_output_raw_ports ? Modes.net_output_raw_ports : "",
         Modes.net_input_raw_ports ? Modes.net_input_raw_ports : "",
         Modes.net_output_sbs_ports ? Modes.net_output_sbs_ports : "",
         Modes.net_input_beast_ports ? Modes.net_input_beast_ports : "",
         Modes.net_output_beast_ports ? Modes.net_output_beast_ports : "",
         Modes.json_dir ? json_escape(esc, sizeof(esc), Modes.json_dir) : "",
-        (unsigned long long)Modes.json_interval);
+        (uint64_t)Modes.json_interval);
+
+    // Airframes.io ACARS/VDL2 feeds
+    {
+        int acars_active = 0, vdl2_active = 0;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_ACARS)
+                acars_active = 1;
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_VDL2)
+                vdl2_active = 1;
+        }
+        buf += sfmt(
+            "\"airframes\":{\"station_id\":\"%s\","
+            "\"acars\":{\"enabled\":%s,\"active\":%s,\"host\":\"%s\",\"port\":%d},"
+            "\"vdl2\":{\"enabled\":%s,\"active\":%s,\"host\":\"%s\",\"port\":%d}},\n",
+            json_escape(esc, sizeof(esc), Modes.airframes_station_id),
+            Modes.airframes_acars_feed.enabled ? "true" : "false",
+            acars_active ? "true" : "false",
+            Modes.airframes_acars_feed.host ? json_escape(esc, sizeof(esc), Modes.airframes_acars_feed.host) : "feed.acars.io",
+            Modes.airframes_acars_feed.port,
+            Modes.airframes_vdl2_feed.enabled ? "true" : "false",
+            vdl2_active ? "true" : "false",
+            Modes.airframes_vdl2_feed.host ? json_escape(esc, sizeof(esc), Modes.airframes_vdl2_feed.host) : "feed.acars.io",
+            Modes.airframes_vdl2_feed.port);
+    }
 
     // Panel
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"panel\":{\"port\":%d,\"has_password\":%s}\n",
         PanelState.port,
         PanelState.password[0] ? "true" : "false");
 
-    p += snprintf(p, (size_t)(end - p), "}\n");
+    buf += "}\n";
 
-    http_send_json(fd, buf, (int)(p - buf));
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= API: GET /api/status ======================
 
 static void api_get_status(int fd)
 {
-    char *buf = malloc(16384);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
+    std::string buf;
+    buf.reserve(4096);
+    char esc[256], esc2[256];
 
-    char *p = buf;
-    char *end = buf + 16384;
-
-    p += snprintf(p, (size_t)(end - p), "{\"feeders\":[\n");
+    buf += "{\"feeders\":[\n";
 
     // Beast feeds
     for (int i = 0; i < Modes.beast_feed_count; i++) {
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"name\":\"%s\",\"type\":\"beast\",\"enabled\":%s,"
             "\"host\":\"%s\",\"port\":%d}",
             (i > 0 || 0) ? "," : "",
-            Modes.beast_feeds[i].name,
+            json_escape(esc, sizeof(esc), Modes.beast_feeds[i].name),
             Modes.beast_feeds[i].enabled ? "true" : "false",
-            Modes.beast_feeds[i].host ? Modes.beast_feeds[i].host : "",
+            Modes.beast_feeds[i].host ? json_escape(esc2, sizeof(esc2), Modes.beast_feeds[i].host) : "",
             Modes.beast_feeds[i].port);
     }
 
@@ -1269,13 +1440,14 @@ static void api_get_status(int fd)
 
     // OpenSky — always show with enabled/disabled state
     {
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"name\":\"OpenSky Network\",\"type\":\"native\",\"enabled\":%s,"
             "\"host\":\"%s\",\"port\":%d,\"user\":\"%s\","
             "\"link\":\"https://opensky-network.org/my-opensky/sensors/view-sensors\"}",
             need_comma ? "," : "",
             OpenSkyConfig.enabled ? "true" : "false",
-            OpenSkyConfig.host, OpenSkyConfig.port, OpenSkyConfig.username);
+            json_escape(esc, sizeof(esc), OpenSkyConfig.host), OpenSkyConfig.port,
+            json_escape(esc2, sizeof(esc2), OpenSkyConfig.username));
         need_comma = 1;
     }
 
@@ -1284,14 +1456,14 @@ static void api_get_status(int fd)
         const char *pa_states[] = {"disconnected","connecting","tls_handshake","awaiting_login","logged_in"};
         int si = PiawareClient.state;
         if (si < 0 || si > 4) si = 0;
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"name\":\"PiAware / FlightAware\",\"type\":\"native\",\"enabled\":%s,"
-            "\"state\":\"%s\",\"feeder_id\":\"%s\",\"msgs\":%llu,"
+            "\"state\":\"%s\",\"feeder_id\":\"%s\",\"msgs\":%" PRIu64 ","
             "\"link\":\"https://flightaware.com/adsb/stats\"}",
             need_comma ? "," : "",
             PiawareClient.enabled ? "true" : "false",
-            pa_states[si], PiawareClient.feeder_id,
-            (unsigned long long)PiawareClient.msgs_sent);
+            pa_states[si], json_escape(esc, sizeof(esc), PiawareClient.feeder_id),
+            (uint64_t)PiawareClient.msgs_sent);
         need_comma = 1;
     }
 
@@ -1300,12 +1472,12 @@ static void api_get_status(int fd)
         const char *ml_states[] = {"disconnected","connecting","handshaking","ready"};
         int mi = (int)MlatConfig.servers[i].state;
         if (mi < 0 || mi > 3) mi = 0;
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"name\":\"MLAT:%s\",\"type\":\"mlat\",\"enabled\":true,"
             "\"host\":\"%s\",\"port\":%d,\"state\":\"%s\"}",
             need_comma ? "," : "",
-            MlatConfig.servers[i].host ? MlatConfig.servers[i].host : "?",
-            MlatConfig.servers[i].host ? MlatConfig.servers[i].host : "",
+            MlatConfig.servers[i].host ? json_escape(esc, sizeof(esc), MlatConfig.servers[i].host) : "?",
+            MlatConfig.servers[i].host ? json_escape(esc2, sizeof(esc2), MlatConfig.servers[i].host) : "",
             MlatConfig.servers[i].port,
             ml_states[mi]);
         need_comma = 1;
@@ -1321,20 +1493,57 @@ static void api_get_status(int fd)
                 break;
             }
         }
-        p += snprintf(p, (size_t)(end - p),
-            "%s{\"name\":\"FLARM / OGNTP\",\"type\":\"flarm\",\"enabled\":%s,"
+        buf += sfmt(
+            "%s{\"name\":\"FLARM / OGNTP / ADS-L / P3I\",\"type\":\"flarm\",\"enabled\":%s,"
             "\"station\":\"%s\",\"server\":\"%s\","
             "\"link\":\"http://live.glidernet.org\"}",
             need_comma ? "," : "",
             flarm_running ? "true" : "false",
-            FlarmConfig.ogn_station, FlarmConfig.ogn_server);
+            json_escape(esc, sizeof(esc), FlarmConfig.ogn_station),
+            json_escape(esc2, sizeof(esc2), FlarmConfig.ogn_server));
+        need_comma = 1;
     }
 
-    p += snprintf(p, (size_t)(end - p),
+    // Airframes.io ACARS feed
+    {
+        int acars_active = 0;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_ACARS) { acars_active = 1; break; }
+        }
+        buf += sfmt(
+            "%s{\"name\":\"Airframes ACARS\",\"type\":\"airframes\",\"enabled\":%s,"
+            "\"host\":\"%s\",\"port\":%d,\"decoder_active\":%s,"
+            "\"link\":\"https://app.airframes.io\"}",
+            need_comma ? "," : "",
+            Modes.airframes_acars_feed.enabled ? "true" : "false",
+            Modes.airframes_acars_feed.host ? json_escape(esc, sizeof(esc), Modes.airframes_acars_feed.host) : "",
+            Modes.airframes_acars_feed.port,
+            acars_active ? "true" : "false");
+        need_comma = 1;
+    }
+
+    // Airframes.io VDL2 feed
+    {
+        int vdl2_active = 0;
+        for (int i = 0; i < SdrManager.count; i++) {
+            if (SdrManager.receivers[i].config.role == SDR_ROLE_VDL2) { vdl2_active = 1; break; }
+        }
+        buf += sfmt(
+            "%s{\"name\":\"Airframes VDL2\",\"type\":\"airframes\",\"enabled\":%s,"
+            "\"host\":\"%s\",\"port\":%d,\"decoder_active\":%s,"
+            "\"link\":\"https://app.airframes.io\"}",
+            need_comma ? "," : "",
+            Modes.airframes_vdl2_feed.enabled ? "true" : "false",
+            Modes.airframes_vdl2_feed.host ? json_escape(esc, sizeof(esc), Modes.airframes_vdl2_feed.host) : "",
+            Modes.airframes_vdl2_feed.port,
+            vdl2_active ? "true" : "false");
+        need_comma = 1;
+    }
+
+    buf += sfmt(
         "],\"version\":\"" MODES_DUMP1090_VERSION "\",\"variant\":\"" MODES_DUMP1090_VARIANT "\"}\n");
 
-    http_send_json(fd, buf, (int)(p - buf));
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= API: GET /api/aircraft =====================
@@ -1347,10 +1556,9 @@ static void api_get_aircraft(int fd)
         return;
     }
 
-    char path[512];
-    snprintf(path, sizeof(path), "%s/aircraft.json", Modes.json_dir);
+    std::string path = std::string(Modes.json_dir) + "/aircraft.json";
 
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path.c_str(), "r");
     if (!f) {
         http_send(fd, 404, "text/plain", "No aircraft data", 16);
         return;
@@ -1366,76 +1574,129 @@ static void api_get_aircraft(int fd)
         return;
     }
 
-    char *data = malloc((size_t)fsize + 1);
-    if (!data) { fclose(f); http_send(fd, 500, "text/plain", "OOM", 3); return; }
-
-    size_t nread = fread(data, 1, (size_t)fsize, f);
+    std::string data((size_t)fsize, '\0');
+    size_t nread = fread(data.data(), 1, (size_t)fsize, f);
     fclose(f);
-    data[nread] = '\0';
+    data.resize(nread);
 
-    http_send_json(fd, data, (int)nread);
-    free(data);
+    http_send_json(fd, data.c_str(), (int)data.size());
 }
 
 // ============================= API: GET /api/gsm =========================
 
 static void api_get_gsm(int fd)
 {
-    char *json = gsmTrackerToJSON();
-    if (!json) {
-        http_send(fd, 500, "text/plain", "OOM", 3);
-        return;
-    }
-    http_send_json(fd, json, (int)strlen(json));
-    free(json);
+    std::string json = gsmTrackerToJSON();
+    http_send_json(fd, json.c_str(), (int)json.size());
 }
 
 // ============================= API: GET /api/lte =========================
 
 static void api_get_lte(int fd)
 {
-    char *json = lteTrackerToJSON();
-    if (!json) {
-        http_send(fd, 500, "text/plain", "OOM", 3);
-        return;
-    }
-    http_send_json(fd, json, (int)strlen(json));
-    free(json);
+    std::string json = lteTrackerToJSON();
+    http_send_json(fd, json.c_str(), (int)json.size());
 }
 
 // ============================= API: GET /api/iot868 =======================
 
 static void api_get_iot868(int fd)
 {
-    char *json = iotTrackerToJSON();
-    if (!json) {
-        http_send(fd, 500, "text/plain", "OOM", 3);
-        return;
+    std::string json = iotTrackerToJSON();
+    http_send_json(fd, json.c_str(), (int)json.size());
+}
+
+// ============================= API: GET /api/fanet ========================
+
+// Callback for ground track serialization
+struct fanet_ground_json_ctx {
+    std::string *buf;
+    int count;
+};
+
+static void fanet_ground_json_cb(const fanet_ground_entry_t *e, void *ctx)
+{
+    struct fanet_ground_json_ctx *c = (struct fanet_ground_json_ctx *)ctx;
+    uint64_t now = mstime();
+    int age_sec = (int)((now - e->last_seen) / 1000);
+    char esc_name[64];
+    *c->buf += sfmt(
+        "%s{\"addr\":\"%06X\",\"lat\":%.5f,\"lon\":%.5f,\"type\":%u,\"name\":\"%s\",\"age\":%d}",
+        c->count ? "," : "", e->addr, e->latitude, e->longitude,
+        (uint32_t)e->ground_type, json_escape(esc_name, sizeof(esc_name), e->name), age_sec);
+    c->count++;
+}
+
+static void api_get_fanet(int fd)
+{
+    std::string buf;
+    buf.reserve(4096);
+    fanet_stats_t stats = {0};
+
+    // Find the FANET receiver and get stats
+    for (int i = 0; i < SdrManager.count; i++) {
+        if (SdrManager.receivers[i].config.role == SDR_ROLE_FANET &&
+            SdrManager.receivers[i].decoder_state) {
+            fanet_get_stats((const fanet_state_t *)SdrManager.receivers[i].decoder_state, &stats);
+            break;
+        }
     }
-    http_send_json(fd, json, (int)strlen(json));
-    free(json);
+
+    buf += sfmt(
+        "{\"samples_processed\":%" PRIu64 ","
+        "\"preambles_detected\":%" PRIu64 ","
+        "\"sync_word_ok\":%" PRIu64 ","
+        "\"header_errors\":%" PRIu64 ","
+        "\"packets_decoded\":%" PRIu64 ","
+        "\"crc_errors\":%" PRIu64 ","
+        "\"type_counts\":{"
+        "\"ack\":%" PRIu64 ",\"tracking\":%" PRIu64 ",\"name\":%" PRIu64 ",\"message\":%" PRIu64 ","
+        "\"service\":%" PRIu64 ",\"landmark\":%" PRIu64 ",\"remote\":%" PRIu64 ",\"ground\":%" PRIu64 ","
+        "\"hwinfo\":%" PRIu64 ",\"thermal\":%" PRIu64 ",\"hwinfo2\":%" PRIu64 "}",
+        (uint64_t)stats.samples_processed,
+        (uint64_t)stats.preambles_detected,
+        (uint64_t)stats.sync_word_ok,
+        (uint64_t)stats.header_errors,
+        (uint64_t)stats.packets_decoded,
+        (uint64_t)stats.crc_errors,
+        (uint64_t)stats.type_counts[0],
+        (uint64_t)stats.type_counts[1],
+        (uint64_t)stats.type_counts[2],
+        (uint64_t)stats.type_counts[3],
+        (uint64_t)stats.type_counts[4],
+        (uint64_t)stats.type_counts[5],
+        (uint64_t)stats.type_counts[6],
+        (uint64_t)stats.type_counts[7],
+        (uint64_t)stats.type_counts[8],
+        (uint64_t)stats.type_counts[9],
+        (uint64_t)stats.type_counts[10]);
+
+    // Append ground tracking entries
+    buf += ",\"ground_tracks\":[";
+    struct fanet_ground_json_ctx ctx = { &buf, 0 };
+    fanetGetGroundTracks(fanet_ground_json_cb, &ctx);
+    buf += "]}";
+
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= API: GET /api/connections ==================
 
 static void api_get_connections(int fd)
 {
-    char *buf = malloc(32768);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
+    std::string buf;
+    buf.reserve(4096);
 
-    char *p = buf;
-    char *end = buf + 32768;
-
-    p += snprintf(p, (size_t)(end - p), "{\"services\":[\n");
+    buf += "{\"services\":[\n";
 
     int first_svc = 1;
     struct net_service *svc;
     for (svc = Modes.services; svc; svc = svc->next) {
-        if (!first_svc) p += snprintf(p, (size_t)(end - p), ",");
+        if (!first_svc) buf += ',';
         first_svc = 0;
 
         char esc[256];
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "{\"descr\":\"%s\",\"connections\":%d,\"listeners\":[",
             json_escape(esc, sizeof(esc), svc->descr ? svc->descr : "?"),
             svc->connections);
@@ -1445,18 +1706,16 @@ static void api_get_connections(int fd)
             struct sockaddr_in sa;
             socklen_t slen = sizeof(sa);
             if (getsockname(svc->listener_fds[i], (struct sockaddr *)&sa, &slen) == 0) {
-                p += snprintf(p, (size_t)(end - p), "%s%d",
-                    i ? "," : "", ntohs(sa.sin_port));
+                buf += sfmt("%s%d", i ? "," : "", ntohs(sa.sin_port));
             }
         }
-        p += snprintf(p, (size_t)(end - p), "],\"clients\":[");
+        buf += "],\"clients\":[";
 
         // Walk client list and find clients belonging to this service
         int first_cli = 1;
         struct client *c;
         for (c = Modes.clients; c; c = c->next) {
             if (c->service != svc) continue;
-            if (p >= end - 256) break;  // safety margin
 
             struct sockaddr_in peer;
             socklen_t plen = sizeof(peer);
@@ -1467,25 +1726,24 @@ static void api_get_connections(int fd)
             }
 
             // Build flags string
-            char flags[64] = "";
-            if (c->modeac_requested) strcat(flags, "AC ");
-            if (c->verbatim_requested) strcat(flags, "V ");
-            if (c->local_requested) strcat(flags, "L ");
+            std::string flags;
+            if (c->modeac_requested) flags += "AC ";
+            if (c->verbatim_requested) flags += "V ";
+            if (c->local_requested) flags += "L ";
 
-            if (!first_cli) p += snprintf(p, (size_t)(end - p), ",");
+            if (!first_cli) buf += ',';
             first_cli = 0;
-            p += snprintf(p, (size_t)(end - p),
+            buf += sfmt(
                 "{\"addr\":\"%s\",\"fd\":%d,\"flags\":\"%s\"}",
-                addr, c->fd, flags);
+                addr, c->fd, flags.c_str());
         }
 
-        p += snprintf(p, (size_t)(end - p), "]}");
+        buf += "]}";
     }
 
-    p += snprintf(p, (size_t)(end - p), "]}\n");
+    buf += "]}\n";
 
-    http_send_json(fd, buf, (int)(p - buf));
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= API: GET /api/stats =======================
@@ -1497,10 +1755,9 @@ static void api_get_stats(int fd)
         return;
     }
 
-    char path[512];
-    snprintf(path, sizeof(path), "%s/stats.json", Modes.json_dir);
+    std::string path = std::string(Modes.json_dir) + "/stats.json";
 
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path.c_str(), "r");
     if (!f) {
         http_send(fd, 404, "text/plain", "No stats data", 13);
         return;
@@ -1516,30 +1773,25 @@ static void api_get_stats(int fd)
         return;
     }
 
-    char *data = malloc((size_t)fsize + 1);
-    if (!data) { fclose(f); http_send(fd, 500, "text/plain", "OOM", 3); return; }
-
-    size_t nread = fread(data, 1, (size_t)fsize, f);
+    std::string data((size_t)fsize, '\0');
+    size_t nread = fread(data.data(), 1, (size_t)fsize, f);
     fclose(f);
+    data.resize(nread);
 
-    http_send_json(fd, data, (int)nread);
-    free(data);
+    http_send_json(fd, data.c_str(), (int)data.size());
 }
 
 // ============================= API: GET /api/logs ========================
 
 static void api_get_logs(int fd)
 {
-    char *buf = malloc(65536);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
-
-    char *p = buf;
-    char *end = buf + 65536;
+    std::string buf;
+    buf.reserve(4096);
     char esc[512];
 
     pthread_mutex_lock(&PanelState.log_mutex);
 
-    p += snprintf(p, (size_t)(end - p), "{\"seq\":%d,\"lines\":[\n", PanelState.log_seq);
+    buf += sfmt("{\"seq\":%d,\"lines\":[\n", PanelState.log_seq);
 
     // Return last N lines (max 200 per request)
     int count = PanelState.log_count;
@@ -1549,56 +1801,51 @@ static void api_get_logs(int fd)
         count = 200;
     }
 
-    for (int i = 0; i < count && p < end - 300; i++) {
+    for (int i = 0; i < count; i++) {
         int idx = (PanelState.log_head + start_offset + i) % PANEL_LOG_LINES;
-        p += snprintf(p, (size_t)(end - p), "%s\"%s\"",
-                      i ? "," : "",
-                      json_escape(esc, sizeof(esc), PanelState.log_buf[idx]));
+        buf += sfmt("%s\"%s\"",
+                    i ? "," : "",
+                    json_escape(esc, sizeof(esc), PanelState.log_buf[idx]));
     }
 
     pthread_mutex_unlock(&PanelState.log_mutex);
 
-    p += snprintf(p, (size_t)(end - p), "]}\n");
+    buf += "]}\n";
 
-    http_send_json(fd, buf, (int)(p - buf));
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= API: GET /api/messages =====================
 
 static void api_get_messages(int fd)
 {
-    char *buf = malloc(65536);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
-
-    char *p = buf;
-    char *end = buf + 65536;
+    std::string buf;
+    buf.reserve(8192);
     char esc[512];
 
     pthread_mutex_lock(&PanelState.msg_mutex);
 
-    p += snprintf(p, (size_t)(end - p), "{\"seq\":%d,\"messages\":[\n", PanelState.msg_seq);
+    buf += sfmt("{\"seq\":%d,\"messages\":[\n", PanelState.msg_seq);
 
     int count = PanelState.msg_count;
     int start_offset = 0;
-    if (count > 200) {
-        start_offset = count - 200;
-        count = 200;
+    if (count > 2000) {
+        start_offset = count - 2000;
+        count = 2000;
     }
 
-    for (int i = 0; i < count && p < end - 300; i++) {
+    for (int i = 0; i < count; i++) {
         int idx = (PanelState.msg_head + start_offset + i) % PANEL_MSG_LINES;
-        p += snprintf(p, (size_t)(end - p), "%s\"%s\"",
-                      i ? "," : "",
-                      json_escape(esc, sizeof(esc), PanelState.msg_buf[idx]));
+        buf += sfmt("%s\"%s\"",
+                    i ? "," : "",
+                    json_escape(esc, sizeof(esc), PanelState.msg_buf[idx]));
     }
 
     pthread_mutex_unlock(&PanelState.msg_mutex);
 
-    p += snprintf(p, (size_t)(end - p), "]}\n");
+    buf += "]}\n";
 
-    http_send_json(fd, buf, (int)(p - buf));
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= Input Validation ==========================
@@ -1680,7 +1927,7 @@ static bool sanitize_json_config(const char *body)
                 if (key_pos < (int)sizeof(last_key) - 1)
                     last_key[key_pos++] = body[i];
             } else if (!skip_value) {
-                unsigned char c = (unsigned char)body[i];
+                uint8_t c = (uint8_t)body[i];
                 // Block dangerous characters inside JSON string values
                 if (c == '`' || c == '$' || c == '!'
                     || c == '|' || c == ';' || c == '&'
@@ -1763,7 +2010,7 @@ static void serve_file(int fd, const char *filename)
 
     // Only allow safe filename characters
     for (int i = 0; filename[i]; i++) {
-        unsigned char c = (unsigned char)filename[i];
+        uint8_t c = (uint8_t)filename[i];
         if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z')
             && !(c >= '0' && c <= '9') && c != '.' && c != '-'
             && c != '_' && c != '/') {
@@ -1772,13 +2019,12 @@ static void serve_file(int fd, const char *filename)
         }
     }
 
-    char path[512];
-    snprintf(path, sizeof(path), "%s/%s", PanelState.html_dir, filename);
+    std::string path = std::string(PanelState.html_dir) + "/" + filename;
 
     // Resolve real path and verify it's under html_dir
     char resolved[PATH_MAX];
     char resolved_base[PATH_MAX];
-    if (realpath(path, resolved) && realpath(PanelState.html_dir, resolved_base)) {
+    if (realpath(path.c_str(), resolved) && realpath(PanelState.html_dir, resolved_base)) {
         if (strncmp(resolved, resolved_base, strlen(resolved_base)) != 0) {
             http_send(fd, 404, "text/plain", "Not found", 9);
             panelLog("Panel: blocked path traversal attempt: %s", filename);
@@ -1787,10 +2033,10 @@ static void serve_file(int fd, const char *filename)
     }
     // If realpath fails (dir missing), fall through to fopen which will trigger fallback
 
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path.c_str(), "r");
     if (!f) {
         // Serve embedded fallback
-        const char *fallback =
+        std::string buf = sfmt(
             "<!DOCTYPE html><html><head><title>dump1090-gg Panel</title></head>"
             "<body style='background:#0a0a1a;color:#e0e0e0;font-family:sans-serif;text-align:center;padding:40px'>"
             "<h1>dump1090-gg Control Panel</h1>"
@@ -1802,10 +2048,8 @@ static void serve_file(int fd, const char *filename)
             "<a href='/api/logs'>/api/logs</a> | <a href='/api/messages'>/api/messages</a> | "
             "<a href='/api/devices'>/api/devices</a></p>"
             "<p><a href='/devices.html' style='color:#4fc3f7;font-size:1.2em'>&#x1f4e1; SDR Devices Page</a></p>"
-            "</body></html>";
-        char buf[1024];
-        int len = snprintf(buf, sizeof(buf), fallback, path, PanelState.html_dir);
-        http_send(fd, 200, "text/html; charset=utf-8", buf, len);
+            "</body></html>", path.c_str(), PanelState.html_dir);
+        http_send(fd, 200, "text/html; charset=utf-8", buf.c_str(), (int)buf.size());
         return;
     }
 
@@ -1819,7 +2063,7 @@ static void serve_file(int fd, const char *filename)
         return;
     }
 
-    char *data = malloc((size_t)fsize);
+    char *data = (char*)malloc((size_t)fsize);
     if (!data) { fclose(f); http_send(fd, 500, "text/plain", "OOM", 3); return; }
 
     size_t nread = fread(data, 1, (size_t)fsize, f);
@@ -1827,12 +2071,13 @@ static void serve_file(int fd, const char *filename)
 
     // Determine content type
     const char *ct = "text/plain";
-    if (strstr(filename, ".html")) ct = "text/html; charset=utf-8";
-    else if (strstr(filename, ".js")) ct = "application/javascript";
-    else if (strstr(filename, ".css")) ct = "text/css";
-    else if (strstr(filename, ".json")) ct = "application/json";
-    else if (strstr(filename, ".png")) ct = "image/png";
-    else if (strstr(filename, ".svg")) ct = "image/svg+xml";
+    std::string_view fn(filename);
+    if (fn.find(".html") != std::string_view::npos) ct = "text/html; charset=utf-8";
+    else if (fn.find(".js") != std::string_view::npos) ct = "application/javascript";
+    else if (fn.find(".css") != std::string_view::npos) ct = "text/css";
+    else if (fn.find(".json") != std::string_view::npos) ct = "application/json";
+    else if (fn.find(".png") != std::string_view::npos) ct = "image/png";
+    else if (fn.find(".svg") != std::string_view::npos) ct = "image/svg+xml";
 
     http_send(fd, 200, ct, data, (int)nread);
     free(data);
@@ -1922,15 +2167,14 @@ static const char *tuner_freq_range_sdr(sdr_tuner_type_t type) {
 
 static void api_get_receivers(int fd)
 {
-    char *buf = malloc(32768);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
-    int pos = 0;
+    std::string buf;
+    buf.reserve(4096);
 
-    pos += snprintf(buf + pos, 32768 - pos, "{\"receivers\":[");
+    buf += "{\"receivers\":[";
 
     for (int i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
-        if (i > 0) pos += snprintf(buf + pos, 32768 - pos, ",");
+        if (i > 0) buf += ',';
 
         // Resolve tuner name: prefer tuner_cache (SDR_TUNER enum from probe), fallback to backend_dev
         const char *tname = "unknown", *trange = "unknown";
@@ -1943,7 +2187,7 @@ static void api_get_receivers(int fd)
             trange = tuner_freq_range_sdr(rx->backend_dev->tuner_type);
         }
 
-        pos += snprintf(buf + pos, 32768 - pos,
+        buf += sfmt(
             "{\"id\":%d,\"serial\":\"%.63s\",\"serial_actual\":\"%.63s\","
             "\"role\":\"%s\",\"state\":\"%s\","
             "\"freq\":%d,\"gain\":%.1f,\"ppm\":%d,"
@@ -1960,20 +2204,19 @@ static void api_get_receivers(int fd)
         // Emit supported gain values in dB
         if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
             for (int g = 0; g < rx->rtl.gain_steps; g++) {
-                if (g > 0) pos += snprintf(buf + pos, 32768 - pos, ",");
-                pos += snprintf(buf + pos, 32768 - pos, "%.1f", rx->rtl.gains[g] / 10.0);
+                if (g > 0) buf += ',';
+                buf += sfmt("%.1f", rx->rtl.gains[g] / 10.0);
             }
         }
         const char *be_name = (rx->backend_ops && rx->backend_ops->name)
                               ? rx->backend_ops->name : sdrBackendName(rx->config.backend);
-        pos += snprintf(buf + pos, 32768 - pos, "],\"backend\":\"%s\"}", be_name);
+        buf += sfmt("],\"backend\":\"%s\"}", be_name);
     }
 
-    pos += snprintf(buf + pos, 32768 - pos, "],\"count\":%d,\"max\":%d,\"backends_available\":%d}",
-                    SdrManager.count, MAX_SDR_RECEIVERS, sdrBackendAvailable());
+    buf += sfmt("],\"count\":%d,\"max\":%d,\"backends_available\":%d}",
+                SdrManager.count, MAX_SDR_RECEIVERS, sdrBackendAvailable());
 
-    http_send_json(fd, buf, pos);
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 static void rx_set_freq_for_role(rx_config_t *cfg)
@@ -1988,6 +2231,8 @@ static void rx_set_freq_for_role(rx_config_t *cfg)
         case SDR_ROLE_GSM:        cfg->freq = 947000000;  cfg->sample_rate = 1000000;  break;
         case SDR_ROLE_LTE:        cfg->freq = LTE_DEFAULT_FREQ; cfg->sample_rate = LTE_SAMPLE_RATE; break;
         case SDR_ROLE_IOT868:     cfg->freq = IOT_CENTER_FREQ;  cfg->sample_rate = IOT_SAMPLE_RATE; break;
+        case SDR_ROLE_FANET:      cfg->freq = FANET_CENTER_FREQ; cfg->sample_rate = FANET_SAMPLE_RATE; break;
+        case SDR_ROLE_SARSAT:     cfg->freq = SARSAT_CENTER_FREQ; cfg->sample_rate = SARSAT_SAMPLE_RATE; break;
         default:                  cfg->freq = 0;          cfg->sample_rate = 0;       break;
     }
 }
@@ -2016,9 +2261,9 @@ static void api_get_stats_quick(int fd)
         uint64_t sum = __atomic_load_n(&rx->ag_iq_sum, __ATOMIC_RELAXED);
         uint64_t cnt = __atomic_load_n(&rx->ag_iq_count, __ATOMIC_RELAXED);
         p += snprintf(p, (size_t)(end - p),
-            "%s{\"serial\":\"%s\",\"iq_sum\":%llu,\"iq_count\":%llu}",
+            "%s{\"serial\":\"%s\",\"iq_sum\":%" PRIu64 ",\"iq_count\":%" PRIu64 "}",
             i ? "," : "", rx->serial_actual,
-            (unsigned long long)sum, (unsigned long long)cnt);
+            (uint64_t)sum, (uint64_t)cnt);
     }
 
     p += snprintf(p, (size_t)(end - p), "]}");
@@ -2123,7 +2368,8 @@ static void api_post_receiver_toggle(int fd, const char *body)
     char resp[256];
     int rlen;
 
-    if (strcmp(action, "stop") == 0) {
+    std::string_view action_sv(action);
+    if (action_sv == "stop") {
         if (rx->state == RX_STATE_RUNNING) {
             rxStop(rx);
             rxClose(rx);
@@ -2135,7 +2381,7 @@ static void api_post_receiver_toggle(int fd, const char *body)
                 serial, rxStateName(rx->state));
         }
         http_send(fd, 200, "application/json", resp, rlen);
-    } else if (strcmp(action, "start") == 0) {
+    } else if (action_sv == "start") {
         if (rx->state == RX_STATE_RUNNING) {
             rlen = snprintf(resp, sizeof(resp),
                 "{\"ok\":true,\"message\":\"Receiver %s already running\",\"state\":\"running\"}", serial);
@@ -2217,6 +2463,8 @@ static void api_post_receiver_assign(int fd, const char *body)
     else if (!strcasecmp(role_str, "gsm")) role = SDR_ROLE_GSM;
     else if (!strcasecmp(role_str, "lte")) role = SDR_ROLE_LTE;
     else if (!strcasecmp(role_str, "iot868")) role = SDR_ROLE_IOT868;
+    else if (!strcasecmp(role_str, "fanet")) role = SDR_ROLE_FANET;
+    else if (!strcasecmp(role_str, "sarsat")) role = SDR_ROLE_SARSAT;
 
     // Check if this serial is already managed
     int idx = sdrManagerFindBySerial(serial);
@@ -2329,16 +2577,14 @@ static void api_post_receiver_assign(int fd, const char *body)
 
 static void api_get_decoders(int fd)
 {
-    char *buf = malloc(32768);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
+    std::string buf;
+    buf.reserve(8192);
+    char esc[256], esc2[256], esc3[256];
 
-    char *p = buf;
-    char *end = buf + 32768;
-
-    p += snprintf(p, (size_t)(end - p), "{\n");
+    buf += "{\n";
 
     // ADS-B decoder config — full adsb_decoder_config_t
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"adsb\":{"
         "\"fix_crc\":%d,\"check_crc\":%s,\"fix_df\":%s,"
         "\"enable_df24\":%s,\"mode_ac\":%s,\"mode_ac_auto\":%s,"
@@ -2396,7 +2642,7 @@ static void api_get_decoders(int fd)
                 DecoderConfigs.flarm.key5[0], DecoderConfigs.flarm.key5[1],
                 DecoderConfigs.flarm.key5[2], DecoderConfigs.flarm.key5[3]);
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "\"flarm\":{\"enabled\":%s,\"ogn_only\":%s,"
             "\"ogn_server\":\"%s\",\"ogn_port\":%d,\"ogn_station\":\"%s\","
             "\"keys_file\":\"%s\",\"keys_loaded\":%s,\"key_table\":\"%s\","
@@ -2404,10 +2650,10 @@ static void api_get_decoders(int fd)
             "\"key5\":\"%s\"},\n",
             DecoderConfigs.flarm.enabled ? "true" : "false",
             DecoderConfigs.flarm.ogn_only ? "true" : "false",
-            DecoderConfigs.flarm.ogn_server,
+            json_escape(esc, sizeof(esc), DecoderConfigs.flarm.ogn_server),
             DecoderConfigs.flarm.ogn_port,
-            DecoderConfigs.flarm.ogn_station,
-            DecoderConfigs.flarm.keys_file,
+            json_escape(esc2, sizeof(esc2), DecoderConfigs.flarm.ogn_station),
+            json_escape(esc3, sizeof(esc3), DecoderConfigs.flarm.keys_file),
             DecoderConfigs.flarm.keys_loaded ? "true" : "false",
             kt,
             DecoderConfigs.flarm.key2, DecoderConfigs.flarm.key3, DecoderConfigs.flarm.key4,
@@ -2415,21 +2661,21 @@ static void api_get_decoders(int fd)
     }
 
     // ACARS decoder config
-    p += snprintf(p, (size_t)(end - p), "\"acars\":{\"enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
+    buf += sfmt("\"acars\":{\"enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
         DecoderConfigs.acars.enabled ? "true" : "false", DecoderConfigs.acars.center_freq);
     for (int i = 0; i < DecoderConfigs.acars.num_channels; i++)
-        p += snprintf(p, (size_t)(end - p), "%s%.0f", i ? "," : "", DecoderConfigs.acars.channel_freqs[i]);
-    p += snprintf(p, (size_t)(end - p), "]},\n");
+        buf += sfmt("%s%.0f", i ? "," : "", DecoderConfigs.acars.channel_freqs[i]);
+    buf += "]},\n";
 
     // VDL2 decoder config
-    p += snprintf(p, (size_t)(end - p), "\"vdl2\":{\"enabled\":%s,\"center_freq\":%.0f,\"squelch_level\":%.1f,\"channels\":[",
+    buf += sfmt("\"vdl2\":{\"enabled\":%s,\"center_freq\":%.0f,\"squelch_level\":%.1f,\"channels\":[",
         DecoderConfigs.vdl2.enabled ? "true" : "false", DecoderConfigs.vdl2.center_freq, DecoderConfigs.vdl2.squelch_level);
     for (int i = 0; i < DecoderConfigs.vdl2.num_channels; i++)
-        p += snprintf(p, (size_t)(end - p), "%s%.0f", i ? "," : "", DecoderConfigs.vdl2.channel_freqs[i]);
-    p += snprintf(p, (size_t)(end - p), "]},\n");
+        buf += sfmt("%s%.0f", i ? "," : "", DecoderConfigs.vdl2.channel_freqs[i]);
+    buf += "]},\n";
 
     // Radiosonde decoder config
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"radiosonde\":{\"enabled\":%s,\"sondehub_upload\":%s,"
         "\"radiosondy_upload\":%s,\"wettersonde_upload\":%s,"
         "\"callsign\":\"%s\",\"center_freq\":%.0f},\n",
@@ -2441,23 +2687,23 @@ static void api_get_decoders(int fd)
         DecoderConfigs.radiosonde.center_freq);
 
     // POCSAG decoder config
-    p += snprintf(p, (size_t)(end - p), "\"pocsag\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
+    buf += sfmt("\"pocsag\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
         DecoderConfigs.pocsag.enabled ? "true" : "false",
         DecoderConfigs.pocsag.output_enabled ? "true" : "false",
         DecoderConfigs.pocsag.center_freq);
     for (int i = 0; i < DecoderConfigs.pocsag.num_channels; i++)
-        p += snprintf(p, (size_t)(end - p), "%s%.0f", i ? "," : "", DecoderConfigs.pocsag.channel_freqs[i]);
-    p += snprintf(p, (size_t)(end - p), "]},\n");
+        buf += sfmt("%s%.0f", i ? "," : "", DecoderConfigs.pocsag.channel_freqs[i]);
+    buf += "]},\n";
 
     // GSM decoder config
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"gsm\":{\"enabled\":%s,\"output_enabled\":%s,\"arfcn_freq\":%.0f,\"tsc\":%d},\n",
         DecoderConfigs.gsm.enabled ? "true" : "false",
         DecoderConfigs.gsm.output_enabled ? "true" : "false",
         DecoderConfigs.gsm.arfcn_freq, DecoderConfigs.gsm.tsc);
 
     // LTE decoder config
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"lte\":{\"enabled\":%s,\"output_enabled\":%s,\"hop_enabled\":%s,\"center_freq\":%.0f},\n",
         DecoderConfigs.lte.enabled ? "true" : "false",
         DecoderConfigs.lte.output_enabled ? "true" : "false",
@@ -2465,14 +2711,28 @@ static void api_get_decoders(int fd)
         DecoderConfigs.lte.center_freq);
 
     // IoT 868 decoder config
-    p += snprintf(p, (size_t)(end - p),
+    buf += sfmt(
         "\"iot868\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f},\n",
         DecoderConfigs.iot868.enabled ? "true" : "false",
         DecoderConfigs.iot868.output_enabled ? "true" : "false",
         DecoderConfigs.iot868.center_freq);
 
+    // FANET decoder config
+    buf += sfmt(
+        "\"fanet\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f},\n",
+        DecoderConfigs.fanet.enabled ? "true" : "false",
+        DecoderConfigs.fanet.output_enabled ? "true" : "false",
+        DecoderConfigs.fanet.center_freq);
+
+    // Sarsat decoder config
+    buf += sfmt(
+        "\"sarsat\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f},\n",
+        DecoderConfigs.sarsat.enabled ? "true" : "false",
+        DecoderConfigs.sarsat.output_enabled ? "true" : "false",
+        DecoderConfigs.sarsat.center_freq);
+
     // Dongles (from SDR Manager)
-    p += snprintf(p, (size_t)(end - p), "\"dongles\":[\n");
+    buf += "\"dongles\":[\n";
     pthread_mutex_lock(&SdrManager.lock);
     for (int i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
@@ -2487,18 +2747,19 @@ static void api_get_decoders(int fd)
             case SDR_ROLE_GSM: role_str = "gsm"; break;
             case SDR_ROLE_LTE: role_str = "lte"; break;
             case SDR_ROLE_IOT868: role_str = "iot868"; break;
+            case SDR_ROLE_FANET: role_str = "fanet"; break;
+            case SDR_ROLE_SARSAT: role_str = "sarsat"; break;
             default: role_str = "none"; break;
         }
-        p += snprintf(p, (size_t)(end - p),
+        buf += sfmt(
             "%s{\"id\":%d,\"serial\":\"%s\",\"gain\":%.1f,\"ppm\":%d,\"decoder\":\"%s\"}",
             i ? ",\n" : "",
             rx->id, rx->config.serial, rx->config.gain, rx->config.ppm_error, role_str);
     }
     pthread_mutex_unlock(&SdrManager.lock);
-    p += snprintf(p, (size_t)(end - p), "\n]\n}\n");
+    buf += "\n]\n}\n";
 
-    http_send_json(fd, buf, (int)(p - buf));
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= API: POST /api/decoders ====================
@@ -2520,6 +2781,8 @@ static void api_post_decoders(int fd, const char *body)
     GsmOutputEnabled = DecoderConfigs.gsm.output_enabled ? 1 : 0;
     LteOutputEnabled = DecoderConfigs.lte.output_enabled ? 1 : 0;
     IotOutputEnabled = DecoderConfigs.iot868.output_enabled ? 1 : 0;
+    FanetOutputEnabled = DecoderConfigs.fanet.output_enabled ? 1 : 0;
+    SarsatOutputEnabled = DecoderConfigs.sarsat.output_enabled ? 1 : 0;
 
     // Save
     decoderConfigSave();
@@ -2534,11 +2797,10 @@ static void api_post_decoders(int fd, const char *body)
 
 static void api_get_devices(int fd)
 {
-    char *buf = malloc(16384);
-    if (!buf) { http_send(fd, 500, "text/plain", "OOM", 3); return; }
-    int pos = 0;
+    std::string buf;
+    buf.reserve(4096);
 
-    pos += snprintf(buf + pos, 16384 - pos, "{\"sdr_devices\":[");
+    buf += "{\"sdr_devices\":[";
 
     sdr_dev_info_t all_devs[MAX_SDR_RECEIVERS];
     int count = sdrBackendEnumerateAll(all_devs, MAX_SDR_RECEIVERS);
@@ -2582,8 +2844,8 @@ static void api_get_devices(int fd)
             trange = "unknown";
         }
 
-        if (i > 0) pos += snprintf(buf + pos, 16384 - pos, ",");
-        pos += snprintf(buf + pos, 16384 - pos,
+        if (i > 0) buf += ',';
+        buf += sfmt(
             "{\"index\":%d,\"name\":\"%s\",\"vendor\":\"%s\",\"product\":\"%s\","
             "\"serial\":\"%s\",\"role\":\"%s\",\"state\":\"%s\","
             "\"tuner\":\"%s\",\"freq_range\":\"%s\"}",
@@ -2597,9 +2859,9 @@ static void api_get_devices(int fd)
         for (int r = 0; r < SdrManager.count; r++) {
             sdr_receiver_t *rx = &SdrManager.receivers[r];
             if (rx->config.ifile_path[0] == '\0') continue;  // skip real SDR
-            if (need_comma) pos += snprintf(buf + pos, 16384 - pos, ",");
+            if (need_comma) buf += ',';
             need_comma = 1;
-            pos += snprintf(buf + pos, 16384 - pos,
+            buf += sfmt(
                 "{\"index\":%d,\"name\":\"Virtual IQ Replay\",\"vendor\":\"Virtual\","
                 "\"product\":\"IQ File\",\"serial\":\"%s\","
                 "\"role\":\"%s\",\"state\":\"%s\","
@@ -2611,7 +2873,7 @@ static void api_get_devices(int fd)
         }
     }
 
-    pos += snprintf(buf + pos, 16384 - pos, "],\"usb_devices\":[");
+    buf += "],\"usb_devices\":[";
 
     // Enumerate all USB devices via /sys/bus/usb
     FILE *fp = popen("lsusb 2>/dev/null", "r");
@@ -2625,20 +2887,19 @@ static void api_get_devices(int fd)
                 line[--llen] = '\0';
             // Skip root hubs
             if (strstr(line, "1d6b:000")) continue;
-            if (!first) pos += snprintf(buf + pos, 16384 - pos, ",");
+            if (!first) buf += ',';
             first = 0;
             // Escape for JSON
-            pos += snprintf(buf + pos, 16384 - pos, "\"%s\"", line);
+            buf += sfmt("\"%s\"", line);
         }
         pclose(fp);
     }
 
-    pos += snprintf(buf + pos, 16384 - pos,
+    buf += sfmt(
         "],\"rx_count\":%d,\"rx_max\":%d}",
         SdrManager.count, MAX_SDR_RECEIVERS);
 
-    http_send_json(fd, buf, pos);
-    free(buf);
+    http_send_json(fd, buf.c_str(), (int)buf.size());
 }
 
 // ============================= GSM Cells Page ============================
@@ -2693,6 +2954,7 @@ static void serve_gsm_page(int fd)
         "<a class='active' href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -2872,6 +3134,7 @@ static void serve_lte_page(int fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3055,6 +3318,7 @@ static void serve_iot868_page(int fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a class='active' href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3184,6 +3448,149 @@ static void serve_iot868_page(int fd)
     http_send(fd, 200, "text/html", html, (int)strlen(html));
 }
 
+static void serve_fanet_page(int fd)
+{
+    const char *html =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>FANET - dump1090-gg</title>"
+        "<style>"
+        ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
+        "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
+        "nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}"
+        "nav h1{font-size:18px;color:var(--accent);white-space:nowrap;margin:0}"
+        ".tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}"
+        ".tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}"
+        ".tabs a:hover{background:var(--hover);color:var(--text)}"
+        ".tabs a.active{background:var(--accent);color:#000;font-weight:600}"
+        ".main{padding:20px;max-width:1600px;margin:0 auto}"
+        "h2{color:var(--accent);margin-top:0}"
+        ".card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}"
+        ".stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px}"
+        ".stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}"
+        ".stat .val{font-size:24px;font-weight:700;color:var(--accent)}"
+        ".stat .lbl{font-size:11px;color:var(--dim);margin-top:4px}"
+        ".no-data{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:40px;text-align:center;color:var(--dim)}"
+        ".no-data h3{color:var(--accent);margin-bottom:8px}"
+        ".toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}"
+        ".btn{padding:6px 14px;border:1px solid var(--accent);border-radius:4px;cursor:pointer;font-size:13px;background:var(--head);color:var(--accent)}"
+        ".btn:hover{background:var(--accent);color:#000}"
+        "table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}"
+        "th{background:var(--head);color:var(--accent);padding:8px;text-align:left}"
+        "td{padding:6px 8px;border-bottom:1px solid var(--border)}"
+        "tr:hover td{background:var(--hover)}"
+        "@media(max-width:768px){.stats{grid-template-columns:1fr 1fr}}"
+        "</style></head><body>"
+        "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
+        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/status.html'>&#x1f4e1; Status</a>"
+        "<a href='/connections.html'>&#x1f50c; Connections</a>"
+        "<a href='/logs.html'>&#x1f4cb; Logs</a>"
+        "<a href='/messages.html'>&#x1f4e8; Messages</a>"
+        "<a href='/aircraft.html'>&#x2708;&#xfe0f; Aircraft</a>"
+        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
+        "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
+        "<a href='/lte.html'>&#x1f4f6; LTE</a>"
+        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a class='active' href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
+        "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
+        "<div class='main'>"
+        "<h2>&#x1f6a9; FANET Monitor (868.2 MHz LoRa)</h2>"
+        "<div class='toolbar'>"
+        "<span id='status-badge' style='font-size:13px;font-weight:600'></span>"
+        "<span id='update-time' style='color:var(--dim);margin-left:16px;font-size:12px'></span>"
+        "<button class='btn' onclick='load()' style='margin-left:auto'>&#x21bb; Refresh</button>"
+        "</div>"
+        "<div id='content'><p style='color:var(--dim)'>Loading...</p></div>"
+
+        "<script>"
+        "function load(){"
+        "  fetch('/api/config').then(r=>r.json()).then(cfg=>{"
+        "    var fn=cfg.sdr_fanet||{};"
+        "    if(!fn.active){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-data\"><h3>&#x1f6a9; FANET Decoder Not Active</h3>'"
+        "        +'<p>No SDR device is configured for FANET reception.</p>'"
+        "        +'<p style=\"margin-top:12px\">Go to <a href=\"/devices.html\">Devices</a> and assign an RTL-SDR dongle to the <strong>FANET</strong> role.</p></div>';"
+        "      document.getElementById('status-badge').innerHTML='<span style=\"color:var(--dim)\">&#x26aa; Not Active</span>';"
+        "      return;"
+        "    }"
+        "    if(!fn.enabled){"
+        "      document.getElementById('content').innerHTML="
+        "        '<div class=\"no-data\"><h3>&#x1f6a9; FANET Decoder Disabled</h3>'"
+        "        +'<p>The FANET decoder is currently disabled (output muted).</p>'"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "      document.getElementById('status-badge').innerHTML='<span style=\"color:var(--warn)\">&#x1f7e1; Disabled</span>';"
+        "      return;"
+        "    }"
+        "    document.getElementById('status-badge').innerHTML='<span style=\"color:var(--ok)\">&#x1f7e2; Active</span>';"
+        "    fetch('/api/fanet').then(r=>r.json()).then(data=>render(data)).catch(()=>{"
+        "      document.getElementById('content').innerHTML='<div class=\"no-data\"><h3>Error</h3><p>Failed to fetch FANET stats.</p></div>';"
+        "    });"
+        "  }).catch(()=>{});"
+        "}"
+        ""
+        "function render(data){"
+        "  document.getElementById('update-time').textContent='Updated: '+new Date().toLocaleTimeString();"
+        "  var html='<div class=\"stats\">';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+data.preambles_detected+'</div><div class=\"lbl\">Preambles</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+data.sync_word_ok+'</div><div class=\"lbl\">Sync OK</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+data.packets_decoded+'</div><div class=\"lbl\">Decoded</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+data.crc_errors+'</div><div class=\"lbl\">CRC Errors</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+data.header_errors+'</div><div class=\"lbl\">Header Errors</div></div>';"
+        "  html+='<div class=\"stat\"><div class=\"val\">'+(data.samples_processed/1e6).toFixed(1)+'M</div><div class=\"lbl\">Samples</div></div>';"
+        "  html+='</div>';"
+        "  if(data.packets_decoded>0 && data.type_counts){"
+        "    var tc=data.type_counts;"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">Message Types</h3>';"
+        "    html+='<div class=\"stats\">';"
+        "    var types=[['Tracking',tc.tracking],['Name',tc.name],['Message',tc.message],"
+        "      ['Weather',tc.service],['Ground',tc.ground],['Thermal',tc.thermal],"
+        "      ['Landmark',tc.landmark],['HW Info',tc.hwinfo+tc.hwinfo2],"
+        "      ['ACK',tc.ack],['Remote',tc.remote]];"
+        "    for(var i=0;i<types.length;i++){"
+        "      if(types[i][1]>0) html+='<div class=\"stat\"><div class=\"val\">'+types[i][1]+'</div><div class=\"lbl\">'+types[i][0]+'</div></div>';"
+        "    }"
+        "    html+='</div></div>';"
+        "  }"
+        "  if(data.packets_decoded===0){"
+        "    html+='<div class=\"no-data\"><h3>Scanning...</h3><p>FANET decoder is active but no packets decoded yet.</p>'"
+        "      +'<p style=\"color:var(--dim);font-size:12px;margin-top:8px\">Listening on 868.2 MHz for LoRa FANET+ signals from paragliders, drones, and weather stations.</p></div>';"
+        "  }"
+        "  if(data.ground_tracks && data.ground_tracks.length>0){"
+        "    var gtypes=['Other','Walking','Vehicle','Bike','Boot','Need ride','Landed OK','Need tech','Need medical','DISTRESS','DISTRESS AUTO'];"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f6b6; Ground Tracking</h3>';"
+        "    html+='<table><thead><tr><th>Address</th><th>Name</th><th>Type</th><th>Lat</th><th>Lon</th><th>Age</th></tr></thead><tbody>';"
+        "    for(var i=0;i<data.ground_tracks.length;i++){"
+        "      var g=data.ground_tracks[i];"
+        "      var tname=gtypes[g.type]||('Type '+g.type);"
+        "      var age=g.age<60?g.age+'s':Math.floor(g.age/60)+'m';"
+        "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+g.addr+'</td>';"
+        "      html+='<td><strong>'+(g.name||'—')+'</strong></td>';"
+        "      html+='<td>'+tname+'</td>';"
+        "      html+='<td>'+g.lat.toFixed(5)+'</td>';"
+        "      html+='<td>'+g.lon.toFixed(5)+'</td>';"
+        "      html+='<td>'+age+'</td></tr>';"
+        "    }"
+        "    html+='</tbody></table></div>';"
+        "  }"
+        "  document.getElementById('content').innerHTML=html;"
+        "}"
+        ""
+        "load();"
+        "setInterval(load,5000);"
+        ""
+        "fetch('/api/status').then(r=>r.json()).then(s=>{"
+        "  var v=document.getElementById('ver-badge');"
+        "  if(v&&s.version) v.textContent='v'+s.version;"
+        "}).catch(()=>{});"
+        "</script></div></body></html>";
+
+    http_send(fd, 200, "text/html", html, (int)strlen(html));
+}
+
 static void serve_devices_page(int fd)
 {
     const char *html =
@@ -3254,6 +3661,7 @@ static void serve_devices_page(int fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3483,7 +3891,7 @@ static void serve_devices_page(int fd)
         "h+='<td><select id=\"'+selId+'\">';"
         "h+='<option value=none'+(curRole=='none'?' selected':'')+'>&#x274c; None</option>';"
         "h+='<option value=adsb'+(curRole=='adsb'?' selected':'')+'>&#x2708; ADS-B (1090 MHz)</option>';"
-        "h+='<option value=flarm'+(curRole=='flarm'?' selected':'')+'>&#x1f6a9; FLARM / OGNTP (868 MHz)</option>';"
+        "h+='<option value=flarm'+(curRole=='flarm'?' selected':'')+'>&#x1f6a9; FLARM / OGNTP / ADS-L / P3I (868 MHz)</option>';"
         "h+='<option value=acars'+(curRole=='acars'?' selected':'')+'>&#x1f4e1; ACARS (131 MHz)</option>';"
         "h+='<option value=vdl2'+(curRole=='vdl2'?' selected':'')+'>&#x1f4e1; VDL2 (136 MHz)</option>';"
         "h+='<option value=radiosonde'+(curRole=='radiosonde'?' selected':'')+'>&#x1f388; Radiosonde (403 MHz)</option>';"
@@ -3491,6 +3899,8 @@ static void serve_devices_page(int fd)
         "h+='<option value=gsm'+(curRole=='gsm'?' selected':'')+'>&#x1f4f6; GSM (935 MHz)</option>';"
         "h+='<option value=lte'+(curRole=='lte'?' selected':'')+'>&#x1f4f6; LTE (800 MHz)</option>';"
         "h+='<option value=iot868'+(curRole=='iot868'?' selected':'')+'>&#x1f321;&#xfe0f; IoT 868 MHz</option>';"
+        "h+='<option value=fanet'+(curRole=='fanet'?' selected':'')+'>&#x1f6a9; FANET (868.2 MHz)</option>';"
+        "h+='<option value=sarsat'+(curRole=='sarsat'?' selected':'')+'>&#x1f6a8; Sarsat ELT (406 MHz)</option>';"
         "h+='</select></td>';"
         // Gain dropdown - populated from receiver's gain_list
         "var gainOpts='';"
@@ -3528,6 +3938,26 @@ static void serve_devices_page(int fd)
         "});"
         "h+='</table>';"
         "}"
+        ""
+        // Role descriptions info box
+        "h+='<div style=\"margin:16px 0;padding:14px;background:#111122;border:1px solid #333;border-radius:6px;font-size:0.9em;line-height:1.7\">';"
+        "h+='<strong style=\"color:#4fc3f7\">&#x1f4e1; Decoder Roles:</strong><br>';"
+        "h+='<b>&#x2708; ADS-B</b> &mdash; Mode S / ADS-B aircraft surveillance (1090 MHz)<br>';"
+        "h+='<b>&#x1f6a9; FLARM / OGNTP / ADS-L / P3I</b> &mdash; 868 MHz EC band multi-protocol:<br>';"
+        "h+='&nbsp;&nbsp;&bull; <b>FLARM</b> V6/V7: collision-avoidance for gliders/GA<br>';"
+        "h+='&nbsp;&nbsp;&bull; <b>OGN-TP</b>: Open Glider Network tracking protocol<br>';"
+        "h+='&nbsp;&nbsp;&bull; <b>ADS-L</b> (EASA): lightweight ADS-B for drones/UAS (868.2/868.4 MHz, Manchester encoded)<br>';"
+        "h+='&nbsp;&nbsp;&bull; <b>P3I</b> (PilotAware): GA anti-collision (869.525 MHz, FSK 38.4 kbps)<br>';"
+        "h+='<b>&#x1f4e1; ACARS</b> &mdash; Aircraft VHF datalink (131 MHz)<br>';"
+        "h+='<b>&#x1f4e1; VDL2</b> &mdash; VHF Data Link Mode 2, D8PSK (136 MHz)<br>';"
+        "h+='<b>&#x1f388; Radiosonde</b> &mdash; Weather sonde decoding: RS41, DFM, M10 (403 MHz)<br>';"
+        "h+='<b>&#x1f4df; POCSAG</b> &mdash; Pager decoding, multi-channel 512/1200/2400 baud (466 MHz)<br>';"
+        "h+='<b>&#x1f4f6; GSM</b> &mdash; GSM downlink SCH/BCCH for PPM calibration (935 MHz)<br>';"
+        "h+='<b>&#x1f4f6; LTE</b> &mdash; LTE Band 20 MIB/SIB decode (800 MHz)<br>';"
+        "h+='<b>&#x1f321;&#xfe0f; IoT 868</b> &mdash; ISM OOK/FSK: Bresser, LaCrosse, Honeywell (868 MHz)<br>';"
+        "h+='<b>&#x1f6a9; FANET</b> &mdash; LoRa CSS paraglider network, SF7 BW250k (868.2 MHz)<br>';"
+        "h+='<b>&#x1f6f0;&#xfe0f; SARSAT</b> &mdash; COSPAS-SARSAT 406 MHz emergency beacon decoder<br>';"
+        "h+='</div>';"
         ""
         // Active receivers section
         "if(rxData&&rxData.count>0){"
@@ -3617,6 +4047,7 @@ static void serve_diagnostics_page(int fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a class='active' style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3939,8 +4370,11 @@ static void api_post_calibrate_ppm(int fd, const char *body)
     // Run GSM calibration — prefer rtlsdr for sync reads (sdrgg read_sync
     // is unreliable on some devices). Use explicit backend if specified.
     sdr_backend_type_t cal_backend = SDR_BACKEND_RTLSDR;
-    if (strcmp(backend_str, "rtlsdr") == 0) cal_backend = SDR_BACKEND_RTLSDR;
-    else if (strcmp(backend_str, "sdrgg") == 0) cal_backend = SDR_BACKEND_SDRGG;
+    {
+        std::string_view bs(backend_str);
+        if (bs == "rtlsdr") cal_backend = SDR_BACKEND_RTLSDR;
+        else if (bs == "sdrgg") cal_backend = SDR_BACKEND_SDRGG;
+    }
     gsm_cal_result_t cal = gsm_calibrate(serial, current_ppm, gain, cal_backend);
 
     if (cal.success) {
@@ -4014,57 +4448,64 @@ static void handle_request(int fd, const char *request, int reqlen)
     char path[256] = {0};
     sscanf(request, "%7s %255s", method, path);
 
+    std::string_view method_sv(method);
+    std::string_view path_sv(path);
+
     // Route
-    if (strcmp(method, "GET") == 0) {
-        if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
+    if (method_sv == "GET") {
+        if (path_sv == "/" || path_sv == "/index.html") {
             serve_file(fd, "index.html");
-        } else if (strcmp(path, "/api/config") == 0) {
+        } else if (path_sv == "/api/config") {
             api_get_config(fd);
-        } else if (strcmp(path, "/api/status") == 0) {
+        } else if (path_sv == "/api/status") {
             api_get_status(fd);
-        } else if (strcmp(path, "/api/aircraft") == 0) {
+        } else if (path_sv == "/api/aircraft") {
             api_get_aircraft(fd);
-        } else if (strcmp(path, "/api/gsm") == 0) {
+        } else if (path_sv == "/api/gsm") {
             api_get_gsm(fd);
-        } else if (strcmp(path, "/api/lte") == 0) {
+        } else if (path_sv == "/api/lte") {
             api_get_lte(fd);
-        } else if (strcmp(path, "/api/iot868") == 0) {
+        } else if (path_sv == "/api/iot868") {
             api_get_iot868(fd);
-        } else if (strcmp(path, "/api/stats") == 0) {
+        } else if (path_sv == "/api/fanet") {
+            api_get_fanet(fd);
+        } else if (path_sv == "/api/stats") {
             api_get_stats(fd);
-        } else if (strcmp(path, "/api/connections") == 0) {
+        } else if (path_sv == "/api/connections") {
             api_get_connections(fd);
-        } else if (strcmp(path, "/api/logs") == 0) {
+        } else if (path_sv == "/api/logs") {
             api_get_logs(fd);
-        } else if (strcmp(path, "/api/messages") == 0) {
+        } else if (path_sv == "/api/messages") {
             api_get_messages(fd);
-        } else if (strcmp(path, "/api/devices") == 0) {
+        } else if (path_sv == "/api/devices") {
             api_get_devices(fd);
-        } else if (strcmp(path, "/api/receivers") == 0) {
+        } else if (path_sv == "/api/receivers") {
             api_get_receivers(fd);
-        } else if (strcmp(path, "/api/decoders") == 0) {
+        } else if (path_sv == "/api/decoders") {
             api_get_decoders(fd);
-        } else if (strcmp(path, "/devices.html") == 0 || strcmp(path, "/devices") == 0) {
+        } else if (path_sv == "/devices.html" || path_sv == "/devices") {
             serve_devices_page(fd);
-        } else if (strcmp(path, "/gsm.html") == 0 || strcmp(path, "/gsm") == 0) {
+        } else if (path_sv == "/gsm.html" || path_sv == "/gsm") {
             serve_gsm_page(fd);
-        } else if (strcmp(path, "/lte.html") == 0 || strcmp(path, "/lte") == 0) {
+        } else if (path_sv == "/lte.html" || path_sv == "/lte") {
             serve_lte_page(fd);
-        } else if (strcmp(path, "/iot868.html") == 0 || strcmp(path, "/iot868") == 0) {
+        } else if (path_sv == "/iot868.html" || path_sv == "/iot868") {
             serve_iot868_page(fd);
-        } else if (strcmp(path, "/diagnostics.html") == 0 || strcmp(path, "/diagnostics") == 0) {
+        } else if (path_sv == "/fanet.html" || path_sv == "/fanet") {
+            serve_fanet_page(fd);
+        } else if (path_sv == "/diagnostics.html" || path_sv == "/diagnostics") {
             serve_diagnostics_page(fd);
-        } else if (strcmp(path, "/api/diagnostics") == 0) {
+        } else if (path_sv == "/api/diagnostics") {
             api_get_diagnostics(fd);
-        } else if (strcmp(path, "/api/stats/quick") == 0) {
+        } else if (path_sv == "/api/stats/quick") {
             api_get_stats_quick(fd);
         } else if (path[0] == '/') {
             serve_file(fd, path + 1);
         } else {
             http_send(fd, 404, "text/plain", "Not found", 9);
         }
-    } else if (strcmp(method, "POST") == 0) {
-        if (strcmp(path, "/api/config") == 0) {
+    } else if (method_sv == "POST") {
+        if (path_sv == "/api/config") {
             // Find body (after \r\n\r\n)
             const char *body = strstr(request, "\r\n\r\n");
             if (body) {
@@ -4073,7 +4514,7 @@ static void handle_request(int fd, const char *request, int reqlen)
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }
-        } else if (strcmp(path, "/api/receivers/assign") == 0) {
+        } else if (path_sv == "/api/receivers/assign") {
             const char *body = strstr(request, "\r\n\r\n");
             if (body) {
                 body += 4;
@@ -4081,7 +4522,7 @@ static void handle_request(int fd, const char *request, int reqlen)
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }
-        } else if (strcmp(path, "/api/receivers/toggle") == 0) {
+        } else if (path_sv == "/api/receivers/toggle") {
             const char *body = strstr(request, "\r\n\r\n");
             if (body) {
                 body += 4;
@@ -4089,7 +4530,7 @@ static void handle_request(int fd, const char *request, int reqlen)
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }
-        } else if (strcmp(path, "/api/decoders") == 0) {
+        } else if (path_sv == "/api/decoders") {
             const char *body = strstr(request, "\r\n\r\n");
             if (body) {
                 body += 4;
@@ -4097,7 +4538,7 @@ static void handle_request(int fd, const char *request, int reqlen)
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }
-        } else if (strcmp(path, "/api/calibrate-ppm") == 0) {
+        } else if (path_sv == "/api/calibrate-ppm") {
             const char *body = strstr(request, "\r\n\r\n");
             if (body) {
                 body += 4;
@@ -4105,9 +4546,9 @@ static void handle_request(int fd, const char *request, int reqlen)
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }
-        } else if (strcmp(path, "/api/diagnostics/start") == 0) {
+        } else if (path_sv == "/api/diagnostics/start") {
             api_post_diagnostics_start(fd);
-        } else if (strcmp(path, "/api/receivers/setgain") == 0) {
+        } else if (path_sv == "/api/receivers/setgain") {
             const char *body = strstr(request, "\r\n\r\n");
             if (body) {
                 body += 4;
@@ -4118,7 +4559,7 @@ static void handle_request(int fd, const char *request, int reqlen)
         } else {
             http_send(fd, 404, "text/plain", "Not found", 9);
         }
-    } else if (strcmp(method, "OPTIONS") == 0) {
+    } else if (method_sv == "OPTIONS") {
         // CORS preflight
         http_send(fd, 200, "text/plain", "", 0);
     } else {
@@ -4135,6 +4576,11 @@ static void *panel_thread_entry(void *arg)
     panelLog("Panel: HTTP server started on port %d", PanelState.port);
 
     while (PanelState.running) {
+        // Use poll() to avoid blocking indefinitely on accept
+        struct pollfd pfd = { .fd = PanelState.listen_fd, .events = POLLIN };
+        int pret = poll(&pfd, 1, 1000);  // 1 second timeout
+        if (pret <= 0) continue;  // timeout or error, re-check running flag
+
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
 
@@ -4148,29 +4594,38 @@ static void *panel_thread_entry(void *arg)
         }
 
         // Set receive timeout
-        struct timeval tv = {5, 0};
+        struct timeval tv = {3, 0};
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        struct timeval stv = {3, 0};
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
+
+        // Wait for data readiness before reading (avoid blocking on idle connections)
+        struct pollfd cpfd = { .fd = client_fd, .events = POLLIN };
+        if (poll(&cpfd, 1, 3000) <= 0) {
+            close(client_fd);
+            continue;
+        }
 
         // Read request (up to 64KB for POST bodies)
-        char *reqbuf = malloc(65536);
-        if (reqbuf) {
+        std::string reqbuf(65536, '\0');
+        {
             int total = 0;
             while (total < 65535) {
-                int n = (int)read(client_fd, reqbuf + total, (size_t)(65535 - total));
+                int n = (int)read(client_fd, reqbuf.data() + total, (size_t)(65535 - total));
                 if (n <= 0) break;
                 total += n;
                 reqbuf[total] = '\0';
                 // Check if we have the full headers
-                if (strstr(reqbuf, "\r\n\r\n")) {
+                if (strstr(reqbuf.c_str(), "\r\n\r\n")) {
                     // For GET requests, we're done
-                    if (strncmp(reqbuf, "GET", 3) == 0) break;
+                    if (reqbuf.compare(0, 3, "GET") == 0) break;
                     // For POST, check Content-Length
-                    const char *cl = strstr(reqbuf, "Content-Length:");
+                    const char *cl = strstr(reqbuf.c_str(), "Content-Length:");
                     if (cl) {
                         long content_len = strtol(cl + 15, NULL, 10);
                         if (content_len < 0 || content_len > 65000) break;  // reject absurd sizes
-                        const char *body_start = strstr(reqbuf, "\r\n\r\n") + 4;
-                        int header_len = (int)(body_start - reqbuf);
+                        const char *body_start = strstr(reqbuf.c_str(), "\r\n\r\n") + 4;
+                        int header_len = (int)(body_start - reqbuf.c_str());
                         if (total >= header_len + (int)content_len) break;
                     } else {
                         break;
@@ -4179,9 +4634,7 @@ static void *panel_thread_entry(void *arg)
             }
 
             if (total > 0)
-                handle_request(client_fd, reqbuf, total);
-
-            free(reqbuf);
+                handle_request(client_fd, reqbuf.data(), total);
         }
 
         close(client_fd);
@@ -4240,7 +4693,7 @@ void panelStart(void)
         }
     }
 
-    if (listen(PanelState.listen_fd, 5) < 0) {
+    if (listen(PanelState.listen_fd, 128) < 0) {
         fprintf(stderr, "Panel: listen failed: %s\n", strerror(errno));
         close(PanelState.listen_fd);
         PanelState.listen_fd = -1;

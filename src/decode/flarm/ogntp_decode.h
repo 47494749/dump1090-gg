@@ -18,6 +18,10 @@
 #ifndef OGNTP_DECODE_H
 #define OGNTP_DECODE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -37,6 +41,15 @@ extern const uint8_t OGNTP_SYNCWORD[OGNTP_SYNCWORD_SIZE];
 typedef struct {
     uint32_t addr;          // 24-bit address
     int      addr_type;     // 0=random, 1=ICAO, 2=FLARM, 3=OGN
+    int      version;       // 1=OGN1, 2=OGN2
+    int      relay;         // relay count (OGN1) or flag (OGN2)
+    int      nonpos;        // non-zero = non-position packet
+    int      encrypted;     // non-zero = encrypted/custom payload
+    int      emergency;     // non-zero = emergency flag set
+    int      other_system;  // OGN2 NonOGN bit, zero for OGN1
+    int      report_type;   // non-position report type, -1 for position packets
+    int      position_valid;
+    int      status_valid;
     int      aircraft_type; // 0-15 (same numbering as FLARM aircraft types)
     int      stealth;       // non-zero = stealth flag set
     double   latitude;      // decimal degrees
@@ -47,6 +60,27 @@ typedef struct {
     float    vs;            // m/s vertical speed (positive = climbing)
     float    turnrate;      // deg/s (0 if unknown)
     int      fix_quality;   // 0=none, 1=GPS, 2=DGPS
+    struct {
+        int   time_seconds;
+        int   fix_quality;
+        int   hardware;
+        int   firmware;
+        int   satellites;
+        int   tx_power_dbm;
+        int   pulse_bpm;
+        int   oxygen_percent;
+        int   sat_snr_db;
+        int   rx_rate_per_min;
+        int   audio_noise_db;
+        int   has_temperature;
+        int   has_humidity;
+        int   has_pressure;
+        float radio_noise_dbm;
+        float pressure_hpa;
+        float voltage_v;
+        float temperature_c;
+        float humidity_percent;
+    } status;
     float    signal_level;  // 0-1 relative signal level
     int      valid;         // non-zero = message is valid and fully decoded
 } ogntp_message_t;
@@ -64,5 +98,9 @@ uint8_t ogntp_ldpc_check(const uint8_t *data26);
 bool ogntp_decode_packet(const uint8_t *data26,
                          double ref_lat, double ref_lon,
                          ogntp_message_t *msg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // OGNTP_DECODE_H

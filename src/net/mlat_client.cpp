@@ -23,6 +23,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string>
+#include <string_view>
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
@@ -91,15 +93,13 @@ void mlatClientInit(void)
     if (MlatConfig.uuid_file) {
         FILE *f = fopen(MlatConfig.uuid_file, "r");
         if (f) {
-            char buf[128];
-            if (fgets(buf, sizeof(buf), f)) {
-                // trim newline
-                char *nl = strchr(buf, '\n');
-                if (nl) *nl = 0;
-                nl = strchr(buf, '\r');
-                if (nl) *nl = 0;
-                if (buf[0]) {
-                    MlatConfig.uuid = strdup(buf);
+            char raw[128];
+            if (fgets(raw, sizeof(raw), f)) {
+                std::string buf(raw);
+                while (!buf.empty() && (buf.back() == '\n' || buf.back() == '\r'))
+                    buf.pop_back();
+                if (!buf.empty()) {
+                    MlatConfig.uuid = strdup(buf.c_str());
                 }
             }
             fclose(f);
@@ -173,21 +173,19 @@ int mlatClientAddServer(const char *hostport)
     }
 
     struct mlat_server *s = &MlatConfig.servers[MlatConfig.server_count];
-    memset(s, 0, sizeof(*s));
+    *s = {};
     s->fd = -1;
 
     // Parse host:port
-    char *copy = strdup(hostport);
-    char *colon = strrchr(copy, ':');
-    if (colon) {
-        *colon = 0;
-        s->host = strdup(copy);
-        s->port = atoi(colon + 1);
+    std::string copy(hostport);
+    size_t colon_pos = copy.rfind(':');
+    if (colon_pos != std::string::npos) {
+        s->host = strdup(copy.substr(0, colon_pos).c_str());
+        s->port = atoi(copy.c_str() + colon_pos + 1);
     } else {
-        s->host = strdup(copy);
+        s->host = strdup(copy.c_str());
         s->port = 31090;  // default MLAT port
     }
-    free(copy);
 
     if (s->port <= 0 || s->port > 65535) {
         fprintf(stderr, "MLAT: invalid port in '%s'\n", hostport);
@@ -304,15 +302,13 @@ void mlatClientPeriodicWork(void)
 
 static void mlat_server_connect(struct mlat_server *s)
 {
-    struct addrinfo hints, *res, *rp;
-    char portstr[16];
+    struct addrinfo hints = {}, *res, *rp;
 
-    memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    snprintf(portstr, sizeof(portstr), "%d", s->port);
+    std::string portstr = std::to_string(s->port);
 
-    int gai = getaddrinfo(s->host, portstr, &hints, &res);
+    int gai = getaddrinfo(s->host, portstr.c_str(), &hints, &res);
     if (gai != 0) {
         fprintf(stderr, "MLAT[%s:%d]: DNS resolve failed: %s\n", s->host, s->port, gai_strerror(gai));
         s->next_reconnect = mstime() + MLAT_RECONNECT_INTERVAL;
@@ -404,44 +400,39 @@ static void mlat_server_disconnect(struct mlat_server *s, const char *reason)
 static void mlat_server_send_handshake(struct mlat_server *s)
 {
     // Build handshake JSON
-    char buf[2048];
-    int n = snprintf(buf, sizeof(buf),
-        "{\"version\":3,"
+    std::string hs = "{\"version\":3,"
         "\"client_version\":\"dump1090-mlat 1.0\","
         "\"compress\":[\"none\"],"
         "\"selective_traffic\":true,"
         "\"heartbeat\":true,"
-        "\"return_results\":%s,"
+        "\"return_results\":" + std::string(MlatConfig.return_results ? "true" : "false") + ","
         "\"return_result_format\":\"ecef\","
-        "\"return_stats\":true",
-        MlatConfig.return_results ? "true" : "false");
+        "\"return_stats\":true";
 
     if (MlatConfig.user) {
-        n += snprintf(buf + n, sizeof(buf) - n, ",\"user\":\"%s\"", MlatConfig.user);
+        hs += ",\"user\":\"" + std::string(MlatConfig.user) + "\"";
     }
     if (MlatConfig.uuid) {
-        n += snprintf(buf + n, sizeof(buf) - n, ",\"uuid\":\"%s\"", MlatConfig.uuid);
+        hs += ",\"uuid\":\"" + std::string(MlatConfig.uuid) + "\"";
     }
     if (MlatConfig.position_set) {
-        n += snprintf(buf + n, sizeof(buf) - n,
+        char pos_tmp[128];
+        snprintf(pos_tmp, sizeof(pos_tmp),
             ",\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"altref\":\"egm96_meters\"",
             MlatConfig.lat, MlatConfig.lon, MlatConfig.alt);
+        hs += pos_tmp;
     }
 
-    n += snprintf(buf + n, sizeof(buf) - n,
-        ",\"clock_type\":\"dump1090\""
-        ",\"frequency\":12000000"
-        ",\"epoch\":\"none\""
-        "}");
+    hs += ",\"clock_type\":\"dump1090\""
+         ",\"frequency\":12000000"
+         ",\"epoch\":\"none\""
+         "}";
 
     // Pad with spaces (protocol requires padding for initial handshake)
-    for (int i = 0; i < 128 && n < (int)sizeof(buf) - 2; i++) {
-        buf[n++] = ' ';
-    }
-    buf[n++] = '\n';
-    buf[n] = 0;
+    hs.append(128, ' ');
+    hs += '\n';
 
-    mlat_buf_append(s, buf, n);
+    mlat_buf_append(s, hs.data(), (int)hs.size());
     mlat_server_try_write(s);
 }
 
@@ -461,9 +452,9 @@ static void mlat_server_try_read(struct mlat_server *s)
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return;
-        char errbuf[128];
-        snprintf(errbuf, sizeof(errbuf), "read error: %s (state=%u)", strerror(errno), s->state);
-        mlat_server_disconnect(s, errbuf);
+        std::string errmsg = std::string("read error: ") + strerror(errno) +
+                             " (state=" + std::to_string(s->state) + ")";
+        mlat_server_disconnect(s, errmsg.c_str());
         return;
     }
     if (nread == 0) {
@@ -478,7 +469,7 @@ static void mlat_server_try_read(struct mlat_server *s)
     // Process complete lines
     char *start = s->readbuf;
     char *nl;
-    while ((nl = memchr(start, '\n', s->readbuf_len - (start - s->readbuf))) != NULL) {
+    while ((nl = (char*)memchr(start, '\n', s->readbuf_len - (start - s->readbuf))) != NULL) {
         int linelen = nl - start;
         if (linelen > 0) {
             mlat_server_process_line(s, start, linelen);
@@ -540,7 +531,7 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
     // Check compression
     char compress[32];
     json_find_string(line, len, "compress", compress, sizeof(compress));
-    if (compress[0] && strcmp(compress, "none") != 0) {
+    if (compress[0] && std::string_view(compress) != "none") {
         fprintf(stderr, "MLAT[%s:%d]: server requested unsupported compression '%s'\n",
                 s->host, s->port, compress);
         mlat_server_disconnect(s, "unsupported compression");
@@ -551,28 +542,26 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
     s->split_sync = json_find_bool(line, len, "split_sync", 0);
 
     // Check for motd — clean up newlines and excess whitespace for display
-    char motd[256];
-    if (json_find_string(line, len, "motd", motd, sizeof(motd)) && motd[0]) {
+    char motd_raw[256];
+    if (json_find_string(line, len, "motd", motd_raw, sizeof(motd_raw)) && motd_raw[0]) {
         // Replace \n and collapse whitespace for readable single-line display
-        char clean[256];
-        int ci = 0;
-        int had_space = 1; // start true to skip leading whitespace
-        for (int mi = 0; motd[mi] && ci < (int)sizeof(clean) - 1; mi++) {
-            char ch = motd[mi];
+        std::string clean;
+        clean.reserve(256);
+        bool had_space = true;
+        for (int mi = 0; motd_raw[mi]; mi++) {
+            char ch = motd_raw[mi];
             if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
             if (ch == ' ') {
-                if (!had_space) { clean[ci++] = ' '; had_space = 1; }
+                if (!had_space) { clean += ' '; had_space = true; }
             } else {
-                clean[ci++] = ch;
-                had_space = 0;
+                clean += ch;
+                had_space = false;
             }
         }
-        // trim trailing space
-        if (ci > 0 && clean[ci-1] == ' ') ci--;
-        clean[ci] = '\0';
-        fprintf(stderr, "MLAT[%s:%d]: server says: %s\n", s->host, s->port, clean);
+        while (!clean.empty() && clean.back() == ' ') clean.pop_back();
+        fprintf(stderr, "MLAT[%s:%d]: server says: %s\n", s->host, s->port, clean.c_str());
         if (PanelState.enabled)
-            panelLog("MLAT[%s]: %s", s->host, clean);
+            panelLog("MLAT[%s]: %s", s->host, clean.c_str());
     }
 
     // Handshake complete
@@ -677,7 +666,7 @@ static struct mlat_aircraft *mlat_get_aircraft(uint32_t addr)
     }
 
     if (empty) {
-        memset(empty, 0, sizeof(*empty));
+        *empty = {};
         empty->addr = addr;
         empty->rate_measurement_start = mstime();
         return empty;
@@ -748,8 +737,7 @@ static void mlat_send_seen(struct mlat_server *s)
     uint32_t mask = 1U << s->index;
 
     // Build seen list (aircraft we see that server doesn't know about)
-    char seen_buf[8192];
-    int seen_len = 0;
+    std::string seen_list;
     int seen_count = 0;
 
     for (int i = 0; i < MLAT_HASH_SIZE; i++) {
@@ -761,30 +749,24 @@ static void mlat_send_seen(struct mlat_server *s)
         bool should_report = true;
 
         if (should_report && !is_reported) {
-            // New aircraft: add to seen list
-            if (seen_count > 0 && seen_len < (int)sizeof(seen_buf) - 16)
-                seen_buf[seen_len++] = ',';
-            int n = snprintf(seen_buf + seen_len, sizeof(seen_buf) - seen_len,
-                             "\"%06x\"", ac->addr);
-            seen_len += n;
+            char tmp[16];
+            if (seen_count > 0) seen_list += ',';
+            snprintf(tmp, sizeof(tmp), "\"%06x\"", ac->addr);
+            seen_list += tmp;
             seen_count++;
             ac->reported |= mask;
         }
     }
 
-    // Check for lost aircraft (reported but no longer in our table)
-    // We handle this by checking reported flag on empty/expired slots
-    // (slots are cleared in mlat_expire_aircraft)
-
     if (seen_count > 0) {
-        mlat_buf_printf(s, "{\"seen\":[%.*s]}\n", seen_len, seen_buf);
+        std::string msg = "{\"seen\":[" + seen_list + "]}\n";
+        mlat_buf_append(s, msg.data(), (int)msg.size());
     }
 }
 
 static void mlat_send_rate_report(struct mlat_server *s, uint64_t now)
 {
-    char buf[8192];
-    int len = 0;
+    std::string rate_list;
     int count = 0;
 
     for (int i = 0; i < MLAT_HASH_SIZE; i++) {
@@ -799,16 +781,16 @@ static void mlat_send_rate_report(struct mlat_server *s, uint64_t now)
         ac->rate_measurement_start = now;
         ac->recent_adsb_positions = 0;
 
-        if (count > 0 && len < (int)sizeof(buf) - 32)
-            buf[len++] = ',';
-        int n = snprintf(buf + len, sizeof(buf) - len,
-                         "\"%06X\":%.2f", ac->addr, rate);
-        len += n;
+        char tmp[32];
+        if (count > 0) rate_list += ',';
+        snprintf(tmp, sizeof(tmp), "\"%06X\":%.2f", ac->addr, rate);
+        rate_list += tmp;
         count++;
     }
 
     if (count > 0) {
-        mlat_buf_printf(s, "{\"rate_report\":{%.*s}}\n", len, buf);
+        std::string msg = "{\"rate_report\":{" + rate_list + "}}\n";
+        mlat_buf_append(s, msg.data(), (int)msg.size());
     }
 }
 
@@ -911,41 +893,55 @@ void mlatClientProcessMessage(struct modesMessage *mm)
 static void mlat_send_mlat_message(struct mlat_server *s, struct modesMessage *mm)
 {
     // Format hex message
-    char hexmsg[30];
+    static const char hexchars[] = "0123456789abcdef";
     int msgbytes = (mm->msgbits + 7) / 8;
+    std::string hexmsg;
+    hexmsg.reserve(msgbytes * 2);
     for (int i = 0; i < msgbytes; i++) {
-        snprintf(hexmsg + i * 2, 3, "%02x", mm->verbatim[i]);
+        hexmsg += hexchars[mm->verbatim[i] >> 4];
+        hexmsg += hexchars[mm->verbatim[i] & 0x0f];
     }
 
-    mlat_buf_printf(s, "{\"mlat\":{\"t\":%llu,\"m\":\"%s\"}}\n",
-                    (unsigned long long)mm->timestampMsg, hexmsg);
+    mlat_buf_printf(s, "{\"mlat\":{\"t\":%" PRIu64 ",\"m\":\"%s\"}}\n",
+                    (uint64_t)mm->timestampMsg, hexmsg.c_str());
 }
 
 static void mlat_send_sync(struct mlat_server *s, struct mlat_aircraft *ac)
 {
-    char even_hex[30], odd_hex[30];
+    static const char hexchars[] = "0123456789abcdef";
     int even_bytes = (ac->even_msgbits + 7) / 8;
     int odd_bytes = (ac->odd_msgbits + 7) / 8;
 
-    for (int i = 0; i < even_bytes; i++)
-        snprintf(even_hex + i * 2, 3, "%02x", ac->even_msg[i]);
-    for (int i = 0; i < odd_bytes; i++)
-        snprintf(odd_hex + i * 2, 3, "%02x", ac->odd_msg[i]);
+    std::string even_hex, odd_hex;
+    even_hex.reserve(even_bytes * 2);
+    odd_hex.reserve(odd_bytes * 2);
+    for (int i = 0; i < even_bytes; i++) {
+        even_hex += hexchars[ac->even_msg[i] >> 4];
+        even_hex += hexchars[ac->even_msg[i] & 0x0f];
+    }
+    for (int i = 0; i < odd_bytes; i++) {
+        odd_hex += hexchars[ac->odd_msg[i] >> 4];
+        odd_hex += hexchars[ac->odd_msg[i] & 0x0f];
+    }
 
-    mlat_buf_printf(s, "{\"sync\":{\"et\":%llu,\"em\":\"%s\",\"ot\":%llu,\"om\":\"%s\"}}\n",
-                    (unsigned long long)ac->even_timestamp, even_hex,
-                    (unsigned long long)ac->odd_timestamp, odd_hex);
+    mlat_buf_printf(s, "{\"sync\":{\"et\":%" PRIu64 ",\"em\":\"%s\",\"ot\":%" PRIu64 ",\"om\":\"%s\"}}\n",
+                    (uint64_t)ac->even_timestamp, even_hex.c_str(),
+                    (uint64_t)ac->odd_timestamp, odd_hex.c_str());
 }
 
 static void mlat_send_split_sync(struct mlat_server *s, struct modesMessage *mm)
 {
-    char hexmsg[30];
+    static const char hexchars[] = "0123456789abcdef";
     int msgbytes = (mm->msgbits + 7) / 8;
-    for (int i = 0; i < msgbytes; i++)
-        snprintf(hexmsg + i * 2, 3, "%02x", mm->verbatim[i]);
+    std::string hexmsg;
+    hexmsg.reserve(msgbytes * 2);
+    for (int i = 0; i < msgbytes; i++) {
+        hexmsg += hexchars[mm->verbatim[i] >> 4];
+        hexmsg += hexchars[mm->verbatim[i] & 0x0f];
+    }
 
-    mlat_buf_printf(s, "{\"ssync\":{\"t\":%llu,\"m\":\"%s\"}}\n",
-                    (unsigned long long)mm->timestampMsg, hexmsg);
+    mlat_buf_printf(s, "{\"ssync\":{\"t\":%" PRIu64 ",\"m\":\"%s\"}}\n",
+                    (uint64_t)mm->timestampMsg, hexmsg.c_str());
 }
 
 // ============================= Result Injection ==========================
@@ -1128,8 +1124,7 @@ static void mlat_build_velocity_frame(uint8_t *frame, uint32_t addr,
 static void mlat_inject_beast_message(const uint8_t *frame, int len)
 {
     // Create a modesMessage and decode it
-    struct modesMessage mm;
-    memset(&mm, 0, sizeof(mm));
+    struct modesMessage mm = {};
 
     mm.timestampMsg = 0xFF004D4C4154ULL;  // MAGIC_MLAT_TIMESTAMP
     mm.sysTimestampMsg = mstime();
@@ -1146,7 +1141,7 @@ static void mlat_inject_beast_message(const uint8_t *frame, int len)
         return;
 
     // Queue for main thread processing instead of calling useModesMessage directly
-    feeder_queue_push(&mlat_inject_queue, &mm);
+    msg_queue_push(mlat_inject_queue, &mm);
 }
 
 // ============================= CPR Encoding ==============================

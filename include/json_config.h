@@ -5,6 +5,10 @@
 #ifndef JSON_CONFIG_H
 #define JSON_CONFIG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 typedef struct {
@@ -15,5 +19,9 @@ typedef struct {
 } json_config_t;
 
 extern json_config_t JsonConfig;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // JSON_CONFIG_H

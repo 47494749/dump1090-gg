@@ -19,6 +19,7 @@
 #include "fa_mlat.h"
 
 #include <stdarg.h>
+#include <string>
 #include <sys/utsname.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -28,6 +29,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <dirent.h>
+#include <string_view>
 
 piaware_client_t PiawareClient;
 
@@ -134,9 +136,8 @@ static void paDetectMAC(void) {
         if (strcmp(ent->d_name, "lo") == 0 || ent->d_name[0] == '.')
             continue;
 
-        char path[512];
-        snprintf(path, sizeof(path), "/sys/class/net/%s/address", ent->d_name);
-        FILE *f = fopen(path, "r");
+        std::string path = std::string("/sys/class/net/") + ent->d_name + "/address";
+        FILE *f = fopen(path.c_str(), "r");
         if (f) {
             if (fgets(PiawareClient.mac, sizeof(PiawareClient.mac), f)) {
                 // strip newline
@@ -288,17 +289,15 @@ static void paConnect(void) {
     if (PiawareClient.state != PA_DISCONNECTED)
         return;
 
-    struct addrinfo hints, *res, *rp;
-    memset(&hints, 0, sizeof(hints));
+    struct addrinfo hints = {}, *res, *rp;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    char portstr[16];
-    snprintf(portstr, sizeof(portstr), "%d", PiawareClient.port);
+    std::string portstr = std::to_string(PiawareClient.port);
 
     fprintf(stderr, "PiAware: connecting to %s:%d\n", PiawareClient.host, PiawareClient.port);
 
-    int err = getaddrinfo(PiawareClient.host, portstr, &hints, &res);
+    int err = getaddrinfo(PiawareClient.host, portstr.c_str(), &hints, &res);
     if (err != 0) {
         fprintf(stderr, "PiAware: DNS resolution failed for %s: %s\n",
                 PiawareClient.host, gai_strerror(err));
@@ -372,6 +371,8 @@ static void paCheckConnect(void) {
 
     SSL_set_fd(ssl, PiawareClient.fd);
     SSL_set_tlsext_host_name(ssl, PiawareClient.host);
+    // Enable hostname verification (CA chain already verified via SSL_VERIFY_PEER)
+    SSL_set1_host(ssl, PiawareClient.host);
     PiawareClient.ssl = ssl;
     PiawareClient.state = PA_TLS_HANDSHAKE;
 }
@@ -572,7 +573,7 @@ static void paHandleLoginResponse(const char *line) {
         return;
     }
 
-    if (strcmp(status, "ok") != 0) {
+    if (std::string_view(status) != "ok") {
         pa_tsv_get(line, "reason", reason, sizeof(reason));
         fprintf(stderr, "PiAware: login FAILED: %s: %s\n",
                 status, reason[0] ? reason : "unknown");
@@ -658,59 +659,67 @@ static void paHandleLine(const char *line) {
     if (!pa_tsv_get(line, "type", type, sizeof(type)))
         return;
 
+    std::string_view type_sv(type);
+
     // Log ALL incoming server messages (truncate long lines)
-    if (strcmp(type, "alive") != 0) {
+    if (type_sv != "alive") {
         // Log everything except alive (too frequent)
         fprintf(stderr, "PiAware: SERVER_CMD type=%s | %.512s\n", type, line);
         if (PanelState.enabled)
             panelLog("PiAware: %s", type);
     }
 
-    if (strcmp(type, "login_response") == 0) {
+    if (type_sv == "login_response") {
         paHandleLoginResponse(line);
-    } else if (strcmp(type, "alive") == 0) {
+    } else if (type_sv == "alive") {
         paHandleAlive(line);
-    } else if (strcmp(type, "notice") == 0) {
+    } else if (type_sv == "notice") {
         char msg[512];
         if (pa_tsv_get(line, "message", msg, sizeof(msg))) {
             fprintf(stderr, "PiAware: NOTICE: %s\n", msg);
             if (PanelState.enabled)
                 panelLog("PiAware NOTICE: %s", msg);
         }
-    } else if (strcmp(type, "shutdown") == 0) {
+    } else if (type_sv == "shutdown") {
         fprintf(stderr, "PiAware: server shutting down\n");
         if (PanelState.enabled)
             panelLog("PiAware: server shutting down!");
         paDisconnect("server shutdown");
-    } else if (strcmp(type, "mlat_enable") == 0) {
+    } else if (type_sv == "mlat_enable") {
         paHandleMlatEnable(line);
-    } else if (strcmp(type, "mlat_disable") == 0) {
+    } else if (type_sv == "mlat_disable") {
         fprintf(stderr, "PiAware: MLAT disabled by server\n");
         faMlatDisable();
-    } else if (strcmp(type, "mlat_wanted") == 0) {
+    } else if (type_sv == "mlat_wanted") {
         paHandleMlatWanted(line);
-    } else if (strcmp(type, "mlat_unwanted") == 0) {
+    } else if (type_sv == "mlat_unwanted") {
         paHandleMlatUnwanted(line);
-    } else if (strcmp(type, "mlat_result") == 0) {
+    } else if (type_sv == "mlat_result") {
         paHandleMlatResult(line);
-    } else if (strcmp(type, "request_manual_update") == 0) {
+    } else if (type_sv == "request_manual_update") {
         char action[256];
         if (pa_tsv_get(line, "action", action, sizeof(action))) {
+            std::string_view action_sv(action);
             fprintf(stderr, "PiAware: REQUEST_MANUAL_UPDATE action=%s\n", action);
             if (PanelState.enabled)
                 panelLog("PiAware: REMOTE CMD action=%s", action);
             paSendLog("manual update (user-initiated via their flightaware control page) requested by adept server");
             paSendLog("performing manual update, action: %s", action);
             // Execute supported actions
-            if (strstr(action, "restart_piaware") || strstr(action, "restart_dump1090") || strstr(action, "restart_receiver")) {
+            if (action_sv.find("restart_piaware") != std::string_view::npos ||
+                action_sv.find("restart_dump1090") != std::string_view::npos ||
+                action_sv.find("restart_receiver") != std::string_view::npos) {
                 paSendLog("restart requested, but dump1090-gg manages itself - ignoring restart action");
-            } else if (strstr(action, "reboot")) {
+            } else if (action_sv.find("reboot") != std::string_view::npos) {
                 paSendLog("reboot requested via manual update");
                 fprintf(stderr, "PiAware: REBOOT requested by FlightAware server!\n");
-            } else if (strstr(action, "halt")) {
+            } else if (action_sv.find("halt") != std::string_view::npos) {
                 paSendLog("halt requested via manual update");
                 fprintf(stderr, "PiAware: HALT requested by FlightAware server!\n");
-            } else if (strstr(action, "piaware") || strstr(action, "dump1090") || strstr(action, "packages") || strstr(action, "full")) {
+            } else if (action_sv.find("piaware") != std::string_view::npos ||
+                       action_sv.find("dump1090") != std::string_view::npos ||
+                       action_sv.find("packages") != std::string_view::npos ||
+                       action_sv.find("full") != std::string_view::npos) {
                 paSendLog("upgrade action '%s' received but dump1090-gg does not support remote upgrades", action);
             } else {
                 paSendLog("unknown manual update action: %s", action);
@@ -718,7 +727,7 @@ static void paHandleLine(const char *line) {
         } else {
             fprintf(stderr, "PiAware: REQUEST_MANUAL_UPDATE (no action field)\n");
         }
-    } else if (strcmp(type, "request_auto_update") == 0) {
+    } else if (type_sv == "request_auto_update") {
         char action[256];
         if (pa_tsv_get(line, "action", action, sizeof(action))) {
             fprintf(stderr, "PiAware: REQUEST_AUTO_UPDATE action=%s\n", action);
@@ -755,10 +764,8 @@ static void paHandleInput(void) {
         while ((nl = strchr(start, '\n')) != NULL) {
             *nl = 0;
             // Make a copy for parsing (paHandleLine modifies the string)
-            char linebuf[8192];
-            strncpy(linebuf, start, sizeof(linebuf) - 1);
-            linebuf[sizeof(linebuf) - 1] = 0;
-            paHandleLine(linebuf);
+            std::string linebuf(start, nl - start);
+            paHandleLine(linebuf.c_str());
             start = nl + 1;
         }
 
@@ -1004,7 +1011,7 @@ static void paSendFATSV(void) {
         if (trackDataValid(&a->sil_valid) && (forceEmit || a->sil_type != a->fatsv_emitted_sil_type))
             tsv_field_meta(&tsv, "sil_type", a, &a->sil_valid, "%s", pa_sil_type_str(a->sil_type));
         if (trackDataValid(&a->nic_baro_valid) && (forceEmit || a->nic_baro != a->fatsv_emitted_nic_baro))
-            tsv_field_meta(&tsv, "nic_baro", a, &a->nic_baro_valid, "%u", (unsigned)a->nic_baro);
+            tsv_field_meta(&tsv, "nic_baro", a, &a->nic_baro_valid, "%u", (uint32_t)a->nic_baro);
 
         // Data fields
         int hadData = tsv.pos;

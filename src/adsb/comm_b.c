@@ -70,7 +70,7 @@ void decodeCommB(struct modesMessage *mm)
     CommBDecoderFn bestDecoder = NULL;
     int ambiguous = 0;
 
-    for (unsigned i = 0; i < (sizeof(comm_b_decoders) / sizeof(comm_b_decoders[0])); ++i) {
+    for (uint32_t i = 0; i < (sizeof(comm_b_decoders) / sizeof(comm_b_decoders[0])); ++i) {
         int score = comm_b_decoders[i](mm, false);
         if (score > bestScore) {
             bestScore = score;
@@ -120,7 +120,7 @@ static int decodeEmptyResponse(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    for (unsigned i = 1; i < 7; ++i) {
+    for (uint32_t i = 1; i < 7; ++i) {
         if (mm->MB[i] != 0) {
             return 0;
         }
@@ -136,7 +136,7 @@ static int decodeEmptyResponse(struct modesMessage *mm, bool store)
 // BDS1,0 Datalink capabilities
 static int decodeBDS10(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
     // BDS identifier
     if (msg[0] != 0x10) {
@@ -160,7 +160,7 @@ static int decodeBDS10(struct modesMessage *mm, bool store)
 // BDS1,7 Common usage GICB capability report
 static int decodeBDS17(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
     // reserved bits
     if (getbits(msg, 25, 56) != 0) {
@@ -245,7 +245,7 @@ static int decodeBDS17(struct modesMessage *mm, bool store)
 static int decodeBDS20(struct modesMessage *mm, bool store)
 {
     char callsign[9];
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
     // BDS identifier
     if (msg[0] != 0x20) {
@@ -265,7 +265,7 @@ static int decodeBDS20(struct modesMessage *mm, bool store)
     // score based on number of valid characters
     int score = 8;
     int valid = 1;
-    for (unsigned i = 0; i < 8; ++i) {
+    for (uint32_t i = 0; i < 8; ++i) {
         if ((callsign[i] >= 'A' && callsign[i] <= 'Z') || (callsign[i] >= '0' && callsign[i] <= '9') || callsign[i] == ' ') {
             score += 6;
         } else if (callsign[i] == '@') {
@@ -291,7 +291,7 @@ static int decodeBDS20(struct modesMessage *mm, bool store)
 // BDS3,0 ACAS RA
 static int decodeBDS30(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
     // BDS identifier
     if (msg[0] != 0x30) {
@@ -317,20 +317,20 @@ static int decodeBDS30(struct modesMessage *mm, bool store)
 // BDS4,0 Selected vertical intention
 static int decodeBDS40(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned mcp_valid = getbit(msg, 1);
-    unsigned mcp_raw = getbits(msg, 2, 13);
-    unsigned fms_valid = getbit(msg, 14);
-    unsigned fms_raw = getbits(msg, 15, 26);
-    unsigned baro_valid = getbit(msg, 27);
-    unsigned baro_raw = getbits(msg, 28, 39);
-    unsigned reserved_1 = getbits(msg, 40, 47);
-    unsigned mode_valid = getbit(msg, 48);
-    unsigned mode_raw = getbits(msg, 49, 51);
-    unsigned reserved_2 = getbits(msg, 52, 53);
-    unsigned source_valid = getbit(msg, 54);
-    unsigned source_raw = getbits(msg, 55, 56);
+    uint32_t mcp_valid = getbit(msg, 1);
+    uint32_t mcp_raw = getbits(msg, 2, 13);
+    uint32_t fms_valid = getbit(msg, 14);
+    uint32_t fms_raw = getbits(msg, 15, 26);
+    uint32_t baro_valid = getbit(msg, 27);
+    uint32_t baro_raw = getbits(msg, 28, 39);
+    uint32_t reserved_1 = getbits(msg, 40, 47);
+    uint32_t mode_valid = getbit(msg, 48);
+    uint32_t mode_raw = getbits(msg, 49, 51);
+    uint32_t reserved_2 = getbits(msg, 52, 53);
+    uint32_t source_valid = getbit(msg, 54);
+    uint32_t source_raw = getbits(msg, 55, 56);
 
     if (!mcp_valid && !fms_valid && !baro_valid && !mode_valid && !source_valid) {
         return 0;
@@ -338,7 +338,7 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
 
     int score = 0;
 
-    unsigned mcp_alt = 0;
+    uint32_t mcp_alt = 0;
     if (mcp_valid && mcp_raw != 0) {
         mcp_alt = mcp_raw * 16;
         if (mcp_alt >= 1000 && mcp_alt <= 50000) {
@@ -353,7 +353,7 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    unsigned fms_alt = 0;
+    uint32_t fms_alt = 0;
     if (fms_valid && fms_raw != 0) {
         fms_alt = fms_raw * 16;
         if (fms_alt >= 1000 && fms_alt <= 50000) {
@@ -413,7 +413,7 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
     }
 
     if (mcp_valid) {
-        unsigned remainder = mcp_alt % 500;
+        uint32_t remainder = mcp_alt % 500;
         if (!(remainder < 16 || remainder > 484)) {
             // mcp altitude is not a multiple of 500
             score -= 4;
@@ -421,7 +421,7 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
     }
 
     if (fms_valid) {
-        unsigned remainder = fms_alt % 500;
+        uint32_t remainder = fms_alt % 500;
         if (!(remainder < 16 || remainder > 484)) {
             // fms altitude is not a multiple of 500
             score -= 4;
@@ -483,25 +483,25 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
 // BDS5,0 Track and turn report
 static int decodeBDS50(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned roll_valid = getbit(msg, 1);
-    unsigned roll_sign = getbit(msg, 2);
-    unsigned roll_raw = getbits(msg, 3, 11);
+    uint32_t roll_valid = getbit(msg, 1);
+    uint32_t roll_sign = getbit(msg, 2);
+    uint32_t roll_raw = getbits(msg, 3, 11);
 
-    unsigned track_valid = getbit(msg, 12);
-    unsigned track_sign = getbit(msg, 13);
-    unsigned track_raw = getbits(msg, 14, 23);
+    uint32_t track_valid = getbit(msg, 12);
+    uint32_t track_sign = getbit(msg, 13);
+    uint32_t track_raw = getbits(msg, 14, 23);
 
-    unsigned gs_valid = getbit(msg, 24);
-    unsigned gs_raw = getbits(msg, 25, 34);
+    uint32_t gs_valid = getbit(msg, 24);
+    uint32_t gs_raw = getbits(msg, 25, 34);
 
-    unsigned track_rate_valid = getbit(msg, 35);
-    unsigned track_rate_sign = getbit(msg, 36);
-    unsigned track_rate_raw = getbits(msg, 37, 45);
+    uint32_t track_rate_valid = getbit(msg, 35);
+    uint32_t track_rate_sign = getbit(msg, 36);
+    uint32_t track_rate_raw = getbits(msg, 37, 45);
 
-    unsigned tas_valid = getbit(msg, 46);
-    unsigned tas_raw = getbits(msg, 47, 56);
+    uint32_t tas_valid = getbit(msg, 46);
+    uint32_t tas_raw = getbits(msg, 47, 56);
 
     if (!roll_valid || !track_valid || !gs_valid || !tas_valid) {
         return 0;
@@ -540,7 +540,7 @@ static int decodeBDS50(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    unsigned gs = 0;
+    uint32_t gs = 0;
     if (gs_valid && gs_raw != 0) {
         gs = gs_raw * 2;
 
@@ -573,7 +573,7 @@ static int decodeBDS50(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    unsigned tas = 0;
+    uint32_t tas = 0;
     if (tas_valid && tas_raw != 0) {
         tas = tas_raw * 2;
 
@@ -641,25 +641,25 @@ static int decodeBDS50(struct modesMessage *mm, bool store)
 // BDS6,0 Heading and speed report
 static int decodeBDS60(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned heading_valid = getbit(msg, 1);
-    unsigned heading_sign = getbit(msg, 2);
-    unsigned heading_raw = getbits(msg, 3, 12);
+    uint32_t heading_valid = getbit(msg, 1);
+    uint32_t heading_sign = getbit(msg, 2);
+    uint32_t heading_raw = getbits(msg, 3, 12);
 
-    unsigned ias_valid = getbit(msg, 13);
-    unsigned ias_raw = getbits(msg, 14, 23);
+    uint32_t ias_valid = getbit(msg, 13);
+    uint32_t ias_raw = getbits(msg, 14, 23);
 
-    unsigned mach_valid = getbit(msg, 24);
-    unsigned mach_raw = getbits(msg, 25, 34);
+    uint32_t mach_valid = getbit(msg, 24);
+    uint32_t mach_raw = getbits(msg, 25, 34);
 
-    unsigned baro_rate_valid = getbit(msg, 35);
-    unsigned baro_rate_sign = getbit(msg, 36);
-    unsigned baro_rate_raw = getbits(msg, 37, 45);
+    uint32_t baro_rate_valid = getbit(msg, 35);
+    uint32_t baro_rate_sign = getbit(msg, 36);
+    uint32_t baro_rate_raw = getbits(msg, 37, 45);
 
-    unsigned inertial_rate_valid = getbit(msg, 46);
-    unsigned inertial_rate_sign = getbit(msg, 47);
-    unsigned inertial_rate_raw = getbits(msg, 48, 56);
+    uint32_t inertial_rate_valid = getbit(msg, 46);
+    uint32_t inertial_rate_sign = getbit(msg, 47);
+    uint32_t inertial_rate_raw = getbits(msg, 48, 56);
 
     if (!heading_valid || !ias_valid || !mach_valid || (!baro_rate_valid && !inertial_rate_valid)) {
         return 0;
@@ -680,7 +680,7 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    unsigned ias = 0;
+    uint32_t ias = 0;
     if (ias_valid && ias_raw != 0) {
         ias = ias_raw;
         if (ias >= 50 && ias <= 700) {
@@ -793,13 +793,13 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
 // BDS4,4 Meterological routine air report
 static int decodeBDS44(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned source = getbits(msg, 1, 4);
+    uint32_t source = getbits(msg, 1, 4);
 
-    unsigned wind_valid = getbit(msg, 5);
-    unsigned windspeed_raw = getbits(msg, 6, 14);
-    unsigned winddir_raw = getbits(msg, 15, 23);
+    uint32_t wind_valid = getbit(msg, 5);
+    uint32_t windspeed_raw = getbits(msg, 6, 14);
+    uint32_t winddir_raw = getbits(msg, 15, 23);
 
     // ICAO 9871 is inconsistent, it claims:
     //  bit 24       sign
@@ -814,18 +814,18 @@ static int decodeBDS44(struct modesMessage *mm, bool store)
     //   bit 25       sign
     //   bits 26..34  static air temperature, MSB=64C, LSB=0.25C, range -128C..+128C
 
-    unsigned sat_valid = getbit(msg, 24);
-    unsigned sat_sign = getbit(msg, 25);
-    unsigned sat_raw = getbits(msg, 26, 34);
+    uint32_t sat_valid = getbit(msg, 24);
+    uint32_t sat_sign = getbit(msg, 25);
+    uint32_t sat_raw = getbits(msg, 26, 34);
 
-    unsigned asp_valid = getbit(msg, 35);
-    unsigned asp_raw = getbits(msg, 36, 46);
+    uint32_t asp_valid = getbit(msg, 35);
+    uint32_t asp_raw = getbits(msg, 36, 46);
 
-    unsigned turbulence_valid = getbit(msg, 47);
-    unsigned turbulence_raw = getbits(msg, 48, 49);
+    uint32_t turbulence_valid = getbit(msg, 47);
+    uint32_t turbulence_raw = getbits(msg, 48, 49);
 
-    unsigned humidity_valid = getbit(msg, 50);
-    unsigned humidity_raw = getbits(msg, 51, 56);
+    uint32_t humidity_valid = getbit(msg, 50);
+    uint32_t humidity_raw = getbits(msg, 51, 56);
 
     if (source == MRAR_SOURCE_INVALID || source >= MRAR_SOURCE_RESERVED)
         return 0; // invalid or reserved source
@@ -955,35 +955,35 @@ static int decodeBDS44(struct modesMessage *mm, bool store)
 // BDS4,5 Meteorological hazard report
 static int decodeBDS45(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned turbulence_valid = getbit(msg, 1);
-    unsigned turbulence_raw = getbits(msg, 2, 3);
+    uint32_t turbulence_valid = getbit(msg, 1);
+    uint32_t turbulence_raw = getbits(msg, 2, 3);
 
-    unsigned windshear_valid = getbit(msg, 4);
-    unsigned windshear_raw = getbits(msg, 5, 6);
+    uint32_t windshear_valid = getbit(msg, 4);
+    uint32_t windshear_raw = getbits(msg, 5, 6);
 
-    unsigned microburst_valid = getbit(msg, 7);
-    unsigned microburst_raw = getbits(msg, 8, 9);
+    uint32_t microburst_valid = getbit(msg, 7);
+    uint32_t microburst_raw = getbits(msg, 8, 9);
 
-    unsigned icing_valid = getbit(msg, 10);
-    unsigned icing_raw = getbits(msg, 11, 12);
+    uint32_t icing_valid = getbit(msg, 10);
+    uint32_t icing_raw = getbits(msg, 11, 12);
 
-    unsigned wake_valid = getbit(msg, 13);
-    unsigned wake_raw = getbits(msg, 14, 15);
+    uint32_t wake_valid = getbit(msg, 13);
+    uint32_t wake_raw = getbits(msg, 14, 15);
 
-    unsigned sat_valid = getbit(msg, 16);
-    unsigned sat_sign = getbit(msg, 17);
-    unsigned sat_raw = getbits(msg, 18, 26);
+    uint32_t sat_valid = getbit(msg, 16);
+    uint32_t sat_sign = getbit(msg, 17);
+    uint32_t sat_raw = getbits(msg, 18, 26);
 
-    unsigned asp_valid = getbit(msg, 27);
-    unsigned asp_raw = getbits(msg, 28, 38);
+    uint32_t asp_valid = getbit(msg, 27);
+    uint32_t asp_raw = getbits(msg, 28, 38);
 
-    unsigned rh_valid = getbit(msg, 39);
-    unsigned rh_raw = getbits(msg, 40, 46);
+    uint32_t rh_valid = getbit(msg, 39);
+    uint32_t rh_raw = getbits(msg, 40, 46);
 
     // Bits 47-56 are reserved, should be zero
-    unsigned reserved = getbits(msg, 47, 56);
+    uint32_t reserved = getbits(msg, 47, 56);
 
     // Need at least one hazard field and temp to be valid
     if (!turbulence_valid && !windshear_valid && !microburst_valid && !icing_valid && !wake_valid)
@@ -1086,14 +1086,14 @@ static int decodeBDS45(struct modesMessage *mm, bool store)
 // Format: Status(1) + 8 chars (48 bits) AIS encoding + reserved(7)
 static int decodeBDS41(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned status = getbit(msg, 1);
+    uint32_t status = getbit(msg, 1);
     if (!status)
         return 0;
 
     // Check reserved bits 50-56 should be zero
-    unsigned reserved = getbits(msg, 50, 56);
+    uint32_t reserved = getbits(msg, 50, 56);
     if (reserved != 0)
         return 0;
 
@@ -1140,28 +1140,28 @@ static int decodeBDS41(struct modesMessage *mm, bool store)
 //         AltStatus(1) Alt(16) Reserved(13)
 static int decodeBDS42(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned lat_valid = getbit(msg, 1);
-    unsigned lon_valid = getbit(msg, 14);
-    unsigned alt_valid = getbit(msg, 27);
+    uint32_t lat_valid = getbit(msg, 1);
+    uint32_t lon_valid = getbit(msg, 14);
+    uint32_t alt_valid = getbit(msg, 27);
 
     // At least latitude and longitude must be valid
     if (!lat_valid || !lon_valid)
         return 0;
 
     // Check reserved bits 44-56 should be zero
-    unsigned reserved = getbits(msg, 44, 56);
+    uint32_t reserved = getbits(msg, 44, 56);
     if (reserved != 0)
         return 0;
 
-    unsigned lat_raw = getbits(msg, 2, 12);
-    unsigned lat_sign = getbit(msg, 13); // 0=north, 1=south
+    uint32_t lat_raw = getbits(msg, 2, 12);
+    uint32_t lat_sign = getbit(msg, 13); // 0=north, 1=south
     double lat = lat_raw * (180.0 / 2048.0);
     if (lat_sign) lat = -lat;
 
-    unsigned lon_raw = getbits(msg, 15, 25);
-    unsigned lon_sign = getbit(msg, 26); // 0=east, 1=west
+    uint32_t lon_raw = getbits(msg, 15, 25);
+    uint32_t lon_sign = getbit(msg, 26); // 0=east, 1=west
     double lon = lon_raw * (180.0 / 2048.0);
     if (lon_sign) lon = -lon;
 
@@ -1175,7 +1175,7 @@ static int decodeBDS42(struct modesMessage *mm, bool store)
 
     int alt = 0;
     if (alt_valid) {
-        unsigned alt_raw = getbits(msg, 28, 43);
+        uint32_t alt_raw = getbits(msg, 28, 43);
         alt = alt_raw * 10; // 10-foot resolution
         if (alt > 60000) // sanity
             return 0;
@@ -1201,17 +1201,17 @@ static int decodeBDS42(struct modesMessage *mm, bool store)
 // Format: AltStatus(1) Alt(16) SpeedStatus(1) Speed(10) Reserved(28)
 static int decodeBDS43(struct modesMessage *mm, bool store)
 {
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned alt_valid = getbit(msg, 1);
-    unsigned speed_valid = getbit(msg, 18);
+    uint32_t alt_valid = getbit(msg, 1);
+    uint32_t speed_valid = getbit(msg, 18);
 
     // At least one field must be valid
     if (!alt_valid && !speed_valid)
         return 0;
 
     // Check reserved bits 29-56 should be zero
-    unsigned reserved = getbits(msg, 29, 56);
+    uint32_t reserved = getbits(msg, 29, 56);
     if (reserved != 0)
         return 0;
 
@@ -1219,16 +1219,16 @@ static int decodeBDS43(struct modesMessage *mm, bool store)
 
     int alt = 0;
     if (alt_valid) {
-        unsigned alt_raw = getbits(msg, 2, 17);
+        uint32_t alt_raw = getbits(msg, 2, 17);
         alt = alt_raw * 10; // 10-foot resolution
         if (alt > 60000) // sanity
             return 0;
         score += 18;
     }
 
-    unsigned speed = 0;
+    uint32_t speed = 0;
     if (speed_valid) {
-        unsigned speed_raw = getbits(msg, 19, 28);
+        uint32_t speed_raw = getbits(msg, 19, 28);
         speed = speed_raw; // 1-knot resolution
         if (speed > 600) // sanity
             return 0;
@@ -1263,28 +1263,28 @@ static int decodeBDS05(struct modesMessage *mm, bool store)
     if (mm->msgtype != 20)
         return 0;
 
-    unsigned char *msg = mm->MB;
+    uint8_t *msg = mm->MB;
 
-    unsigned typecode = getbits(msg, 1, 5);
+    uint32_t typecode = getbits(msg, 1, 5);
     if (typecode < 9 || typecode > 18)
         return 0; // only consider typecodes that could be an airborne position with baro altitude
 
-    unsigned t_bit = getbit(msg, 21);
+    uint32_t t_bit = getbit(msg, 21);
     if (t_bit)  // unlikely
         return 0;
 
-    unsigned ac12 = getbits(msg, 9, 20);
+    uint32_t ac12 = getbits(msg, 9, 20);
     if (!ac12)
         return 0;
 
     // Insert M=0 to make an AC13 value, match against the
     // AC13 value in the surrounding message
-    unsigned ac13 = ((ac12 & 0x0FC0) << 1) | (ac12 & 0x003F);
+    uint32_t ac13 = ((ac12 & 0x0FC0) << 1) | (ac12 & 0x003F);
     if (mm->AC != ac13)
         return 0; // no altitude match
 
-    unsigned lat = getbits(msg, 23, 39);
-    unsigned lon = getbits(msg, 40, 56);
+    uint32_t lat = getbits(msg, 23, 39);
+    uint32_t lon = getbits(msg, 40, 56);
     if (lat == 0 || lon == 0) // unlikely position
         return 0;
 

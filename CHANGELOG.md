@@ -5,6 +5,117 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+### v1.0.5 (2026-05-14)
+
+**FANET+ LoRa decoder (new):**
+- Full FANET+ (Flying Ad-hoc NETwork) decoder for paragliders, hang-gliders,
+  and light aircraft on 868.2 MHz (`fanet_decode.c/.h`)
+- LoRa CSS demodulation: SF7, BW250kHz, 500 kSPS, 128 chips/symbol
+- PHY: preamble detection (8 upchirps), sync word (0xF1), 2.25 downchirp SFD,
+  explicit header (CR=4/8), payload with variable coding rate
+- Dechirping via complex multiplication + FFT peak detection, gray decode,
+  deinterleave, Hamming FEC, CRC-16 CCITT
+- All FANET message types: tracking (type 1), name (type 2), text (type 3),
+  service/weather (type 4), landmark (type 5), ground tracking (type 7),
+  hardware info (type 0xA), thermal (type 9)
+- Name cache (64 entries, ~1h TTL) for pilot/aircraft identification
+- Synthetic ADS-B track integration: FANET positions appear on Aircraft page
+  with `FNT` callsign prefix and FLARM-style type icons
+- Dedicated FANET Monitor panel page with decoder statistics
+- SDR role `SDR_ROLE_FANET` for dedicated dongle assignment
+
+**COSPAS-SARSAT 406 MHz beacon decoder (new):**
+- Emergency distress beacon decoder for ELT, EPIRB, PLB, SSAS, ELT-DT
+  (`sarsat_decode.c/.h`)
+- Signal chain: 2.4 MSPS IQ → FM discriminator → 60× decimation (40 kHz IF)
+  → DC removal → 21-tap Blackman LPF → AGC → PLL (800 half-sym/s) →
+  Biphase-L/Manchester → preamble detect → frame sync → BCH → protocol decode
+- BCH-1(82,61) t=3 and BCH-2(38,26) t=2 forward error correction
+- Protocol fields: beacon type, country code (200+ countries), MMSI,
+  ICAO address, position (long-format), certificate/serial numbers
+- SDR role `SDR_ROLE_SARSAT` for dedicated dongle assignment
+
+**PilotAware P3I decoder (new):**
+- PilotAware P3I anti-collision protocol decoder (`p3i_decode.c/.h`,
+  `p3i_demod.c/.h`)
+- 869.525 MHz, 2-FSK, 38.4 kbps, ±10 kHz deviation
+- Syncword correlation, net ID validation, CRC integrity check
+- Integrated into 868 MHz FLARM multi-protocol demodulator
+
+**ADS-L decoder (new):**
+- EASA SRD-860 Electronic Conspicuity standard decoder
+  (`adsl_decode.c/.h`)
+- 868.2/868.4 MHz, 100 kbps 2-FSK, Manchester encoding
+- XXTEA descramble (zero key, 5 words, 6 rounds), Mode-S CRC-24 check
+- FANET cordic position decoding, UnsVR speed/altitude encoding
+- Integrated into 868 MHz FLARM demodulator as 3rd NCC sync template
+- Synthetic DF18 CF=5 messages for aircraft tracking integration
+
+**Airframes.io feed (new):**
+- UDP JSON feeder for ACARS and VDL2 messages to airframes.io
+  (`airframes_feed.c/.h`)
+- ACARS: acarsdec-compatible JSON format → feed.acars.io:5550
+- VDL2: dumpvdl2-compatible JSON format → feed.acars.io:5552
+- Configurable station ID, host, port; enable/disable per feed
+- Panel UI with per-feed toggle controls (active when decoder running)
+- CLI: `--airframes-acars`, `--airframes-vdl2`, `--airframes-station-id`
+
+**ACARS label semantic lookup (new):**
+- Human-readable descriptions for ACARS message labels (`acars_label.c/.h`)
+- ARINC 618/620 label table with 8 categories (ATC, AOC, AAC, Service,
+  Emergency, Weather, Printer, Unknown)
+- Used by panel Messages page for label enrichment
+
+**Central message dispatcher (new):**
+- C++17 dispatcher architecture (`src/dispatch/`) replacing direct function
+  calls between decoders, aircraft tracker, and feeders
+- `DecoderQueue<T>` template-based thread-safe SPSC queues
+- Unified `aircraft_update_t`, `text_message_t`, `ground_track_t`,
+  `raw_modes_t` data types across all decoder sources
+- Integrated into main loop via `backgroundTasks()` polling
+
+**C → C++ migration:**
+- Core networking and panel modules migrated to C++17 for dispatcher
+  integration and RAII resource management:
+  `feeder_thread`, `net_io`, `mlat_client`, `ogn_client`, `piaware_client`,
+  `sondehub_client`, `config_panel`, `gsm_tracker`, `iot_tracker`,
+  `lte_tracker`
+
+**868 MHz multi-protocol demodulator enhancements:**
+- FLARM demodulator now runs four parallel NCC sync templates:
+  FLARM V6/V7, OGN-TP, ADS-L, P3I
+- OGNTP decoder: added LDPC(208,160) FEC, comprehensive message struct
+  with position/velocity/aircraft type fields, relay counting, status
+  validation flags
+- FLARM reader: unified SPSC queue pattern for all 868 MHz protocols
+
+**ACARS/VDL2 demodulator improvements:**
+- ACARS: enhanced multi-channel reception, improved AM-MSK handling
+- VDL2: enhanced D8PSK demodulation, better frame synchronization
+
+**Aircraft tracking enhancements:**
+- Extended aircraft state for new decoder sources (FANET, P3I, ADS-L)
+- FLARM-style type mapping for FANET aircraft categories
+- Improved track management for mixed-source targets
+
+**Panel improvements:**
+- Airframes.io feed section in config page with per-feed enable/disable
+  checkboxes (grayed out when decoder inactive)
+- SARSAT added to Decoder Roles description in Devices page
+- `roleLabels` and `roleIcons` updated for all 11 decoder roles
+- FANET Monitor page with real-time decoder statistics
+- Status page groups airframes feeds under "Other" category
+
+**Build system:**
+- New source directories: `src/decode/fanet/`, `src/decode/sarsat/`,
+  `src/dispatch/`
+- C++17 compilation for dispatch module
+- New object targets: `fanet_decode.o`, `sarsat_decode.o`, `p3i_decode.o`,
+  `p3i_demod.o`, `adsl_decode.o`, `acars_label.o`, `airframes_feed.o`,
+  `dispatcher.o`, `msg_queue.o`
+
+---
+
 ### v1.0.4 (2026-05-07)
 
 **SDR backend abstraction layer (new):**

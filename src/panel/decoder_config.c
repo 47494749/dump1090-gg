@@ -92,11 +92,21 @@ void decoderConfigInit(void)
     DecoderConfigs.iot868.enabled = true;
     DecoderConfigs.iot868.output_enabled = true;
     DecoderConfigs.iot868.center_freq = 868300000;
+
+    // FANET defaults
+    DecoderConfigs.fanet.enabled = true;
+    DecoderConfigs.fanet.output_enabled = true;
+    DecoderConfigs.fanet.center_freq = 868200000;
+
+    // Sarsat defaults
+    DecoderConfigs.sarsat.enabled = true;
+    DecoderConfigs.sarsat.output_enabled = true;
+    DecoderConfigs.sarsat.center_freq = 406040000;
 }
 
 // ======================== JSON Helpers ========================
 
-static void skip_ws(const char **p) { while (**p && isspace((unsigned char)**p)) (*p)++; }
+static void skip_ws(const char **p) { while (**p && isspace((uint8_t)**p)) (*p)++; }
 
 static bool match_key(const char **p, const char *key)
 {
@@ -245,7 +255,7 @@ static void parse_flarm(const char **p)
             if (**p == '"') {
                 (*p)++;
                 for (int i = 0; i < 12; i++) {
-                    while (**p && !isxdigit((unsigned char)**p) && **p != '"') (*p)++;
+                    while (**p && !isxdigit((uint8_t)**p) && **p != '"') (*p)++;
                     if (**p == '"') break;
                     char *end;
                     DecoderConfigs.flarm.key_table[i] = (uint32_t)strtoul(*p, &end, 16);
@@ -272,7 +282,7 @@ static void parse_flarm(const char **p)
             if (**p == '"') {
                 (*p)++;
                 for (int i = 0; i < 4; i++) {
-                    while (**p && !isxdigit((unsigned char)**p) && **p != '"') (*p)++;
+                    while (**p && !isxdigit((uint8_t)**p) && **p != '"') (*p)++;
                     if (**p == '"') break;
                     char *end;
                     DecoderConfigs.flarm.key5[i] = (uint32_t)strtoul(*p, &end, 16);
@@ -463,6 +473,40 @@ static void parse_iot868(const char **p)
     if (**p == '}') (*p)++;
 }
 
+static void parse_fanet(const char **p)
+{
+    skip_ws(p);
+    if (**p != '{') return;
+    (*p)++;
+
+    while (**p && **p != '}') {
+        skip_ws(p);
+        if (**p == ',') { (*p)++; continue; }
+        if (match_key(p, "enabled")) DecoderConfigs.fanet.enabled = parse_bool(p);
+        else if (match_key(p, "output_enabled")) DecoderConfigs.fanet.output_enabled = parse_bool(p);
+        else if (match_key(p, "center_freq")) DecoderConfigs.fanet.center_freq = parse_number(p);
+        else { skip_value(p); }
+    }
+    if (**p == '}') (*p)++;
+}
+
+static void parse_sarsat(const char **p)
+{
+    skip_ws(p);
+    if (**p != '{') return;
+    (*p)++;
+
+    while (**p && **p != '}') {
+        skip_ws(p);
+        if (**p == ',') { (*p)++; continue; }
+        if (match_key(p, "enabled")) DecoderConfigs.sarsat.enabled = parse_bool(p);
+        else if (match_key(p, "output_enabled")) DecoderConfigs.sarsat.output_enabled = parse_bool(p);
+        else if (match_key(p, "center_freq")) DecoderConfigs.sarsat.center_freq = parse_number(p);
+        else { skip_value(p); }
+    }
+    if (**p == '}') (*p)++;
+}
+
 // ======================== Load ========================
 
 bool decoderConfigLoad(void)
@@ -498,6 +542,8 @@ bool decoderConfigLoad(void)
         else if (match_key(&p, "gsm")) parse_gsm(&p);
         else if (match_key(&p, "lte")) parse_lte(&p);
         else if (match_key(&p, "iot868")) parse_iot868(&p);
+        else if (match_key(&p, "fanet")) parse_fanet(&p);
+        else if (match_key(&p, "sarsat")) parse_sarsat(&p);
         else { skip_value(&p); }
     }
 
@@ -627,6 +673,20 @@ bool decoderConfigSave(void)
     fprintf(f, "    \"enabled\": %s,\n", DecoderConfigs.iot868.enabled ? "true" : "false");
     fprintf(f, "    \"output_enabled\": %s,\n", DecoderConfigs.iot868.output_enabled ? "true" : "false");
     fprintf(f, "    \"center_freq\": %.0f\n", DecoderConfigs.iot868.center_freq);
+    fprintf(f, "  },\n");
+
+    // FANET
+    fprintf(f, "  \"fanet\": {\n");
+    fprintf(f, "    \"enabled\": %s,\n", DecoderConfigs.fanet.enabled ? "true" : "false");
+    fprintf(f, "    \"output_enabled\": %s,\n", DecoderConfigs.fanet.output_enabled ? "true" : "false");
+    fprintf(f, "    \"center_freq\": %.0f\n", DecoderConfigs.fanet.center_freq);
+    fprintf(f, "  },\n");
+
+    // Sarsat
+    fprintf(f, "  \"sarsat\": {\n");
+    fprintf(f, "    \"enabled\": %s,\n", DecoderConfigs.sarsat.enabled ? "true" : "false");
+    fprintf(f, "    \"output_enabled\": %s,\n", DecoderConfigs.sarsat.output_enabled ? "true" : "false");
+    fprintf(f, "    \"center_freq\": %.0f\n", DecoderConfigs.sarsat.center_freq);
     fprintf(f, "  }\n");
 
     fprintf(f, "}\n");
@@ -651,14 +711,14 @@ bool decoderConfigLoadFlarmKeys(const char *path)
     while (fgets(line, sizeof(line), f)) {
         // Skip comments and empty lines
         char *s = line;
-        while (*s && isspace((unsigned char)*s)) s++;
+        while (*s && isspace((uint8_t)*s)) s++;
         if (!*s || *s == '#') continue;
 
         if (strncasecmp(s, "key_table=", 10) == 0 || strncasecmp(s, "key_table =", 11) == 0) {
             char *val = strchr(s, '=') + 1;
-            while (*val && isspace((unsigned char)*val)) val++;
+            while (*val && isspace((uint8_t)*val)) val++;
             for (int i = 0; i < 12; i++) {
-                while (*val && !isxdigit((unsigned char)*val)) val++;
+                while (*val && !isxdigit((uint8_t)*val)) val++;
                 if (!*val) break;
                 char *end;
                 DecoderConfigs.flarm.key_table[i] = (uint32_t)strtoul(val, &end, 16);
@@ -667,24 +727,24 @@ bool decoderConfigLoadFlarmKeys(const char *path)
             has_table = true;
         } else if (strncasecmp(s, "key2=", 5) == 0 || strncasecmp(s, "key2 =", 6) == 0) {
             char *val = strchr(s, '=') + 1;
-            while (*val && !isxdigit((unsigned char)*val)) val++;
+            while (*val && !isxdigit((uint8_t)*val)) val++;
             DecoderConfigs.flarm.key2 = (uint32_t)strtoul(val, NULL, 16);
             has_k2 = true;
         } else if (strncasecmp(s, "key3=", 5) == 0 || strncasecmp(s, "key3 =", 6) == 0) {
             char *val = strchr(s, '=') + 1;
-            while (*val && !isxdigit((unsigned char)*val)) val++;
+            while (*val && !isxdigit((uint8_t)*val)) val++;
             DecoderConfigs.flarm.key3 = (uint32_t)strtoul(val, NULL, 16);
             has_k3 = true;
         } else if (strncasecmp(s, "key4=", 5) == 0 || strncasecmp(s, "key4 =", 6) == 0) {
             char *val = strchr(s, '=') + 1;
-            while (*val && !isxdigit((unsigned char)*val)) val++;
+            while (*val && !isxdigit((uint8_t)*val)) val++;
             DecoderConfigs.flarm.key4 = (uint32_t)strtoul(val, NULL, 16);
             has_k4 = true;
         } else if (strncasecmp(s, "key5=", 5) == 0 || strncasecmp(s, "key5 =", 6) == 0) {
             char *val = strchr(s, '=') + 1;
-            while (*val && isspace((unsigned char)*val)) val++;
+            while (*val && isspace((uint8_t)*val)) val++;
             for (int i = 0; i < 4; i++) {
-                while (*val && !isxdigit((unsigned char)*val)) val++;
+                while (*val && !isxdigit((uint8_t)*val)) val++;
                 if (!*val) break;
                 char *end;
                 DecoderConfigs.flarm.key5[i] = (uint32_t)strtoul(val, &end, 16);
@@ -741,6 +801,8 @@ static const char *decoder_type_names[DECODER_TYPE_COUNT] = {
     [DECODER_GSM]        = "gsm",
     [DECODER_LTE]        = "lte",
     [DECODER_IOT868]     = "iot868",
+    [DECODER_FANET]      = "fanet",
+    [DECODER_SARSAT]     = "sarsat",
 };
 
 const char *decoderTypeName(decoder_type_t type)
@@ -780,6 +842,8 @@ bool decoderConfigParseJson(const char *json)
         else if (match_key(&p, "gsm")) parse_gsm(&p);
         else if (match_key(&p, "lte")) parse_lte(&p);
         else if (match_key(&p, "iot868")) parse_iot868(&p);
+        else if (match_key(&p, "fanet")) parse_fanet(&p);
+        else if (match_key(&p, "sarsat")) parse_sarsat(&p);
         else { skip_value(&p); }
     }
     return true;

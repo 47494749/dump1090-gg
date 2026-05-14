@@ -4,6 +4,10 @@
 #ifndef PLANEFINDER_CLIENT_H
 #define PLANEFINDER_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 typedef struct {
@@ -22,5 +26,9 @@ typedef struct {
 extern planefinder_client_t PlaneFinderClient;
 
 void *planefinder_thread_entry(void *arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PLANEFINDER_CLIENT_H

@@ -4,6 +4,10 @@
 #ifndef RADARBOX_CLIENT_H
 #define RADARBOX_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -49,5 +53,9 @@ int rb_keys_are_loaded(void);
 void rb_get_key(uint8_t out[16]);
 void rb_get_nonce(uint8_t out[8]);
 uint32_t rb_get_c2(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // RADARBOX_CLIENT_H

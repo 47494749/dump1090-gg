@@ -15,6 +15,10 @@
 #ifndef SONDE_DEMOD_H
 #define SONDE_DEMOD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -62,7 +66,7 @@ typedef struct {
 
 struct sonde_state *sonde_create(const sonde_config_t *config);
 void sonde_destroy(struct sonde_state *state);
-void sonde_process(struct sonde_state *state, const uint8_t *iq_data, unsigned len);
+void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t len);
 
 typedef struct {
     uint64_t samples_processed;
@@ -74,5 +78,9 @@ typedef struct {
 } sonde_stats_t;
 
 void sonde_get_stats(struct sonde_state *state, sonde_stats_t *stats);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SONDE_DEMOD_H

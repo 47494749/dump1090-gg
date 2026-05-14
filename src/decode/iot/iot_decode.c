@@ -23,7 +23,7 @@
 #include <time.h>
 
 #include "iot_decode.h"
-#include "iot_tracker.h"
+#include "msg_queue.h"
 
 // ======================== Internal constants ========================
 
@@ -50,6 +50,7 @@ typedef struct {
 
 struct iot_decoder_state {
     uint32_t sample_rate;
+    msg_queue_t out_queue;        // output queue for decoded messages
 
     // OOK envelope detector state
     uint8_t  ook_level;           // current smoothed AM level
@@ -491,12 +492,22 @@ iot_decoder_state_t *iotDecoderCreate(uint32_t sample_rate)
     iot_decoder_state_t *state = calloc(1, sizeof(*state));
     if (!state) return NULL;
     state->sample_rate = sample_rate;
+    state->out_queue = msg_queue_create(sizeof(iot_device_msg_t), 32);
+    if (!state->out_queue) { free(state); return NULL; }
     return state;
 }
 
 void iotDecoderDestroy(iot_decoder_state_t *state)
 {
+    if (!state) return;
+    msg_queue_destroy(state->out_queue);
     free(state);
+}
+
+int iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg)
+{
+    if (!state || !state->out_queue) return 0;
+    return msg_queue_pop(state->out_queue, msg);
 }
 
 // AM envelope detection: sqrt(I² + Q²) approximated
@@ -559,7 +570,7 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
                         // No generic OOK — too many false positives from noise
 
                         if (decoded) {
-                            iotTrackerUpdate(&msg);
+                            msg_queue_push(state->out_queue, &msg);
                             state->packets_decoded++;
                         }
                     }
@@ -645,7 +656,7 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
             if (!decoded) decoded = decode_honeywell_cm(fsk_bits_local, fsk_bit_count, &msg);
 
             if (decoded) {
-                iotTrackerUpdate(&msg);
+                msg_queue_push(state->out_queue, &msg);
                 state->packets_decoded++;
                 break;  // decoded at this rate, skip remaining
             }

@@ -12,6 +12,10 @@
 #ifndef FA_MLAT_H
 #define FA_MLAT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <pthread.h>
 
@@ -73,12 +77,12 @@ struct fa_mlat_aircraft {
     int      has_odd;
     uint64_t even_timestamp;         // 12MHz Beast timestamp
     uint64_t odd_timestamp;          // 12MHz Beast timestamp
-    unsigned char even_msg[14];      // raw even CPR message
-    unsigned char odd_msg[14];       // raw odd CPR message
+    uint8_t even_msg[14];      // raw even CPR message
+    uint8_t odd_msg[14];       // raw odd CPR message
     int      even_msgbits;
     int      odd_msgbits;
-    unsigned even_nucp;              // NUCp of even message
-    unsigned odd_nucp;               // NUCp of odd message
+    uint32_t even_nucp;              // NUCp of even message
+    uint32_t odd_nucp;               // NUCp of odd message
 
     // Rate measurement
     uint64_t rate_measurement_start; // monotonic ms
@@ -152,5 +156,9 @@ void faMlatInjectResult(uint32_t addr, double lat, double lon, double alt,
 
 // Cleanup
 void faMlatCleanup(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // FA_MLAT_H

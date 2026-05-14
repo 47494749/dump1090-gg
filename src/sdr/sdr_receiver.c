@@ -9,6 +9,8 @@
 
 #include "dump1090.h"
 #include "sdr_receiver.h"
+#include "dispatcher.h"
+#include "msg_queue.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -26,6 +28,9 @@
 #include "lte_tracker.h"
 #include "iot_decode.h"
 #include "iot_tracker.h"
+#include "airframes_feed.h"
+#include "fanet_decode.h"
+#include "sarsat_decode.h"
 
 // sdr_receiver.c no longer needs direct rtlsdr include — all access through sdr_backend
 
@@ -36,6 +41,65 @@ int PocsagOutputEnabled = 1;  // toggled from panel; 1 = decode & show messages
 int GsmOutputEnabled = 1;     // toggled from panel; 1 = decode & show GSM cells
 int LteOutputEnabled = 1;     // toggled from panel; 1 = decode & show LTE cells
 int IotOutputEnabled = 1;     // toggled from panel; 1 = decode & show IoT devices
+int FanetOutputEnabled = 1;   // toggled from panel; 1 = decode & show FANET traffic
+int SarsatOutputEnabled = 1;  // toggled from panel; 1 = decode & show Sarsat beacons
+
+// Dispatcher aircraft queue for FANET (registered on first use)
+static aircraft_queue_handle_t fanet_aircraft_queue = NULL;
+
+// FANET ground tracking cache (type 7 targets — not injected into aircraft list)
+#define FANET_GROUND_MAX 64
+
+static fanet_ground_entry_t fanet_ground_cache[FANET_GROUND_MAX];
+static int fanet_ground_count = 0;
+static pthread_mutex_t fanet_ground_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void fanetGetGroundTracks(void (*cb)(const fanet_ground_entry_t *e, void *ctx), void *ctx)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_ground_mutex);
+    for (int i = 0; i < fanet_ground_count; i++) {
+        if (fanet_ground_cache[i].valid && (now - fanet_ground_cache[i].last_seen) < 300000)
+            cb(&fanet_ground_cache[i], ctx);
+    }
+    pthread_mutex_unlock(&fanet_ground_mutex);
+}
+
+static void fanet_ground_cache_update(uint32_t addr, double lat, double lon,
+                                       uint8_t gtype, const char *name)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_ground_mutex);
+
+    // Find existing entry or oldest slot
+    int slot = -1, oldest = -1;
+    uint64_t oldest_time = UINT64_MAX;
+    for (int i = 0; i < fanet_ground_count; i++) {
+        if (fanet_ground_cache[i].addr == addr) { slot = i; break; }
+        if (fanet_ground_cache[i].last_seen < oldest_time) {
+            oldest_time = fanet_ground_cache[i].last_seen;
+            oldest = i;
+        }
+    }
+    if (slot < 0) {
+        if (fanet_ground_count < FANET_GROUND_MAX) {
+            slot = fanet_ground_count++;
+        } else {
+            slot = oldest;
+        }
+    }
+
+    fanet_ground_cache[slot].addr = addr;
+    fanet_ground_cache[slot].latitude = lat;
+    fanet_ground_cache[slot].longitude = lon;
+    fanet_ground_cache[slot].ground_type = gtype;
+    fanet_ground_cache[slot].last_seen = now;
+    fanet_ground_cache[slot].valid = 1;
+    if (name && name[0])
+        snprintf(fanet_ground_cache[slot].name, sizeof(fanet_ground_cache[slot].name), "%s", name);
+
+    pthread_mutex_unlock(&fanet_ground_mutex);
+}
 
 // ======================== Utility ========================
 
@@ -51,13 +115,15 @@ const char *sdrRoleName(sdr_role_t role)
         case SDR_ROLE_GSM:        return "gsm";
         case SDR_ROLE_LTE:        return "lte";
         case SDR_ROLE_IOT868:     return "iot868";
+        case SDR_ROLE_FANET:      return "fanet";
+        case SDR_ROLE_SARSAT:     return "sarsat";
         default:                  return "none";
     }
 }
 
 bool rxRoleIsDecoder(sdr_role_t role)
 {
-    return (role == SDR_ROLE_ACARS || role == SDR_ROLE_VDL2 || role == SDR_ROLE_RADIOSONDE || role == SDR_ROLE_POCSAG || role == SDR_ROLE_GSM || role == SDR_ROLE_LTE);
+    return (role == SDR_ROLE_ACARS || role == SDR_ROLE_VDL2 || role == SDR_ROLE_RADIOSONDE || role == SDR_ROLE_POCSAG || role == SDR_ROLE_GSM || role == SDR_ROLE_LTE || role == SDR_ROLE_FANET || role == SDR_ROLE_SARSAT);
 }
 
 const char *rxStateName(rx_state_t state)
@@ -135,8 +201,16 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
         config->role = SDR_ROLE_IOT868;
         config->freq = IOT_CENTER_FREQ;
         config->sample_rate = IOT_SAMPLE_RATE;
+    } else if (!strcasecmp(token, "fanet")) {
+        config->role = SDR_ROLE_FANET;
+        config->freq = FANET_CENTER_FREQ;
+        config->sample_rate = FANET_SAMPLE_RATE;
+    } else if (!strcasecmp(token, "sarsat")) {
+        config->role = SDR_ROLE_SARSAT;
+        config->freq = SARSAT_CENTER_FREQ;
+        config->sample_rate = SARSAT_SAMPLE_RATE;
     } else {
-        fprintf(stderr, "sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte/iot868)\n", token);
+        fprintf(stderr, "sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte/iot868/fanet/sarsat)\n", token);
         return false;
     }
 
@@ -167,7 +241,7 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
 
 // ======================== Per-receiver FIFO ========================
 
-bool rxFifoCreate(rx_fifo_t *fifo, unsigned buffer_count, unsigned buffer_size, unsigned overlap)
+bool rxFifoCreate(rx_fifo_t *fifo, uint32_t buffer_count, uint32_t buffer_size, uint32_t overlap)
 {
     pthread_mutex_init(&fifo->mutex, NULL);
     pthread_cond_init(&fifo->notempty_cond, NULL);
@@ -183,7 +257,7 @@ bool rxFifoCreate(rx_fifo_t *fifo, unsigned buffer_count, unsigned buffer_size, 
         goto nomem;
     fifo->overlap_length = overlap;
 
-    for (unsigned i = 0; i < buffer_count; ++i) {
+    for (uint32_t i = 0; i < buffer_count; ++i) {
         struct mag_buf *newbuf;
         if (!(newbuf = calloc(1, sizeof(*newbuf))))
             goto nomem;
@@ -466,7 +540,7 @@ static int rx_find_device_index(const sdr_backend_ops_t *ops, const char *serial
 }
 
 // Async stream callback — context points to the sdr_receiver_t
-static void rx_stream_callback(unsigned char *buf, uint32_t len, void *ctx)
+static void rx_stream_callback(uint8_t *buf, uint32_t len, void *ctx)
 {
     sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
 
@@ -501,7 +575,7 @@ static void rx_stream_callback(unsigned char *buf, uint32_t len, void *ctx)
         return;
     }
 
-    unsigned samples_read = len / 2;
+    uint32_t samples_read = len / 2;
     if (!samples_read) return;
 
     // Dispatch to decoder_ops (all roles use this uniform path)
@@ -511,12 +585,12 @@ static void rx_stream_callback(unsigned char *buf, uint32_t len, void *ctx)
 
     // Sample IQ noise power for auto-gain (first 256 pairs per callback)
     {
-        unsigned n = (samples_read < 256) ? samples_read : 256;
+        uint32_t n = (samples_read < 256) ? samples_read : 256;
         uint64_t s = 0;
-        for (unsigned i = 0; i < n * 2; i += 2) {
+        for (uint32_t i = 0; i < n * 2; i += 2) {
             int I = (int)buf[i] - 128;
             int Q = (int)buf[i+1] - 128;
-            s += (unsigned)(I*I + Q*Q);
+            s += (uint32_t)(I*I + Q*Q);
         }
         __atomic_add_fetch(&rx->ag_iq_sum, s, __ATOMIC_RELAXED);
         __atomic_add_fetch(&rx->ag_iq_count, n, __ATOMIC_RELAXED);
@@ -696,7 +770,12 @@ bool rxOpen(sdr_receiver_t *rx)
 
     ops->set_freq_correction(sdev, rx->config.ppm_error);
     ops->set_frequency(sdev, rx->config.freq);
-    ops->set_sample_rate(sdev, (unsigned)rx->config.sample_rate);
+    if (ops->set_sample_rate(sdev, (uint32_t)rx->config.sample_rate) != 0) {
+        fprintf(stderr, "rx[%d]: failed to set sample rate %.0f for role %s\n",
+                rx->id, rx->config.sample_rate, sdrRoleName(rx->config.role));
+        rxClose(rx);
+        return false;
+    }
     ops->reset_buffer(sdev);
 
     // Set decoder_ops for this role (uniform plugin interface)
@@ -770,7 +849,15 @@ static void *rx_reader_thread(void *arg)
             ops->set_gain(sdev, rx->rtl.gains[rx->rtl.current_gain]);
         ops->set_freq_correction(sdev, rx->config.ppm_error);
         ops->set_frequency(sdev, rx->config.freq);
-        ops->set_sample_rate(sdev, (unsigned)rx->config.sample_rate);
+        if (ops->set_sample_rate(sdev, (uint32_t)rx->config.sample_rate) != 0) {
+            fprintf(stderr, "rx[%d]: failed to restore sample rate %.0f during reopen\n",
+                    rx->id, rx->config.sample_rate);
+            ops->close(sdev);
+            rx->backend_dev = NULL;
+            rx->rtl.dev = NULL;
+            rx->state = RX_STATE_ERROR;
+            goto done;
+        }
         ops->reset_buffer(sdev);
         rx->usb_error_count = 0;
 
@@ -795,7 +882,7 @@ static void *rx_file_reader_thread(void *arg)
 {
     sdr_receiver_t *rx = (sdr_receiver_t *)arg;
     const char *path = rx->config.ifile_path;
-    const unsigned buf_size = 262144;  // 256 KB per read
+    const uint32_t buf_size = 262144;  // 256 KB per read
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "rx[%d]: file reader: failed to allocate buffer\n", rx->id);
@@ -805,7 +892,7 @@ static void *rx_file_reader_thread(void *arg)
     fprintf(stderr, "rx[%d]: file reader thread started (role=%s, file=%s)\n",
             rx->id, sdrRoleName(rx->config.role), path);
 
-    unsigned loop_count = 0;
+    uint32_t loop_count = 0;
 
     while (!Modes.exit && rx->state == RX_STATE_RUNNING) {
         FILE *fp = fopen(path, "rb");
@@ -922,7 +1009,7 @@ void rxClose(sdr_receiver_t *rx)
 // is still streaming on the same USB bus.
 // Precondition: rx->state == RX_STATE_RUNNING (will be stopped internally).
 bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
-                   int new_ppm, unsigned new_freq, double new_sample_rate)
+                   int new_ppm, uint32_t new_freq, double new_sample_rate)
 {
     if (rx->state == RX_STATE_RUNNING)
         rxStop(rx);
@@ -978,7 +1065,12 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
 
     ops->set_freq_correction(sdev, rx->config.ppm_error);
     ops->set_frequency(sdev, rx->config.freq);
-    ops->set_sample_rate(sdev, (unsigned)rx->config.sample_rate);
+    if (ops->set_sample_rate(sdev, (uint32_t)rx->config.sample_rate) != 0) {
+        fprintf(stderr, "rx[%d]: rxReconfigure: failed to set sample rate %.0f for role %s\n",
+                rx->id, rx->config.sample_rate, sdrRoleName(rx->config.role));
+        rx->state = RX_STATE_ERROR;
+        return false;
+    }
     ops->reset_buffer(sdev);
 
     // Create new decoder
@@ -1026,7 +1118,7 @@ bool rxOpen(sdr_receiver_t *rx)       { fprintf(stderr, "rx[%d]: no SDR backend 
 bool rxStart(sdr_receiver_t *rx)      { MODES_NOTUSED(rx); return false; }
 void rxStop(sdr_receiver_t *rx)       { MODES_NOTUSED(rx); }
 void rxClose(sdr_receiver_t *rx)      { MODES_NOTUSED(rx); rx->state = RX_STATE_IDLE; }
-bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t r, double g, int p, unsigned f, double s) { MODES_NOTUSED(rx); MODES_NOTUSED(r); MODES_NOTUSED(g); MODES_NOTUSED(p); MODES_NOTUSED(f); MODES_NOTUSED(s); return false; }
+bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t r, double g, int p, uint32_t f, double s) { MODES_NOTUSED(rx); MODES_NOTUSED(r); MODES_NOTUSED(g); MODES_NOTUSED(p); MODES_NOTUSED(f); MODES_NOTUSED(s); return false; }
 int sdrEnumerateDevices(char serials[][64], int max_devices) { MODES_NOTUSED(serials); MODES_NOTUSED(max_devices); return 0; }
 
 #endif // ENABLE_RTLSDR || ENABLE_SDRGG
@@ -1037,163 +1129,124 @@ int sdrEnumerateDevices(char serials[][64], int max_devices) { MODES_NOTUSED(ser
 #include "vdl2_demod.h"
 #include "sonde_demod.h"
 
-// ACARS message callback → panelLogMessage
-static void acars_message_handler(const acars_msg_t *msg, void *ctx)
-{
-    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
-    panelLogMessage("[ACARS rx%d] %.3f MHz %s %s (reg:%s) [%s] %s",
-                    rx ? rx->id : -1, msg->freq / 1e6,
-                    msg->flight[0] ? msg->flight : "???",
-                    msg->label,
-                    msg->reg[0] ? msg->reg : "?",
-                    msg->label,
-                    msg->text[0] ? msg->text : "(empty)");
+// ---- Queue-based decoder wrapper contexts ----
+// Each decoder's output goes through a msg_queue so that processing (reader thread)
+// is decoupled from consumption (main thread drain).
+
+typedef struct {
+    struct acars_state *inner;
+    msg_queue_t         queue;
+    sdr_receiver_t     *rx;
+} acars_ctx_t;
+
+typedef struct {
+    struct vdl2_state  *inner;
+    msg_queue_t         queue;
+    sdr_receiver_t     *rx;
+} vdl2_ctx_t;
+
+typedef struct {
+    struct sonde_state *inner;
+    msg_queue_t         queue;
+    sdr_receiver_t     *rx;
+} sonde_ctx_t;
+
+typedef struct {
+    struct pocsag_state *inner;
+    msg_queue_t          queue;
+    sdr_receiver_t      *rx;
+} pocsag_ctx_t;
+
+// GSM queue item types
+typedef struct {
+    gsm_cell_info_t cell;
+    char            msg_type[32];
+} gsm_msg_item_t;
+
+typedef struct {
+    gsm_cell_info_t cell;
+    gsm_cb_msg_t    cb;
+} gsm_cb_item_t;
+
+typedef struct {
+    struct gsm_state *inner;
+    msg_queue_t       msg_queue;   // for gsm_msg_item_t
+    msg_queue_t       cb_queue;    // for gsm_cb_item_t
+    sdr_receiver_t   *rx;
+} gsm_ctx_t;
+
+typedef struct {
+    struct lte_state *inner;
+    msg_queue_t       queue;
+    sdr_receiver_t   *rx;
+} lte_ctx_t;
+
+typedef struct {
+    struct sarsat_state *inner;
+    msg_queue_t          queue;
+    sdr_receiver_t      *rx;
+} sarsat_ctx_t;
+
+// ---- Lightweight queue-push callbacks (called from reader thread) ----
+
+static void acars_queue_cb(const acars_msg_t *msg, void *ctx) {
+    acars_ctx_t *c = (acars_ctx_t *)ctx;
+    msg_queue_push(c->queue, msg);
 }
 
-// VDL2 message callback → panelLogMessage
-static void vdl2_message_handler(const vdl2_msg_t *msg, void *ctx)
-{
-    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
-    if (msg->has_acars) {
-        panelLogMessage("[VDL2 rx%d] %.3f MHz %s %s (reg:%s) [%s] SNR=%.0fdB %s",
-                        rx ? rx->id : -1, msg->freq / 1e6,
-                        msg->frame_type,
-                        msg->flight[0] ? msg->flight : "???",
-                        msg->reg[0] ? msg->reg : "?",
-                        msg->label,
-                        msg->snr,
-                        msg->text[0] ? msg->text : "(no text)");
-    } else {
-        panelLogMessage("[VDL2 rx%d] %.3f MHz %s src=%06X dst=%06X SNR=%.0fdB [%d bytes]",
-                        rx ? rx->id : -1, msg->freq / 1e6,
-                        msg->frame_type,
-                        msg->src.addr,
-                        msg->dst.addr,
-                        msg->snr,
-                        msg->info_len);
-    }
+static void vdl2_queue_cb(const vdl2_msg_t *msg, void *ctx) {
+    vdl2_ctx_t *c = (vdl2_ctx_t *)ctx;
+    msg_queue_push(c->queue, msg);
 }
 
-// Sonde message callback → panelLogMessage + SondeHub upload
-static void sonde_message_handler(const sonde_msg_t *msg, void *ctx)
-{
-    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
-    if (msg->valid_pos) {
-        panelLogMessage("[SONDE rx%d] %s %s pos=%.4f,%.4f alt=%.0fm vel=%.1fm/s frame=%d",
-                        rx ? rx->id : -1, msg->type, msg->serial,
-                        msg->lat, msg->lon, msg->alt,
-                        msg->vel_h, msg->frame_num);
-        sondehubClientSubmit(msg);
-    } else {
-        panelLogMessage("[SONDE rx%d] %s %s frame=%d (no GPS fix)",
-                        rx ? rx->id : -1, msg->type, msg->serial, msg->frame_num);
-    }
+static void sonde_queue_cb(const sonde_msg_t *msg, void *ctx) {
+    sonde_ctx_t *c = (sonde_ctx_t *)ctx;
+    msg_queue_push(c->queue, msg);
 }
 
-// POCSAG message callback → panelLogMessage
-static void pocsag_message_handler(const pocsag_msg_t *msg, void *ctx)
-{
-    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
-    if (!PocsagOutputEnabled) return;
-
-    const char *freq_str = "";
-    char freq_buf[32];
-    if (msg->channel_freq > 0) {
-        snprintf(freq_buf, sizeof(freq_buf), " %.3fMHz", msg->channel_freq / 1e6);
-        freq_str = freq_buf;
-    }
-
-    if (msg->is_tone_only) {
-        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d TONE-ONLY",
-                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function);
-    } else if (msg->is_alpha && msg->alpha_len > 0) {
-        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d \"%s\"",
-                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function,
-                        msg->alpha_msg);
-    } else if (msg->is_numeric && msg->numeric_len > 0) {
-        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d num=%s",
-                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function,
-                        msg->numeric_msg);
-    } else {
-        panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d (empty)",
-                        rx ? rx->id : -1, freq_str, msg->baud_rate, msg->address, msg->function);
-    }
+static void pocsag_queue_cb(const pocsag_msg_t *msg, void *ctx) {
+    pocsag_ctx_t *c = (pocsag_ctx_t *)ctx;
+    msg_queue_push(c->queue, msg);
 }
 
-// GSM message callback → panelLogMessage + cell tracking
-static void gsm_message_handler(const gsm_cell_info_t *cell, const char *msg_type,
-                                 const uint8_t *l3_data, int l3_len, void *ctx)
-{
+static void gsm_msg_queue_cb(const gsm_cell_info_t *cell, const char *msg_type,
+                              const uint8_t *l3_data, int l3_len, void *ctx) {
     (void)l3_data; (void)l3_len;
-    if (!GsmOutputEnabled) return;
-
-    // Update tracker from the decoder that produced this message
-    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
-    if (rx && rx->decoder_state) {
-        gsm_stats_t stats;
-        gsm_get_stats((struct gsm_state *)rx->decoder_state, &stats);
-        gsm_sync_state_t sync = gsm_get_sync_state((struct gsm_state *)rx->decoder_state);
-        gsmTrackerUpdate(cell, &stats, sync);
-    }
-
-    panelLogMessage("[GSM rx%d] MCC=%d MNC=%d LAC=%u CID=%u ARFCN=%d BSIC=%02X %s",
-                    rx ? rx->id : -1, cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
-                    cell->arfcn, cell->bsic, msg_type);
+    gsm_ctx_t *c = (gsm_ctx_t *)ctx;
+    gsm_msg_item_t item;
+    item.cell = *cell;
+    snprintf(item.msg_type, sizeof(item.msg_type), "%s", msg_type);
+    msg_queue_push(c->msg_queue, &item);
 }
 
-// GSM Cell Broadcast callback
-static void gsm_cb_handler(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb, void *ctx)
-{
-    sdr_receiver_t *rx = (sdr_receiver_t *)ctx;
-    if (!GsmOutputEnabled) return;
-
-    gsmTrackerUpdateCB(cell, cb);
-
-    panelLogMessage("[GSM-CB rx%d] MCC=%d MNC=%d LAC=%u CID=%u serial=%u id=%u \"%s\"",
-                    rx ? rx->id : -1, cell->si3.mcc, cell->si3.mnc, cell->si3.lac, cell->si3.cell_id,
-                    cb->serial_nr, cb->msg_id, cb->text);
+static void gsm_cb_queue_cb(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb, void *ctx) {
+    gsm_ctx_t *c = (gsm_ctx_t *)ctx;
+    gsm_cb_item_t item;
+    item.cell = *cell;
+    item.cb = *cb;
+    msg_queue_push(c->cb_queue, &item);
 }
 
-// LTE cell callback → tracker update + log alerts
-static void lte_cell_handler(const lte_cell_info_t *cell, void *ctx)
-{
-    (void)ctx;
-    if (!LteOutputEnabled) return;
+static void lte_queue_cb(const lte_cell_info_t *cell, void *ctx) {
+    lte_ctx_t *c = (lte_ctx_t *)ctx;
+    msg_queue_push(c->queue, cell);
+}
 
-    lteTrackerUpdate(cell);
-
-    // Log any new alerts via panelLogMessage (same format as other decoders)
-    for (int i = 0; i < cell->alert_count; i++) {
-        const lte_alert_t *a = &cell->alerts[i];
-        if (!a->active) continue;
-        switch (a->type) {
-        case LTE_ALERT_ETWS:
-            if (a->text[0])
-                panelLogMessage("[LTE] \xf0\x9f\x9a\xa8 ETWS PCI=%u %s msgid=%u \"%s\"",
-                    cell->pci, a->category, a->message_id, a->text);
-            else
-                panelLogMessage("[LTE] \xf0\x9f\x9a\xa8 ETWS PCI=%u %s msgid=%u serial=%u",
-                    cell->pci, a->category, a->message_id, a->serial_number);
-            break;
-        case LTE_ALERT_CMAS:
-            panelLogMessage("[LTE] \xf0\x9f\x9a\xa8 CMAS PCI=%u %s msgid=%u \"%s\"",
-                cell->pci, a->category, a->message_id,
-                a->text[0] ? a->text : "(no text)");
-            break;
-        case LTE_ALERT_EAB:
-            panelLogMessage("[LTE] \xe2\x9a\xa0 EAB PCI=%u %s %s",
-                cell->pci, a->category, a->text);
-            break;
-        default:
-            break;
-        }
-    }
+static void sarsat_queue_cb(const sarsat_msg_t *msg, void *ctx) {
+    sarsat_ctx_t *c = (sarsat_ctx_t *)ctx;
+    msg_queue_push(c->queue, msg);
 }
 
 bool rxDecoderCreate(sdr_receiver_t *rx)
 {
     switch (rx->config.role) {
     case SDR_ROLE_ACARS: {
+        acars_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->queue = msg_queue_create(sizeof(acars_msg_t), 64);
+        if (!ctx->queue) { free(ctx); return false; }
+
         acars_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.center_freq = rx->config.freq;
@@ -1205,8 +1258,8 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
         cfg.channel_freqs[3] = ACARS_FREQ_4;          // 130.450
         cfg.channel_freqs[4] = ACARS_FREQ_5;          // 129.125
         cfg.num_channels = 5;
-        cfg.callback = acars_message_handler;
-        cfg.callback_ctx = rx;
+        cfg.callback = acars_queue_cb;
+        cfg.callback_ctx = ctx;
 
         // Adjust center freq to cover all channels
         // Center between min and max channel freq
@@ -1214,15 +1267,22 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
         double fmax = cfg.channel_freqs[2]; // 131.725
         cfg.center_freq = (fmin + fmax) / 2.0;
         // Update the receiver's actual center freq
-        rx->config.freq = (unsigned)cfg.center_freq;
+        rx->config.freq = (uint32_t)cfg.center_freq;
 
-        rx->decoder_state = acars_create(&cfg);
-        if (!rx->decoder_state) return false;
+        ctx->inner = acars_create(&cfg);
+        if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
+        rx->decoder_state = ctx;
         fprintf(stderr, "rx[%d]: ACARS decoder created, center=%.3f MHz, %d channels\n",
                 rx->id, cfg.center_freq / 1e6, cfg.num_channels);
         return true;
     }
     case SDR_ROLE_VDL2: {
+        vdl2_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->queue = msg_queue_create(sizeof(vdl2_msg_t), 64);
+        if (!ctx->queue) { free(ctx); return false; }
+
         vdl2_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.center_freq = rx->config.freq;
@@ -1232,36 +1292,50 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
         cfg.channel_freqs[1] = VDL2_FREQ_EU_2;   // 136.875 MHz
         cfg.channel_freqs[2] = VDL2_FREQ_EU_3;   // 136.775 MHz
         cfg.squelch_level = -32.0f;               // -32 dBFS squelch
-        cfg.callback = vdl2_message_handler;
-        cfg.callback_ctx = rx;
+        cfg.callback = vdl2_queue_cb;
+        cfg.callback_ctx = ctx;
 
-        rx->decoder_state = vdl2_create(&cfg);
-        if (!rx->decoder_state) return false;
+        ctx->inner = vdl2_create(&cfg);
+        if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
+        rx->decoder_state = ctx;
         fprintf(stderr, "rx[%d]: VDL2 decoder created, %d channels\n",
                 rx->id, cfg.num_channels);
         return true;
     }
     case SDR_ROLE_RADIOSONDE: {
+        sonde_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->queue = msg_queue_create(sizeof(sonde_msg_t), 32);
+        if (!ctx->queue) { free(ctx); return false; }
+
         sonde_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.center_freq = rx->config.freq;
         cfg.sample_rate = rx->config.sample_rate;
-        cfg.callback = sonde_message_handler;
-        cfg.callback_ctx = rx;
+        cfg.callback = sonde_queue_cb;
+        cfg.callback_ctx = ctx;
 
-        rx->decoder_state = sonde_create(&cfg);
-        if (!rx->decoder_state) return false;
+        ctx->inner = sonde_create(&cfg);
+        if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
+        rx->decoder_state = ctx;
         fprintf(stderr, "rx[%d]: Radiosonde decoder created, freq=%.3f MHz\n",
                 rx->id, cfg.center_freq / 1e6);
         return true;
     }
     case SDR_ROLE_POCSAG: {
+        pocsag_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->queue = msg_queue_create(sizeof(pocsag_msg_t), 64);
+        if (!ctx->queue) { free(ctx); return false; }
+
         pocsag_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.center_freq = rx->config.freq;
         cfg.sample_rate = rx->config.sample_rate;
-        cfg.callback = pocsag_message_handler;
-        cfg.callback_ctx = rx;
+        cfg.callback = pocsag_queue_cb;
+        cfg.callback_ctx = ctx;
 
         // Multi-channel: German BOS POCSAG frequencies within the 2.4 MHz band
         // Center at 466.150 MHz covers 466.0–466.3 MHz
@@ -1273,47 +1347,73 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
             cfg.num_channels = 3;
             // Adjust center frequency to cover all channels
             cfg.center_freq = 466150000;
-            rx->config.freq = (unsigned)cfg.center_freq;  // retune SDR
+            rx->config.freq = (uint32_t)cfg.center_freq;  // retune SDR
             fprintf(stderr, "rx[%d]: POCSAG multi-channel mode, center=%.3f MHz, %d channels\n",
                     rx->id, cfg.center_freq / 1e6, cfg.num_channels);
         }
 
-        rx->decoder_state = pocsag_create(&cfg);
-        if (!rx->decoder_state) return false;
+        ctx->inner = pocsag_create(&cfg);
+        if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
+        rx->decoder_state = ctx;
         fprintf(stderr, "rx[%d]: POCSAG decoder created, freq=%.3f MHz, sr=%.0f\n",
                 rx->id, cfg.center_freq / 1e6, cfg.sample_rate);
         return true;
     }
     case SDR_ROLE_GSM: {
+        gsm_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->msg_queue = msg_queue_create(sizeof(gsm_msg_item_t), 32);
+        ctx->cb_queue = msg_queue_create(sizeof(gsm_cb_item_t), 16);
+        if (!ctx->msg_queue || !ctx->cb_queue) {
+            msg_queue_destroy(ctx->msg_queue);
+            msg_queue_destroy(ctx->cb_queue);
+            free(ctx);
+            return false;
+        }
+
         gsm_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.arfcn_freq = rx->config.freq;
         cfg.center_freq = rx->config.freq - GSM_IF_OFFSET;
         cfg.sample_rate = rx->config.sample_rate;
         cfg.tsc = -1; // auto-detect
-        cfg.msg_cb = gsm_message_handler;
-        cfg.cb_cb = gsm_cb_handler;
-        cfg.callback_ctx = rx;
+        cfg.msg_cb = gsm_msg_queue_cb;
+        cfg.cb_cb = gsm_cb_queue_cb;
+        cfg.callback_ctx = ctx;
 
-        rx->decoder_state = gsm_create(&cfg);
-        if (!rx->decoder_state) return false;
+        ctx->inner = gsm_create(&cfg);
+        if (!ctx->inner) {
+            msg_queue_destroy(ctx->msg_queue);
+            msg_queue_destroy(ctx->cb_queue);
+            free(ctx);
+            return false;
+        }
+        rx->decoder_state = ctx;
         /* Retune to IF-offset frequency to avoid DC spike */
-        rx->config.freq = (unsigned)cfg.center_freq;
+        rx->config.freq = (uint32_t)cfg.center_freq;
         fprintf(stderr, "rx[%d]: GSM decoder created, arfcn=%.3f MHz, tuned=%.3f MHz (IF offset %d Hz), sr=%.0f\n",
                 rx->id, cfg.arfcn_freq / 1e6, cfg.center_freq / 1e6, GSM_IF_OFFSET, cfg.sample_rate);
         return true;
     }
     case SDR_ROLE_LTE: {
+        lte_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->queue = msg_queue_create(sizeof(lte_cell_info_t), 16);
+        if (!ctx->queue) { free(ctx); return false; }
+
         lte_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.center_freq = rx->config.freq;
         cfg.sample_rate = rx->config.sample_rate;
-        cfg.callback = lte_cell_handler;
-        cfg.callback_ctx = rx;
+        cfg.callback = lte_queue_cb;
+        cfg.callback_ctx = ctx;
         cfg.hop_enabled = true;  // Enable Band 20 hopping (796/806/816 MHz)
 
-        rx->decoder_state = lte_create(&cfg);
-        if (!rx->decoder_state) return false;
+        ctx->inner = lte_create(&cfg);
+        if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
+        rx->decoder_state = ctx;
         fprintf(stderr, "rx[%d]: LTE decoder created, freq=%.3f MHz, sr=%.0f, hop=on\n",
                 rx->id, cfg.center_freq / 1e6, cfg.sample_rate);
         return true;
@@ -1323,6 +1423,34 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
         if (!rx->decoder_state) return false;
         fprintf(stderr, "rx[%d]: IoT 868 MHz decoder created, freq=%.3f MHz, sr=%.0f\n",
                 rx->id, rx->config.freq / 1e6, rx->config.sample_rate);
+        return true;
+    }
+    case SDR_ROLE_FANET: {
+        rx->decoder_state = fanet_create((uint32_t)rx->config.sample_rate);
+        if (!rx->decoder_state) return false;
+        fprintf(stderr, "rx[%d]: FANET LoRa decoder created, freq=%.3f MHz, sr=%.0f\n",
+                rx->id, rx->config.freq / 1e6, rx->config.sample_rate);
+        return true;
+    }
+    case SDR_ROLE_SARSAT: {
+        sarsat_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return false;
+        ctx->rx = rx;
+        ctx->queue = msg_queue_create(sizeof(sarsat_msg_t), 16);
+        if (!ctx->queue) { free(ctx); return false; }
+
+        sarsat_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.center_freq = rx->config.freq;
+        cfg.sample_rate = rx->config.sample_rate;
+        cfg.callback = sarsat_queue_cb;
+        cfg.callback_ctx = ctx;
+
+        ctx->inner = sarsat_create(&cfg);
+        if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
+        rx->decoder_state = ctx;
+        fprintf(stderr, "rx[%d]: Sarsat 406 MHz decoder created, freq=%.3f MHz\n",
+                rx->id, cfg.center_freq / 1e6);
         return true;
     }
     default:
@@ -1335,82 +1463,107 @@ void rxDecoderDestroy(sdr_receiver_t *rx)
     if (!rx->decoder_state) return;
 
     switch (rx->config.role) {
-    case SDR_ROLE_ACARS:
-        acars_destroy((struct acars_state *)rx->decoder_state);
+    case SDR_ROLE_ACARS: {
+        acars_ctx_t *ctx = (acars_ctx_t *)rx->decoder_state;
+        acars_destroy(ctx->inner);
+        msg_queue_destroy(ctx->queue);
+        free(ctx);
         break;
-    case SDR_ROLE_VDL2:
-        vdl2_destroy((struct vdl2_state *)rx->decoder_state);
+    }
+    case SDR_ROLE_VDL2: {
+        vdl2_ctx_t *ctx = (vdl2_ctx_t *)rx->decoder_state;
+        vdl2_destroy(ctx->inner);
+        msg_queue_destroy(ctx->queue);
+        free(ctx);
         break;
-    case SDR_ROLE_RADIOSONDE:
-        sonde_destroy((struct sonde_state *)rx->decoder_state);
+    }
+    case SDR_ROLE_RADIOSONDE: {
+        sonde_ctx_t *ctx = (sonde_ctx_t *)rx->decoder_state;
+        sonde_destroy(ctx->inner);
+        msg_queue_destroy(ctx->queue);
+        free(ctx);
         break;
-    case SDR_ROLE_POCSAG:
-        pocsag_destroy((struct pocsag_state *)rx->decoder_state);
+    }
+    case SDR_ROLE_POCSAG: {
+        pocsag_ctx_t *ctx = (pocsag_ctx_t *)rx->decoder_state;
+        pocsag_destroy(ctx->inner);
+        msg_queue_destroy(ctx->queue);
+        free(ctx);
         break;
-    case SDR_ROLE_GSM:
-        gsm_destroy((struct gsm_state *)rx->decoder_state);
+    }
+    case SDR_ROLE_GSM: {
+        gsm_ctx_t *ctx = (gsm_ctx_t *)rx->decoder_state;
+        gsm_destroy(ctx->inner);
+        msg_queue_destroy(ctx->msg_queue);
+        msg_queue_destroy(ctx->cb_queue);
+        free(ctx);
         break;
-    case SDR_ROLE_LTE:
-        lte_destroy((struct lte_state *)rx->decoder_state);
+    }
+    case SDR_ROLE_LTE: {
+        lte_ctx_t *ctx = (lte_ctx_t *)rx->decoder_state;
+        lte_destroy(ctx->inner);
+        msg_queue_destroy(ctx->queue);
+        free(ctx);
         break;
+    }
     case SDR_ROLE_IOT868:
         iotDecoderDestroy((iot_decoder_state_t *)rx->decoder_state);
         break;
+    case SDR_ROLE_FANET:
+        fanet_destroy((fanet_state_t *)rx->decoder_state);
+        break;
+    case SDR_ROLE_SARSAT: {
+        sarsat_ctx_t *ctx = (sarsat_ctx_t *)rx->decoder_state;
+        sarsat_destroy(ctx->inner);
+        msg_queue_destroy(ctx->queue);
+        free(ctx);
+        break;
+    }
     default:
         break;
     }
     rx->decoder_state = NULL;
 }
 
-void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, unsigned len)
+void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, uint32_t len)
 {
     if (!rx->decoder_state) return;
 
     switch (rx->config.role) {
     case SDR_ROLE_ACARS:
-        acars_process((struct acars_state *)rx->decoder_state, iq_data, len);
+        acars_process(((acars_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
     case SDR_ROLE_VDL2:
-        vdl2_process((struct vdl2_state *)rx->decoder_state, iq_data, len);
+        vdl2_process(((vdl2_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
     case SDR_ROLE_RADIOSONDE:
-        sonde_process((struct sonde_state *)rx->decoder_state, iq_data, len);
+        sonde_process(((sonde_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
     case SDR_ROLE_POCSAG:
-        pocsag_process((struct pocsag_state *)rx->decoder_state, iq_data, len);
+        pocsag_process(((pocsag_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
     case SDR_ROLE_GSM:
-        gsm_process((struct gsm_state *)rx->decoder_state, iq_data, len);
-        // Periodic FCCH-only tracker update (even without decoded SI)
-        {
-            static uint64_t gsm_tracker_last = 0;
-            gsm_stats_t gstats;
-            gsm_get_stats((struct gsm_state *)rx->decoder_state, &gstats);
-            if (gstats.fcch_detected > 0 && gstats.samples_processed - gsm_tracker_last >= 5000000) {
-                gsm_tracker_last = gstats.samples_processed;
-                gsm_cell_info_t gcell;
-                gsm_get_cell_info((struct gsm_state *)rx->decoder_state, &gcell);
-                gsm_sync_state_t gsync = gsm_get_sync_state((struct gsm_state *)rx->decoder_state);
-                if (gcell.si3.mcc == 0) {
-                    // No SI3 decoded yet — update with FCCH-only info
-                    gsmTrackerUpdateFCCH(gcell.arfcn, gcell.freq_mhz, &gstats, gsync);
-                }
-            }
-        }
+        gsm_process(((gsm_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
-    case SDR_ROLE_LTE:
-        lte_process((struct lte_state *)rx->decoder_state, iq_data, len);
+    case SDR_ROLE_LTE: {
+        lte_ctx_t *ctx = (lte_ctx_t *)rx->decoder_state;
+        lte_process(ctx->inner, iq_data, len);
         // Check if decoder requests a frequency hop (deferred retune)
-        {
-            double hop_freq = lte_get_hop_freq((struct lte_state *)rx->decoder_state);
-            if (hop_freq > 0) {
-                rx->pending_freq = (uint32_t)hop_freq;
-                lte_set_freq((struct lte_state *)rx->decoder_state, hop_freq);
-            }
+        double hop_freq = lte_get_hop_freq(ctx->inner);
+        if (hop_freq > 0) {
+            rx->pending_freq = (uint32_t)hop_freq;
+            lte_set_freq(ctx->inner, hop_freq);
         }
         break;
+    }
     case SDR_ROLE_IOT868:
         iotDecoderProcess((iot_decoder_state_t *)rx->decoder_state, iq_data, len);
+        break;
+    case SDR_ROLE_FANET:
+        fanet_process((fanet_state_t *)rx->decoder_state, iq_data, len);
+        break;
+    case SDR_ROLE_SARSAT:
+        sarsat_process(((sarsat_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
     default:
         break;
@@ -1422,13 +1575,36 @@ void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, unsigned len)
 // can be managed uniformly by SdrManager.
 
 #include "flarm_reader.h"  // flarmDecoderInit/Process/Drain/Stop
+#include "flarm_decode.h"  // FLARM_CENTER_FREQ*, FLARM_SAMPLE_RATE*
 #include "demod_2400.h"     // demodulate2400
 
 // ---- ACARS decoder_ops ----
 
 static bool acarsDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void acarsDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void acarsDecoderDrain(sdr_receiver_t *rx)    { (void)rx; /* messages dispatched inline via callback */ }
+static void acarsDecoderDrain(sdr_receiver_t *rx) {
+    acars_ctx_t *ctx = (acars_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+    acars_msg_t msg;
+    while (msg_queue_pop(ctx->queue, &msg)) {
+        panelLogMessage("[ACARS rx%d] %.3f MHz %s %s (reg:%s) [%s%s%s]%s%s%s%s%s%s %s",
+                        ctx->rx->dev_index, msg.freq / 1e6,
+                        msg.flight[0] ? msg.flight : "???",
+                        msg.label,
+                        msg.reg[0] ? msg.reg : "?",
+                        msg.label,
+                        msg.label_description ? "=" : "",
+                        msg.label_description ? msg.label_description : "",
+                        msg.dsp_header[0] ? " route=" : "",
+                        msg.dsp_header[0] ? msg.dsp_header : "",
+                        msg.sublabel[0] ? " sub=" : "",
+                        msg.sublabel[0] ? msg.sublabel : "",
+                        msg.mfi[0] ? " mfi=" : "",
+                        msg.mfi[0] ? msg.mfi : "",
+                        msg.text[0] ? msg.text : "(empty)");
+        airframesFeedSendAcars(&msg);
+    }
+}
 static void acarsDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t acars_decoder_ops = {
@@ -1443,7 +1619,38 @@ static const decoder_ops_t acars_decoder_ops = {
 
 static bool vdl2DecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void vdl2DecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void vdl2DecoderDrain(sdr_receiver_t *rx)    { (void)rx; }
+static void vdl2DecoderDrain(sdr_receiver_t *rx) {
+    vdl2_ctx_t *ctx = (vdl2_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+    vdl2_msg_t msg;
+    while (msg_queue_pop(ctx->queue, &msg)) {
+        if (msg.has_acars) {
+            panelLogMessage("[VDL2 rx%d] %.3f MHz %s %s (reg:%s) [%s%s%s] SNR=%.0fdB %s",
+                            ctx->rx->dev_index, msg.freq / 1e6,
+                            msg.frame_type,
+                            msg.flight[0] ? msg.flight : "???",
+                            msg.reg[0] ? msg.reg : "?",
+                            msg.label,
+                            msg.label_description ? "=" : "",
+                            msg.label_description ? msg.label_description : "",
+                            msg.snr,
+                            msg.text[0] ? msg.text : "(no text)");
+        } else {
+            panelLogMessage("[VDL2 rx%d] %.3f MHz %s%s%s src=%06X dst=%06X SNR=%.0fdB [%d bytes]%s%s",
+                            ctx->rx->dev_index, msg.freq / 1e6,
+                            msg.frame_type,
+                            msg.proto_name ? " " : "",
+                            msg.proto_name ? msg.proto_name : "",
+                            msg.src.addr,
+                            msg.dst.addr,
+                            msg.snr,
+                            msg.info_len,
+                            (msg.proto != VDL2_PROTO_UNKNOWN && msg.text[0]) ? " " : "",
+                            (msg.proto != VDL2_PROTO_UNKNOWN && msg.text[0]) ? msg.text : "");
+        }
+        airframesFeedSendVdl2(&msg);
+    }
+}
 static void vdl2DecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t vdl2_decoder_ops = {
@@ -1458,7 +1665,23 @@ static const decoder_ops_t vdl2_decoder_ops = {
 
 static bool sondeDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void sondeDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void sondeDecoderDrain(sdr_receiver_t *rx)    { (void)rx; }
+static void sondeDecoderDrain(sdr_receiver_t *rx) {
+    sonde_ctx_t *ctx = (sonde_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+    sonde_msg_t msg;
+    while (msg_queue_pop(ctx->queue, &msg)) {
+        if (msg.valid_pos) {
+            panelLogMessage("[SONDE rx%d] %s %s pos=%.4f,%.4f alt=%.0fm vel=%.1fm/s frame=%d",
+                            ctx->rx->dev_index, msg.type, msg.serial,
+                            msg.lat, msg.lon, msg.alt,
+                            msg.vel_h, msg.frame_num);
+            sondehubClientSubmit(&msg);
+        } else {
+            panelLogMessage("[SONDE rx%d] %s %s frame=%d (no GPS fix)",
+                            ctx->rx->dev_index, msg.type, msg.serial, msg.frame_num);
+        }
+    }
+}
 static void sondeDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t sonde_decoder_ops = {
@@ -1473,7 +1696,35 @@ static const decoder_ops_t sonde_decoder_ops = {
 
 static bool pocsagDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void pocsagDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void pocsagDecoderDrain(sdr_receiver_t *rx)    { (void)rx; /* messages dispatched inline via callback */ }
+static void pocsagDecoderDrain(sdr_receiver_t *rx) {
+    pocsag_ctx_t *ctx = (pocsag_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+    if (!PocsagOutputEnabled) return;
+    pocsag_msg_t msg;
+    while (msg_queue_pop(ctx->queue, &msg)) {
+        const char *freq_str = "";
+        char freq_buf[32];
+        if (msg.channel_freq > 0) {
+            snprintf(freq_buf, sizeof(freq_buf), " %.3fMHz", msg.channel_freq / 1e6);
+            freq_str = freq_buf;
+        }
+        if (msg.is_tone_only) {
+            panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d TONE-ONLY",
+                            ctx->rx->dev_index, freq_str, msg.baud_rate, msg.address, msg.function);
+        } else if (msg.is_alpha && msg.alpha_len > 0) {
+            panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d \"%s\"",
+                            ctx->rx->dev_index, freq_str, msg.baud_rate, msg.address, msg.function,
+                            msg.alpha_msg);
+        } else if (msg.is_numeric && msg.numeric_len > 0) {
+            panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d num=%s",
+                            ctx->rx->dev_index, freq_str, msg.baud_rate, msg.address, msg.function,
+                            msg.numeric_msg);
+        } else {
+            panelLogMessage("[POCSAG rx%d]%s %d baud addr=%07u func=%d (empty)",
+                            ctx->rx->dev_index, freq_str, msg.baud_rate, msg.address, msg.function);
+        }
+    }
+}
 static void pocsagDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t pocsag_decoder_ops = {
@@ -1488,7 +1739,53 @@ static const decoder_ops_t pocsag_decoder_ops = {
 
 static bool gsmDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void gsmDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void gsmDecoderDrain(sdr_receiver_t *rx)    { (void)rx; /* messages dispatched inline via callback */ }
+static void gsmDecoderDrain(sdr_receiver_t *rx) {
+    gsm_ctx_t *ctx = (gsm_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+
+    // Periodic FCCH-only tracker update (moved from process to drain for thread safety)
+    {
+        static uint64_t gsm_tracker_last = 0;
+        gsm_stats_t gstats;
+        gsm_get_stats(ctx->inner, &gstats);
+        if (gstats.fcch_detected > 0 && gstats.samples_processed - gsm_tracker_last >= 5000000) {
+            gsm_tracker_last = gstats.samples_processed;
+            gsm_cell_info_t gcell;
+            gsm_get_cell_info(ctx->inner, &gcell);
+            gsm_sync_state_t gsync = gsm_get_sync_state(ctx->inner);
+            if (gcell.si3.mcc == 0) {
+                gsmTrackerUpdateFCCH(gcell.arfcn, gcell.freq_mhz, &gstats, gsync);
+            }
+        }
+    }
+
+    if (!GsmOutputEnabled) return;
+
+    // Drain regular GSM messages
+    gsm_msg_item_t item;
+    while (msg_queue_pop(ctx->msg_queue, &item)) {
+        gsm_stats_t stats;
+        gsm_get_stats(ctx->inner, &stats);
+        gsm_sync_state_t sync = gsm_get_sync_state(ctx->inner);
+        gsmTrackerUpdate(&item.cell, &stats, sync);
+
+        panelLogMessage("[GSM rx%d] MCC=%d MNC=%d LAC=%u CID=%u ARFCN=%d BSIC=%02X %s",
+                        ctx->rx->dev_index, item.cell.si3.mcc, item.cell.si3.mnc,
+                        item.cell.si3.lac, item.cell.si3.cell_id,
+                        item.cell.arfcn, item.cell.bsic, item.msg_type);
+    }
+
+    // Drain Cell Broadcast messages
+    gsm_cb_item_t cb_item;
+    while (msg_queue_pop(ctx->cb_queue, &cb_item)) {
+        gsmTrackerUpdateCB(&cb_item.cell, &cb_item.cb);
+
+        panelLogMessage("[GSM-CB rx%d] MCC=%d MNC=%d LAC=%u CID=%u serial=%u id=%u \"%s\"",
+                        ctx->rx->dev_index, cb_item.cell.si3.mcc, cb_item.cell.si3.mnc,
+                        cb_item.cell.si3.lac, cb_item.cell.si3.cell_id,
+                        cb_item.cb.serial_nr, cb_item.cb.msg_id, cb_item.cb.text);
+    }
+}
 static void gsmDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t gsm_decoder_ops = {
@@ -1503,7 +1800,42 @@ static const decoder_ops_t gsm_decoder_ops = {
 
 static bool lteDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void lteDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void lteDecoderDrain(sdr_receiver_t *rx)    { (void)rx; }
+static void lteDecoderDrain(sdr_receiver_t *rx) {
+    lte_ctx_t *ctx = (lte_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+    if (!LteOutputEnabled) return;
+    lte_cell_info_t cell;
+    while (msg_queue_pop(ctx->queue, &cell)) {
+        lteTrackerUpdate(&cell);
+
+        int rxid = ctx->rx->dev_index;
+        for (int i = 0; i < cell.alert_count; i++) {
+            const lte_alert_t *a = &cell.alerts[i];
+            if (!a->active) continue;
+            switch (a->type) {
+            case LTE_ALERT_ETWS:
+                if (a->text[0])
+                    panelLogMessage("[LTE rx%d] \xf0\x9f\x9a\xa8 ETWS PCI=%u %s msgid=%u \"%s\"",
+                        rxid, cell.pci, a->category, a->message_id, a->text);
+                else
+                    panelLogMessage("[LTE rx%d] \xf0\x9f\x9a\xa8 ETWS PCI=%u %s msgid=%u serial=%u",
+                        rxid, cell.pci, a->category, a->message_id, a->serial_number);
+                break;
+            case LTE_ALERT_CMAS:
+                panelLogMessage("[LTE rx%d] \xf0\x9f\x9a\xa8 CMAS PCI=%u %s msgid=%u \"%s\"",
+                    rxid, cell.pci, a->category, a->message_id,
+                    a->text[0] ? a->text : "(no text)");
+                break;
+            case LTE_ALERT_EAB:
+                panelLogMessage("[LTE rx%d] \xe2\x9a\xa0 EAB PCI=%u %s %s",
+                    rxid, cell.pci, a->category, a->text);
+                break;
+            default:
+                break;
+            }
+        }
+    }
+}
 static void lteDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t lte_decoder_ops = {
@@ -1518,7 +1850,15 @@ static const decoder_ops_t lte_decoder_ops = {
 
 static bool iot868_decoder_init(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void iot868_decoder_process(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void iot868_decoder_drain(sdr_receiver_t *rx)    { (void)rx; }
+static void iot868_decoder_drain(sdr_receiver_t *rx) {
+    iot_decoder_state_t *state = (iot_decoder_state_t *)rx->decoder_state;
+    if (!state) return;
+    if (!IotOutputEnabled) return;
+    iot_device_msg_t msg;
+    while (iotDecoderDequeue(state, &msg)) {
+        iotTrackerUpdate(&msg);
+    }
+}
 static void iot868_decoder_stop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
 static const decoder_ops_t iot868_decoder_ops = {
@@ -1527,6 +1867,357 @@ static const decoder_ops_t iot868_decoder_ops = {
     .process = iot868_decoder_process,
     .drain   = iot868_decoder_drain,
     .stop    = iot868_decoder_stop,
+};
+
+// ---- FANET LoRa decoder_ops ----
+
+static bool fanetDecoderInit(sdr_receiver_t *rx)    {
+    // Register dispatcher queue for FANET aircraft updates
+    if (!fanet_aircraft_queue) {
+        fanet_aircraft_queue = dispatcher_register_aircraft_queue("fanet");
+    }
+    return rxDecoderCreate(rx);
+}
+static void fanetDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+
+static const char *fanet_ground_type_str(fanet_ground_type_t t)
+{
+    switch (t) {
+        case FANET_GROUND_WALKING:       return "Walking";
+        case FANET_GROUND_VEHICLE:       return "Vehicle";
+        case FANET_GROUND_BIKE:          return "Bike";
+        case FANET_GROUND_BOOT:          return "Boot";
+        case FANET_GROUND_NEED_RIDE:     return "Need ride";
+        case FANET_GROUND_LANDED_OK:     return "Landed OK";
+        case FANET_GROUND_NEED_TECH:     return "Need tech help";
+        case FANET_GROUND_NEED_MEDICAL:  return "Need medical";
+        case FANET_GROUND_DISTRESS:      return "DISTRESS";
+        case FANET_GROUND_DISTRESS_AUTO: return "DISTRESS AUTO";
+        default: return "Other";
+    }
+}
+
+static const char *fanet_aircraft_type_str(fanet_aircraft_type_t t)
+{
+    switch (t) {
+        case FANET_AIRCRAFT_PARAGLIDER: return "Paraglider";
+        case FANET_AIRCRAFT_HANGGLIDER: return "Hangglider";
+        case FANET_AIRCRAFT_BALLOON:    return "Balloon";
+        case FANET_AIRCRAFT_GLIDER:     return "Glider";
+        case FANET_AIRCRAFT_POWERED:    return "Powered";
+        case FANET_AIRCRAFT_HELI:       return "Helicopter";
+        case FANET_AIRCRAFT_UAV:        return "UAV";
+        default: return "Other";
+    }
+}
+
+static void fanetDecoderDrain(sdr_receiver_t *rx)
+{
+    if (!FanetOutputEnabled) return;
+    fanet_state_t *st = (fanet_state_t *)rx->decoder_state;
+    if (!st) return;
+
+    fanet_message_t msg;
+    while (fanet_dequeue(st, &msg)) {
+        if (!msg.valid) continue;
+
+        uint32_t addr = fanet_addr24(msg.src_manufacturer, msg.src_id);
+        double signal = msg.signal_level;
+        if (signal <= 0) signal = 0.001;
+        if (signal > 1.0) signal = 1.0;
+
+        // Try to get cached name for this address
+        char cached_name[32] = "";
+        fanet_get_cached_name(st, msg.src_manufacturer, msg.src_id,
+                              cached_name, sizeof(cached_name));
+
+        switch (msg.type) {
+        case FANET_TYPE_TRACKING: {
+            if (!msg.tracking.position_valid) break;
+
+            // Map FANET aircraft type → ADS-B category
+            uint32_t category;
+            switch (msg.tracking.aircraft_type) {
+                case FANET_AIRCRAFT_PARAGLIDER:
+                case FANET_AIRCRAFT_HANGGLIDER:
+                    category = 0xB1; break;
+                case FANET_AIRCRAFT_GLIDER:
+                    category = 0xB1; break;
+                case FANET_AIRCRAFT_BALLOON:
+                    category = 0xB2; break;
+                case FANET_AIRCRAFT_HELI:
+                    category = 0xA7; break;
+                case FANET_AIRCRAFT_UAV:
+                    category = 0xB6; break;
+                case FANET_AIRCRAFT_POWERED:
+                    category = 0xA1; break;
+                default:
+                    category = 0xC0; break;
+            }
+
+            // Map FANET type → FLARM type enum (for UI icons)
+            static const uint8_t fanet_to_flarm[] = {
+                0, 7, 6, 11, 1, 8, 3, 13
+            };
+            uint8_t ft = msg.tracking.aircraft_type;
+            uint8_t flarm_type = (ft < sizeof(fanet_to_flarm)) ? fanet_to_flarm[ft] : 0;
+
+            char callsign[9];
+            if (cached_name[0]) {
+                snprintf(callsign, sizeof(callsign), "%.8s", cached_name);
+            } else {
+                snprintf(callsign, sizeof(callsign), "FNT%05X", addr & 0xFFFFF);
+            }
+
+            // Push aircraft update via dispatcher queue
+            if (fanet_aircraft_queue) {
+                aircraft_update_t upd;
+                memset(&upd, 0, sizeof(upd));
+                upd.addr = addr;
+                upd.timestamp_ms = mstime();
+                upd.signal_level = signal;
+                upd.source = DECODE_SOURCE_FANET;
+
+                snprintf(upd.callsign, sizeof(upd.callsign), "%s", callsign);
+                upd.callsign_valid = 1;
+                upd.category = category;
+                upd.category_valid = 1;
+
+                upd.lat = msg.tracking.latitude;
+                upd.lon = msg.tracking.longitude;
+                upd.position_valid = 1;
+
+                upd.altitude_ft = (int)(msg.tracking.altitude * 3.28084);
+                upd.altitude_valid = 1;
+                upd.altitude_is_baro = 0;
+
+                if (msg.tracking.speed > 0.1f || fabsf(msg.tracking.climb) > 0.1f) {
+                    upd.ground_speed_kt = (int)(msg.tracking.speed * 0.539957f);
+                    upd.heading_deg = (int)msg.tracking.heading;
+                    upd.vert_rate_fpm = (int)(msg.tracking.climb * 196.85f);
+                    upd.velocity_valid = 1;
+                }
+
+                upd.air_ground = DECODE_AG_AIRBORNE;
+                upd.flarm_acft_type = flarm_type;
+
+                dispatcher_push_aircraft(fanet_aircraft_queue, &upd);
+            }
+
+            panelLogMessage("[FANET rx%d] Track %02X:%04X %s %.5f,%.5f alt=%dm spd=%.0fkm/h hdg=%.0f",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id,
+                            fanet_aircraft_type_str(msg.tracking.aircraft_type),
+                            msg.tracking.latitude, msg.tracking.longitude,
+                            msg.tracking.altitude, msg.tracking.speed, msg.tracking.heading);
+            break;
+        }
+
+        case FANET_TYPE_GROUND: {
+            if (!msg.ground.position_valid) break;
+
+            // Ground targets go to the FANET ground cache (not aircraft list)
+            fanet_ground_cache_update(addr, msg.ground.latitude, msg.ground.longitude,
+                                       (uint8_t)msg.ground.ground_type, cached_name);
+
+            panelLogMessage("[FANET rx%d] Ground %02X:%04X %s %.5f,%.5f",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id,
+                            fanet_ground_type_str(msg.ground.ground_type),
+                            msg.ground.latitude, msg.ground.longitude);
+            break;
+        }
+
+        case FANET_TYPE_NAME:
+            panelLogMessage("[FANET rx%d] Name %02X:%04X \"%s\"",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id, msg.name);
+            break;
+
+        case FANET_TYPE_MESSAGE:
+            panelLogMessage("[FANET rx%d] Msg %02X:%04X [sub=%d] %s",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id,
+                            msg.message.subtype, msg.message.text);
+            break;
+
+        case FANET_TYPE_SERVICE: {
+            char buf[200];
+            int pos = 0;
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "[FANET rx%d] Weather %02X:%04X",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id);
+            if (msg.weather.has_temp)
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " T=%.1fC", msg.weather.temperature);
+            if (msg.weather.has_wind)
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " wind=%.0fkm/h@%.0f gust=%.0f",
+                                msg.weather.wind_speed, msg.weather.wind_heading, msg.weather.wind_gust);
+            if (msg.weather.has_humidity)
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " RH=%.0f%%", msg.weather.humidity);
+            if (msg.weather.has_pressure)
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " P=%.1fhPa", msg.weather.pressure);
+            if (msg.weather.has_soc)
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " SoC=%.0f%%", msg.weather.state_of_charge);
+            panelLogMessage("%s", buf);
+            break;
+        }
+
+        case FANET_TYPE_THERMAL:
+            if (msg.thermal.valid) {
+                panelLogMessage("[FANET rx%d] Thermal %02X:%04X %.5f,%.5f alt=%dm climb=%.1fm/s conf=%d/7",
+                                rx->dev_index, msg.src_manufacturer, msg.src_id,
+                                msg.thermal.latitude, msg.thermal.longitude,
+                                msg.thermal.altitude, msg.thermal.climb, msg.thermal.confidence);
+                // Push thermal data via dispatcher queue
+                if (fanet_aircraft_queue) {
+                    aircraft_update_t upd;
+                    memset(&upd, 0, sizeof(upd));
+                    upd.addr = addr;
+                    upd.timestamp_ms = mstime();
+                    upd.source = DECODE_SOURCE_FANET;
+                    upd.thermal.lat = msg.thermal.latitude;
+                    upd.thermal.lon = msg.thermal.longitude;
+                    upd.thermal.altitude_m = msg.thermal.altitude;
+                    upd.thermal.climb_ms = msg.thermal.climb;
+                    upd.thermal.wind_speed_kmh = msg.thermal.wind_speed;
+                    upd.thermal.wind_heading_deg = (int)msg.thermal.wind_heading;
+                    upd.thermal.confidence = msg.thermal.confidence;
+                    upd.thermal.valid = 1;
+                    dispatcher_push_aircraft(fanet_aircraft_queue, &upd);
+                }
+            }
+            break;
+
+        case FANET_TYPE_LANDMARK:
+            panelLogMessage("[FANET rx%d] Landmark %02X:%04X type=%u layer=%u TTL=%dmin %s",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id,
+                            msg.landmark.subtype, msg.landmark.layer,
+                            msg.landmark.ttl_minutes, msg.landmark.text);
+            break;
+
+        case FANET_TYPE_HWINFO:
+        case FANET_TYPE_HWINFO2:
+            panelLogMessage("[FANET rx%d] HWInfo %02X:%04X dev=0x%02X %s%s",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id,
+                            msg.hwinfo.device_type,
+                            msg.hwinfo.has_icao ? "ICAO=" : "",
+                            msg.hwinfo.has_icao ? "" : "");
+            // Push HW info via dispatcher queue
+            if (fanet_aircraft_queue) {
+                aircraft_update_t upd;
+                memset(&upd, 0, sizeof(upd));
+                upd.addr = addr;
+                upd.timestamp_ms = mstime();
+                upd.source = DECODE_SOURCE_FANET;
+                upd.hw_info.device_type = msg.hwinfo.device_type;
+                upd.hw_info.uptime_min = msg.hwinfo.has_uptime ? msg.hwinfo.uptime_minutes : 0;
+                upd.hw_info.rssi = msg.hwinfo.has_rssi ? msg.hwinfo.rssi : 0;
+                upd.hw_info.valid = 1;
+                dispatcher_push_aircraft(fanet_aircraft_queue, &upd);
+            }
+            break;
+
+        case FANET_TYPE_ACK:
+            panelLogMessage("[FANET rx%d] ACK %02X:%04X -> %02X:%04X",
+                            rx->dev_index, msg.src_manufacturer, msg.src_id,
+                            msg.dst_manufacturer, msg.dst_id);
+            break;
+
+        default:
+            panelLogMessage("[FANET rx%d] Type%u %02X:%04X payload=%d bytes",
+                            rx->dev_index, (uint32_t)msg.type, msg.src_manufacturer, msg.src_id,
+                            msg.payload_len);
+            break;
+        }
+    }
+}
+
+static void fanetDecoderStop(sdr_receiver_t *rx)
+{
+    fanet_state_t *st = (fanet_state_t *)rx->decoder_state;
+    if (st) {
+        fanet_stats_t stats;
+        fanet_get_stats(st, &stats);
+        fprintf(stderr, "rx[%d]: FANET stats: samples=%" PRIu64 " preambles=%" PRIu64 " sync=%" PRIu64 " decoded=%" PRIu64 " crc_err=%" PRIu64 " hdr_err=%" PRIu64 "\n",
+                rx->id,
+                (uint64_t)stats.samples_processed,
+                (uint64_t)stats.preambles_detected,
+                (uint64_t)stats.sync_word_ok,
+                (uint64_t)stats.packets_decoded,
+                (uint64_t)stats.crc_errors,
+                (uint64_t)stats.header_errors);
+    }
+    rxDecoderDestroy(rx);
+}
+
+static const decoder_ops_t fanet_decoder_ops = {
+    .name    = "fanet",
+    .init    = fanetDecoderInit,
+    .process = fanetDecoderProcess,
+    .drain   = fanetDecoderDrain,
+    .stop    = fanetDecoderStop,
+};
+
+// ---- Sarsat decoder_ops ----
+
+static bool sarsatDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
+static void sarsatDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+static void sarsatDecoderDrain(sdr_receiver_t *rx) {
+    sarsat_ctx_t *ctx = (sarsat_ctx_t *)rx->decoder_state;
+    if (!ctx) return;
+    if (!SarsatOutputEnabled) return;
+    sarsat_msg_t msg;
+    while (msg_queue_pop(ctx->queue, &msg)) {
+        // Build identification string based on protocol
+        char ident[128] = "";
+        if (msg.mmsi[0])
+            snprintf(ident, sizeof(ident), " MMSI=%s", msg.mmsi);
+        else if (msg.icao_address > 0)
+            snprintf(ident, sizeof(ident), " ICAO=%06X", msg.icao_address);
+        else if (msg.call_sign[0])
+            snprintf(ident, sizeof(ident), " Call=%s", msg.call_sign);
+        if (msg.cert_number > 0) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), " Cert=%u S/N=%u", msg.cert_number, msg.serial_number);
+            strncat(ident, tmp, sizeof(ident) - strlen(ident) - 1);
+        } else if (msg.serial_number > 0 && !msg.mmsi[0]) {
+            char tmp[32];
+            snprintf(tmp, sizeof(tmp), " S/N=%u", msg.serial_number);
+            strncat(ident, tmp, sizeof(ident) - strlen(ident) - 1);
+        }
+
+        if (msg.position_valid) {
+            panelLogMessage("[SARSAT rx%d] %s %s %s [%s] HexID=%s%s pos=%.4f,%.4f BCH1=%s BCH2=%s%s",
+                            ctx->rx->dev_index,
+                            msg.is_test ? "TEST" : "DISTRESS",
+                            sarsat_beacon_type_name(msg.beacon_type),
+                            sarsat_protocol_name(msg.protocol),
+                            msg.country_name,
+                            msg.hex_id,
+                            ident,
+                            msg.latitude, msg.longitude,
+                            msg.bch1_valid ? "OK" : "FAIL",
+                            msg.bch2_valid ? "OK" : "FAIL",
+                            msg.homing_121_5 ? " 121.5MHz" : "");
+        } else {
+            panelLogMessage("[SARSAT rx%d] %s %s %s [%s] HexID=%s%s BCH1=%s BCH2=%s%s",
+                            ctx->rx->dev_index,
+                            msg.is_test ? "TEST" : "DISTRESS",
+                            sarsat_beacon_type_name(msg.beacon_type),
+                            sarsat_protocol_name(msg.protocol),
+                            msg.country_name,
+                            msg.hex_id,
+                            ident,
+                            msg.bch1_valid ? "OK" : "FAIL",
+                            msg.bch2_valid ? "OK" : "FAIL",
+                            msg.homing_121_5 ? " 121.5MHz" : "");
+        }
+    }
+}
+static void sarsatDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+
+static const decoder_ops_t sarsat_decoder_ops = {
+    .name    = "sarsat",
+    .init    = sarsatDecoderInit,
+    .process = sarsatDecoderProcess,
+    .drain   = sarsatDecoderDrain,
+    .stop    = sarsatDecoderStop,
 };
 
 // ---- ADS-B decoder_ops ----
@@ -1554,7 +2245,7 @@ static bool adsbDecoderInit(sdr_receiver_t *rx)
     }
 #endif
 
-    unsigned overlap = Modes.trailing_samples;
+    uint32_t overlap = Modes.trailing_samples;
     if (!rxFifoCreate(&rx->fifo, MODES_MAG_BUFFERS,
                       MODES_MAG_BUF_SAMPLES + overlap, overlap)) {
         fprintf(stderr, "rx[%d]: can't create FIFO\n", rx->id);
@@ -1567,7 +2258,7 @@ static bool adsbDecoderInit(sdr_receiver_t *rx)
 
 static void adsbDecoderProcess(sdr_receiver_t *rx, const uint8_t *buf, uint32_t len)
 {
-    unsigned samples_read = len / 2;
+    uint32_t samples_read = len / 2;
 
     struct mag_buf *outbuf = rxFifoAcquire(&rx->fifo, 0);
     if (!outbuf) {
@@ -1587,7 +2278,7 @@ static void adsbDecoderProcess(sdr_receiver_t *rx, const uint8_t *buf, uint32_t 
     uint64_t block_duration = 1e3 * samples_read / rx->config.sample_rate;
     outbuf->sysTimestamp = mstime() - block_duration;
 
-    unsigned to_convert = samples_read;
+    uint32_t to_convert = samples_read;
     if (to_convert + outbuf->overlap > outbuf->totalLength) {
         to_convert = outbuf->totalLength - outbuf->overlap;
         rx->dropped = samples_read - to_convert;
@@ -1673,6 +2364,8 @@ const decoder_ops_t *decoderOpsForRole(sdr_role_t role)
     case SDR_ROLE_GSM:        return &gsm_decoder_ops;
     case SDR_ROLE_LTE:        return &lte_decoder_ops;
     case SDR_ROLE_IOT868:     return &iot868_decoder_ops;
+    case SDR_ROLE_FANET:      return &fanet_decoder_ops;
+    case SDR_ROLE_SARSAT:     return &sarsat_decoder_ops;
     default:                  return NULL;
     }
 }
@@ -1971,6 +2664,8 @@ int sdrManagerLoad(void)
         else if (!strcmp(role_str, "gsm")) role = SDR_ROLE_GSM;
         else if (!strcmp(role_str, "lte")) role = SDR_ROLE_LTE;
         else if (!strcmp(role_str, "iot868")) role = SDR_ROLE_IOT868;
+        else if (!strcmp(role_str, "fanet")) role = SDR_ROLE_FANET;
+        else if (!strcmp(role_str, "sarsat")) role = SDR_ROLE_SARSAT;
 
         if (role != SDR_ROLE_NONE && serial[0]) {
             // Skip FILE (virtual) entries — they are only valid via --receiver FILE:...
@@ -1986,7 +2681,15 @@ int sdrManagerLoad(void)
                 // Set freq/sample_rate for role
                 switch (role) {
                     case SDR_ROLE_ADSB:       cfg.freq = 1090000000; cfg.sample_rate = 2400000; break;
-                    case SDR_ROLE_FLARM:      cfg.freq = 868300000;  cfg.sample_rate = 1600000; break;
+                    case SDR_ROLE_FLARM:
+                        if (FlarmConfig.p3i_enabled) {
+                            cfg.freq = FLARM_CENTER_FREQ_P3I;
+                            cfg.sample_rate = FLARM_SAMPLE_RATE_P3I;
+                        } else {
+                            cfg.freq = FLARM_CENTER_FREQ;
+                            cfg.sample_rate = FLARM_SAMPLE_RATE;
+                        }
+                        break;
                     case SDR_ROLE_ACARS:      cfg.freq = 131550000;  cfg.sample_rate = 2400000; break;
                     case SDR_ROLE_VDL2:       cfg.freq = 136975000;  cfg.sample_rate = 2400000; break;
                     case SDR_ROLE_RADIOSONDE: cfg.freq = 403000000;  cfg.sample_rate = 2400000; break;
@@ -1994,6 +2697,8 @@ int sdrManagerLoad(void)
                     case SDR_ROLE_GSM:        cfg.freq = 947000000;  cfg.sample_rate = 1000000; break;
                     case SDR_ROLE_LTE:        cfg.freq = LTE_DEFAULT_FREQ; cfg.sample_rate = LTE_SAMPLE_RATE; break;
                     case SDR_ROLE_IOT868:     cfg.freq = IOT_CENTER_FREQ;  cfg.sample_rate = IOT_SAMPLE_RATE; break;
+                    case SDR_ROLE_FANET:      cfg.freq = FANET_CENTER_FREQ; cfg.sample_rate = FANET_SAMPLE_RATE; break;
+                    case SDR_ROLE_SARSAT:     cfg.freq = SARSAT_CENTER_FREQ; cfg.sample_rate = SARSAT_SAMPLE_RATE; break;
                     default: break;
                 }
                 if (sdrManagerAddReceiver(&cfg) >= 0) {

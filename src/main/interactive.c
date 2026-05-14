@@ -321,13 +321,13 @@ void interactiveShowData(void) {
 
 
     if (Modes.mode_ac && !Modes.interactive_callsign_filter) {
-        for (unsigned i = 1; i < 4096 && row < rows; ++i) {
+        for (uint32_t i = 1; i < 4096 && row < rows; ++i) {
             if (modeAC_match[i] || modeAC_count[i] < 50 || modeAC_age[i] > 5)
                 continue;
 
             char strMode[5] = "  A ";
             char strFl[7] = " ";
-            unsigned modeA = indexToModeA(i);
+            uint32_t modeA = indexToModeA(i);
             int modeC = modeAToModeC(modeA);
             if (modeC != INVALID_ALTITUDE) {
                 strMode[3] = 'C';

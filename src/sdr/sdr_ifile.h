@@ -21,6 +21,10 @@
 #ifndef SDR_IFILE_H
 #define SDR_IFILE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Pseudo-SDR that reads from a sample file
 
 void ifileInitConfig();
@@ -29,5 +33,9 @@ bool ifileHandleOption(int argc, char **argv, int *jptr);
 bool ifileOpen();
 void ifileRun();
 void ifileClose();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

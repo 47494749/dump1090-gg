@@ -8,6 +8,10 @@
 #ifndef ELM_H
 #define ELM_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <pthread.h>
 
@@ -27,7 +31,7 @@ struct elm_entry {
     uint64_t first_seen;           // sysTimestamp of first segment
     uint64_t last_seen;            // sysTimestamp of last segment
     uint16_t segments_mask;        // bitmask of received segments (bit N = ND N)
-    unsigned char data[ELM_MAX_SEGMENTS][ELM_SEGMENT_SIZE];
+    uint8_t data[ELM_MAX_SEGMENTS][ELM_SEGMENT_SIZE];
     uint64_t seg_time[ELM_MAX_SEGMENTS]; // timestamp per segment
     struct elm_entry *next;        // hash chain
 };
@@ -38,7 +42,7 @@ struct elm_complete {
     int payload_len;               // actual bytes (segments * 10)
     int segments_received;         // number of consecutive segments from 0
     int complete_ke;               // 1 if completed by KE close-out (= 100% complete)
-    unsigned char payload[ELM_MAX_PAYLOAD];
+    uint8_t payload[ELM_MAX_PAYLOAD];
     uint64_t timestamp;
     struct elm_complete *next;
 };
@@ -72,9 +76,13 @@ struct elm_state {
 // Public API
 void elmInit(struct elm_state *state);
 void elmCleanup(struct elm_state *state);
-void elmAddSegment(struct elm_state *state, uint32_t addr, unsigned nd,
-                   unsigned ke, const unsigned char *md, uint64_t timestamp);
+void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
+                   uint32_t ke, const uint8_t *md, uint64_t timestamp);
 void elmCleanupStale(struct elm_state *state, uint64_t now);
 void elmPrintPartial(struct elm_state *state, uint64_t now);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

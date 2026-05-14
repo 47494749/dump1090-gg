@@ -29,22 +29,22 @@
 
 // Polyfill for the older bladerf API
 #if LIBBLADERF_API_VERSION < 0x02000000
-typedef unsigned int bladerf_frequency;
+typedef uint32_t bladerf_frequency;
 #endif
 
 static struct {
     const char *device_str;
     const char *fpga_path;
-    unsigned decimation;
+    uint32_t decimation;
     bladerf_lpf_mode lpf_mode;
-    unsigned lpf_bandwidth;
+    uint32_t lpf_bandwidth;
 
     struct bladerf *device;
 
     iq_convert_fn converter;
     struct converter_state *converter_state;
 
-    unsigned block_size;
+    uint32_t block_size;
 } BladeRF;
 
 void bladeRFInitConfig()
@@ -110,10 +110,10 @@ static void show_config()
 {
     int status;
 
-    unsigned rate;
+    uint32_t rate;
     bladerf_frequency freq;
     bladerf_lpf_mode lpf_mode;
-    unsigned lpf_bw;
+    uint32_t lpf_bw;
     bladerf_lna_gain lna_gain;
     int rxvga1_gain;
     int rxvga2_gain;
@@ -300,7 +300,7 @@ bool bladeRFOpen()
     return false;
 }
 
-static unsigned timeouts = 0;
+static uint32_t timeouts = 0;
 
 static void *handle_bladerf_samples(struct bladerf *dev,
                                     struct bladerf_stream *stream,
@@ -332,10 +332,10 @@ static void *handle_bladerf_samples(struct bladerf *dev,
     timeouts = 0;
 
     // start handling metadata blocks
-    unsigned samples_per_block = (BladeRF.block_size - 16) / 4;
+    uint32_t samples_per_block = (BladeRF.block_size - 16) / 4;
     struct mag_buf *outbuf = NULL;
 
-    for (unsigned offset = 0; offset < num_samples * 4; offset += BladeRF.block_size) {
+    for (uint32_t offset = 0; offset < num_samples * 4; offset += BladeRF.block_size) {
         // read the next metadata header
         uint8_t *header = ((uint8_t*)samples) + offset;
         uint64_t metadata_magic = le32toh(*(uint32_t*)(header));
@@ -419,7 +419,7 @@ void bladeRFRun()
         return;
     }
 
-    unsigned transfers = 7;
+    uint32_t transfers = 7;
 
     int status;
     struct bladerf_stream *stream = NULL;
@@ -438,7 +438,7 @@ void bladeRFRun()
         goto out;
     }
 
-    unsigned ms_per_transfer = 1000 * MODES_MAG_BUF_SAMPLES / Modes.sample_rate;
+    uint32_t ms_per_transfer = 1000 * MODES_MAG_BUF_SAMPLES / Modes.sample_rate;
     if ((status = bladerf_set_stream_timeout(BladeRF.device, BLADERF_MODULE_RX, ms_per_transfer * (transfers + 2))) < 0) {
         fprintf(stderr, "bladerf_set_stream_timeout() failed: %s\n", bladerf_strerror(status));
         goto out;

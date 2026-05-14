@@ -46,8 +46,8 @@ static float adaptive_gain_down_db;
 // every subblock boundary is also a window boundary.
 
 
-static const unsigned adaptive_subblocks_per_block = 20;   // subblocks per block
-static unsigned adaptive_subblocks_remaining;              // subblocks remaining in the current block
+static const uint32_t adaptive_subblocks_per_block = 20;   // subblocks per block
+static uint32_t adaptive_subblocks_remaining;              // subblocks remaining in the current block
 
 // Duty cycle is expressed as N/D
 // where N = adaptive_subblbock_dutycycle_N = adaptive_subblocks_per_block * Modes.adaptive_duty_cycle
@@ -58,22 +58,22 @@ static unsigned adaptive_subblocks_remaining;              // subblocks remainin
 // The active subblocks are distributed evenly across the block by increasing a counter by N on each
 // subblock, modulo D, and marking the subblock as active each time the counter rolls over.
 
-static unsigned adaptive_subblock_dutycycle_N;                                        // subblock duty cycle numerator N
+static uint32_t adaptive_subblock_dutycycle_N;                                        // subblock duty cycle numerator N
 
 // stretch gcc doesn't like this as a separate const
 #define adaptive_subblock_dutycycle_D adaptive_subblocks_per_block
 
-static unsigned adaptive_subblock_dutycycle_counter;   // subblock duty cycle counter (modulo D)
+static uint32_t adaptive_subblock_dutycycle_counter;   // subblock duty cycle counter (modulo D)
 static bool adaptive_subblock_active;                  // is the current subblock active i.e. samples should be processed, not skipped?
 
-static unsigned adaptive_samples_per_subblock;         // samples per subblock
-static unsigned adaptive_subblock_samples_remaining;   // samples remaining in the current subblock
+static uint32_t adaptive_samples_per_subblock;         // samples per subblock
+static uint32_t adaptive_subblock_samples_remaining;   // samples remaining in the current subblock
 
-static unsigned adaptive_samples_per_window;           // samples per window
+static uint32_t adaptive_samples_per_window;           // samples per window
 
 void adaptive_init();
-void adaptive_update(uint16_t *buf, unsigned length, struct modesMessage *decoded);
-static void adaptive_update_subblock(uint16_t *buf, unsigned length, struct modesMessage *decoded);
+void adaptive_update(uint16_t *buf, uint32_t length, struct modesMessage *decoded);
+static void adaptive_update_subblock(uint16_t *buf, uint32_t length, struct modesMessage *decoded);
 static void adaptive_end_of_block();
 static void adaptive_control_update();
 
@@ -81,38 +81,38 @@ static void adaptive_control_update();
 // burst handling
 //
 
-static unsigned adaptive_burst_window_remaining;       // samples remaining in the current burst window
-static unsigned adaptive_burst_window_counter;         // loud samples seen in current burst window
-static unsigned adaptive_burst_runlength;              // consecutive loud burst windows seen
-static unsigned adaptive_burst_block_loud_undecoded;   // loud undecoded bursts seen in this block so far
-static unsigned adaptive_burst_block_loud_decoded;     // loud decoded messages seen in this block so far
+static uint32_t adaptive_burst_window_remaining;       // samples remaining in the current burst window
+static uint32_t adaptive_burst_window_counter;         // loud samples seen in current burst window
+static uint32_t adaptive_burst_runlength;              // consecutive loud burst windows seen
+static uint32_t adaptive_burst_block_loud_undecoded;   // loud undecoded bursts seen in this block so far
+static uint32_t adaptive_burst_block_loud_decoded;     // loud decoded messages seen in this block so far
 static double adaptive_burst_loud_undecoded_smoothed;  // smoothed rate of loud misdecodes per block
 static double adaptive_burst_loud_decoded_smoothed;    // smoothed rate of loud successful decodes per block
-static unsigned adaptive_burst_change_timer;           // countdown inhibiting control after changing gain
+static uint32_t adaptive_burst_change_timer;           // countdown inhibiting control after changing gain
 static double adaptive_burst_loud_threshold;           // current signal level threshold for a "loud decode"
-static unsigned adaptive_burst_loud_blocks = 0;        // consecutive blocks with loud rate
-static unsigned adaptive_burst_quiet_blocks = 0;       // consecutive blocks with quiet rate
+static uint32_t adaptive_burst_loud_blocks = 0;        // consecutive blocks with loud rate
+static uint32_t adaptive_burst_quiet_blocks = 0;       // consecutive blocks with quiet rate
 
-static void adaptive_burst_update(uint16_t *buf, unsigned length);
-static void adaptive_burst_skip(unsigned length);
-static unsigned adaptive_burst_count_samples(uint16_t *buf, unsigned n);
-static void adaptive_burst_scan_windows(uint16_t *buf, unsigned windows);
-static void adaptive_burst_end_of_window(unsigned counter);
+static void adaptive_burst_update(uint16_t *buf, uint32_t length);
+static void adaptive_burst_skip(uint32_t length);
+static uint32_t adaptive_burst_count_samples(uint16_t *buf, uint32_t n);
+static void adaptive_burst_scan_windows(uint16_t *buf, uint32_t windows);
+static void adaptive_burst_end_of_window(uint32_t counter);
 static void adaptive_burst_end_of_block();
 
 //
 // noise floor measurement (adaptive dynamic range)
 //
 
-static unsigned *adaptive_range_radix;                 // radix-sort buckets for current block
-static unsigned adaptive_range_radix_counter;          // sum of all radix-sort buckets (= number of samples sorted)
+static uint32_t *adaptive_range_radix;                 // radix-sort buckets for current block
+static uint32_t adaptive_range_radix_counter;          // sum of all radix-sort buckets (= number of samples sorted)
 static double adaptive_range_smoothed;                 // smoothed noise floor estimate, dBFS
 static enum { RANGE_SCAN_IDLE, RANGE_SCAN_UP, RANGE_SCAN_DOWN, RANGE_RESCAN_UP, RANGE_RESCAN_DOWN } adaptive_range_state = RANGE_SCAN_UP;
-static unsigned adaptive_range_change_timer;           // countdown inhibiting control after changing gain
-static unsigned adaptive_range_rescan_timer;           // countdown to next upwards gain reprobe
+static uint32_t adaptive_range_change_timer;           // countdown inhibiting control after changing gain
+static uint32_t adaptive_range_rescan_timer;           // countdown to next upwards gain reprobe
 static int adaptive_range_gain_limit;                  // probed maximum gain step with acceptable dynamic range
 
-static void adaptive_range_update(uint16_t *buf, unsigned length);
+static void adaptive_range_update(uint16_t *buf, uint32_t length);
 static void adaptive_range_end_of_block();
 
 // Try to change the SDR gain to 'step' and tell the user about it,
@@ -192,12 +192,12 @@ void adaptive_init()
     if (N > adaptive_subblock_dutycycle_D)
         N = adaptive_subblock_dutycycle_D;
     fprintf(stderr, "adaptive: using %.0f%% duty cycle\n", 100.0 * N / adaptive_subblock_dutycycle_D);
-    adaptive_subblock_dutycycle_N = (unsigned)N;
+    adaptive_subblock_dutycycle_N = (uint32_t)N;
 
     adaptive_burst_window_remaining = adaptive_samples_per_window;
     adaptive_burst_window_counter = 0;
 
-    adaptive_range_radix = calloc(65536, sizeof(unsigned));
+    adaptive_range_radix = calloc(65536, sizeof(uint32_t));
     adaptive_range_state = RANGE_RESCAN_UP;
 
     // select and enforce gain limits
@@ -224,7 +224,7 @@ void adaptive_init()
 }
 
 // Feed some samples into the adaptive system. Any number of samples might be passed in.
-void adaptive_update(uint16_t *buf, unsigned length, struct modesMessage *decoded)
+void adaptive_update(uint16_t *buf, uint32_t length, struct modesMessage *decoded)
 {
     if (!Modes.adaptive_burst_control && !Modes.adaptive_range_control)
         return;
@@ -265,7 +265,7 @@ void adaptive_update(uint16_t *buf, unsigned length, struct modesMessage *decode
 
 // Feed some samples into the adaptive system. The samples are guaranteed to not cross a subblock boundary.
 // The samples should be processsed (i.e. duty cycle is in the active part)
-static void adaptive_update_subblock(uint16_t *buf, unsigned length, struct modesMessage *decoded)
+static void adaptive_update_subblock(uint16_t *buf, uint32_t length, struct modesMessage *decoded)
 {
     if (decoded) {
         if (/* decoded->msgbits == 112 && */ decoded->signalLevel >= adaptive_burst_loud_threshold)
@@ -278,7 +278,7 @@ static void adaptive_update_subblock(uint16_t *buf, unsigned length, struct mode
 }
 
 // Burst measurement: ignore the next 'length' samples (they are a successfully decoded message)
-static void adaptive_burst_skip(unsigned length)
+static void adaptive_burst_skip(uint32_t length)
 {
     if (!Modes.adaptive_burst_control)
         return;
@@ -295,8 +295,8 @@ static void adaptive_burst_skip(unsigned length)
     length -= adaptive_burst_window_remaining;
 
     // skip remaining windows, dispatch them
-    unsigned windows = length / adaptive_samples_per_window;
-    unsigned samples = windows * adaptive_samples_per_window;
+    uint32_t windows = length / adaptive_samples_per_window;
+    uint32_t samples = windows * adaptive_samples_per_window;
     while (windows--)
         adaptive_burst_end_of_window(0);
 
@@ -310,7 +310,7 @@ static void adaptive_burst_skip(unsigned length)
 // Burst measurement: process 'length' samples from 'buf', look for loud bursts;
 // the samples might cross burst window boundaries;
 // the samples will not cross a block boundary.
-static void adaptive_burst_update(uint16_t *buf, unsigned length)
+static void adaptive_burst_update(uint16_t *buf, uint32_t length)
 {
     if (!Modes.adaptive_burst_control)
         return;
@@ -324,15 +324,15 @@ static void adaptive_burst_update(uint16_t *buf, unsigned length)
     }
 
     // complete fill of first partial window
-    unsigned n = adaptive_burst_window_remaining;
-    unsigned counter = adaptive_burst_window_counter + adaptive_burst_count_samples(buf, n);
+    uint32_t n = adaptive_burst_window_remaining;
+    uint32_t counter = adaptive_burst_window_counter + adaptive_burst_count_samples(buf, n);
     adaptive_burst_end_of_window(counter);
     buf += n;
     length -= n;
 
     // remaining windows
-    unsigned windows = length / adaptive_samples_per_window;
-    unsigned samples = windows * adaptive_samples_per_window;
+    uint32_t windows = length / adaptive_samples_per_window;
+    uint32_t samples = windows * adaptive_samples_per_window;
     adaptive_burst_scan_windows(buf, windows);
     buf += samples;
     length -= samples;
@@ -344,10 +344,10 @@ static void adaptive_burst_update(uint16_t *buf, unsigned length)
 
 // Burst measurement: process 'windows' complete burst windows starting at 'buf';
 // 'buf' is aligned to the start of a burst window
-static void adaptive_burst_scan_windows(uint16_t *buf, unsigned windows)
+static void adaptive_burst_scan_windows(uint16_t *buf, uint32_t windows)
 {
     while (windows--) {
-        unsigned counter = adaptive_burst_count_samples(buf, adaptive_samples_per_window);
+        uint32_t counter = adaptive_burst_count_samples(buf, adaptive_samples_per_window);
         buf += adaptive_samples_per_window;
         adaptive_burst_end_of_window(counter);
     }
@@ -356,16 +356,16 @@ static void adaptive_burst_scan_windows(uint16_t *buf, unsigned windows)
 // Burst measurement: process 'n' samples from 'buf', look for loud samples;
 // the samples are guaranteed not to cross window boundaries;
 // return the number of loud samples seen
-static inline unsigned adaptive_burst_count_samples(uint16_t *buf, unsigned n)
+static inline uint32_t adaptive_burst_count_samples(uint16_t *buf, uint32_t n)
 {
-    unsigned counter;
+    uint32_t counter;
     starch_count_above_u16(buf, n, 46395 /* -3dBFS */, &counter);
     return counter;
 }
 
 // Burst measurement: we reached the end of a burst window with 'counter'
 // loud samples seen, handle that window.
-static void adaptive_burst_end_of_window(unsigned counter)
+static void adaptive_burst_end_of_window(uint32_t counter)
 {
     if (counter > adaptive_samples_per_window / 4) {
         // This window is loud, extend any existing run of loud windows
@@ -382,7 +382,7 @@ static void adaptive_burst_end_of_window(unsigned counter)
 
 // Noise measurement: process 'length' samples from 'buf'.
 // The samples will not cross a block boundary.
-static void adaptive_range_update(uint16_t *buf, unsigned length)
+static void adaptive_range_update(uint16_t *buf, uint32_t length)
 {
     if (!Modes.adaptive_range_control)
         return;
@@ -403,10 +403,10 @@ static void adaptive_range_end_of_block()
     if (!Modes.adaptive_range_control)
         return;
 
-    unsigned n = 0, i = 0;
+    uint32_t n = 0, i = 0;
 
     // measure Nth percentile magnitude
-    unsigned count_n = adaptive_range_radix_counter * Modes.adaptive_range_percentile / 100;
+    uint32_t count_n = adaptive_range_radix_counter * Modes.adaptive_range_percentile / 100;
     while (i < 65536 && n <= count_n)
         n += adaptive_range_radix[i++];
     uint16_t percentile_n = i - 1;
@@ -421,7 +421,7 @@ static void adaptive_range_end_of_block()
     }
 
     // reset radix sort for the next block
-    memset(adaptive_range_radix, 0, 65536 * sizeof(unsigned));
+    memset(adaptive_range_radix, 0, 65536 * sizeof(uint32_t));
     adaptive_range_radix_counter = 0;
 }
 
@@ -633,7 +633,7 @@ static void adaptive_control_update()
             break;
 
         default:
-            fprintf(stderr, "adaptive: in a weird state (%u), trying to fix it\n", (unsigned) adaptive_range_state);
+            fprintf(stderr, "adaptive: in a weird state (%u), trying to fix it\n", (uint32_t) adaptive_range_state);
             adaptive_range_state = RANGE_SCAN_IDLE;
             adaptive_range_rescan_timer = Modes.adaptive_range_rescan_delay;
             break;

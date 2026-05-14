@@ -13,6 +13,10 @@
 #ifndef LTE_SIB_H
 #define LTE_SIB_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -60,6 +64,36 @@ typedef struct {
 
     bool     valid;
 } lte_sib1_info_t;
+
+// SIB2: Common random-access and uplink configuration
+typedef struct {
+    uint8_t  ra_preambles;            // Number of RA preambles
+    uint8_t  power_ramping_step_db;   // Power ramping step in dB
+    int8_t   preamble_target_dbm;     // Initial preamble target power
+    uint8_t  preamble_trans_max;      // Max RACH preamble transmissions
+    uint8_t  ra_response_window_sf;   // RA response window in subframes
+    uint8_t  max_harq_msg3_tx;        // Max HARQ retransmissions for Msg3
+    bool     ul_carrier_freq_present;
+    uint16_t ul_carrier_freq;         // UL EARFCN if present
+    bool     ul_bandwidth_present;
+    uint8_t  ul_bandwidth_rb;         // UL bandwidth in RBs if present
+    uint16_t time_alignment_timer_sf; // Time alignment timer in subframes, 0xFFFF=infinity
+    bool     valid;
+} lte_sib2_t;
+
+// SIB3: Intra-frequency cell reselection parameters
+typedef struct {
+    uint8_t  q_hyst_db;               // Hysteresis in dB
+    bool     s_non_intra_search_present;
+    uint8_t  s_non_intra_search;
+    uint8_t  thresh_serving_low;
+    uint8_t  cell_reselection_priority;
+    int8_t   q_rxlevmin;              // Minimum RX level (dBm)
+    bool     s_intra_search_present;
+    uint8_t  s_intra_search;
+    uint8_t  t_reselection_eutra;     // Raw enum value 0..7
+    bool     valid;
+} lte_sib3_t;
 
 // SIB4: Intra-frequency neighbor cells
 typedef struct {
@@ -158,6 +192,8 @@ typedef struct {
 // Aggregate SIB results
 typedef struct {
     lte_sib1_info_t sib1;
+    lte_sib2_t      sib2;
+    lte_sib3_t      sib3;
     lte_sib4_t      sib4;
     lte_sib5_t      sib5;
     lte_sib6_t      sib6;
@@ -216,5 +252,9 @@ const char *lte_etws_warning_type(uint8_t type_byte);
 // Decode CBS data coding scheme (GSM 03.38) to UTF-8
 int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
                         char *utf8_out, int utf8_max);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // LTE_SIB_H

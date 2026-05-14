@@ -11,6 +11,10 @@
 #ifndef SONDEHUB_CLIENT_H
 #define SONDEHUB_CLIENT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include "sonde_demod.h"
 
@@ -25,5 +29,9 @@ void sondehubClientInit(void);
 void sondehubClientSubmit(const sonde_msg_t *msg);
 void sondehubClientPeriodicWork(void);
 void sondehubClientCleanup(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SONDEHUB_CLIENT_H

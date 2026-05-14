@@ -437,7 +437,7 @@ void soapyRun()
     const int buffer_elements = MODES_MAG_BUF_SAMPLES; // 131072
     buf = malloc(buffer_elements * 4);
 
-    unsigned int dropped = 0;
+    uint32_t dropped = 0;
     uint64_t sampleCounter = 0;
 
     while (!Modes.exit) {
@@ -473,10 +473,10 @@ void soapyRun()
         sampleCounter += samples_read;
 
         // Get the approx system time for the start of this block
-        unsigned block_duration = 1e3 * samples_read / Modes.sample_rate;
+        uint32_t block_duration = 1e3 * samples_read / Modes.sample_rate;
         outbuf->sysTimestamp = mstime() - block_duration;
 
-        unsigned int to_convert = samples_read;
+        uint32_t to_convert = samples_read;
         if (to_convert + outbuf->overlap > outbuf->totalLength) {
             // how did that happen?
             to_convert = outbuf->totalLength - outbuf->overlap;

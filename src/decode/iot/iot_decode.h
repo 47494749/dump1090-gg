@@ -17,6 +17,10 @@
 #ifndef IOT_DECODE_H
 #define IOT_DECODE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -113,8 +117,11 @@ typedef struct iot_decoder_state iot_decoder_state_t;
 iot_decoder_state_t *iotDecoderCreate(uint32_t sample_rate);
 
 // Process IQ samples (uint8_t interleaved I/Q, length in bytes).
-// Calls iotTrackerUpdate() internally when a device message is decoded.
+// Decoded messages are queued internally; call iotDecoderDequeue() to retrieve.
 void iotDecoderProcess(iot_decoder_state_t *state, const uint8_t *iq, uint32_t len);
+
+// Dequeue the next decoded message. Returns 1 if a message was retrieved, 0 if empty.
+int iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg);
 
 // Destroy decoder state.
 void iotDecoderDestroy(iot_decoder_state_t *state);
@@ -124,5 +131,9 @@ const char *iotProtocolName(iot_protocol_t proto);
 
 // Get modulation name string
 const char *iotModulationName(iot_modulation_t mod);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // IOT_DECODE_H

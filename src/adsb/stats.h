@@ -51,6 +51,12 @@
 #ifndef DUMP1090_STATS_H
 #define DUMP1090_STATS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+
 struct stats {
     uint64_t start;
     uint64_t end;
@@ -103,32 +109,32 @@ struct stats {
     uint32_t messages_by_df[32];
 
     // CPR decoding:
-    unsigned int cpr_surface;
-    unsigned int cpr_airborne;
-    unsigned int cpr_global_ok;
-    unsigned int cpr_global_bad;
-    unsigned int cpr_global_skipped;
-    unsigned int cpr_global_range_checks;
-    unsigned int cpr_global_speed_checks;
-    unsigned int cpr_local_ok;
-    unsigned int cpr_local_skipped;
-    unsigned int cpr_local_range_checks;
-    unsigned int cpr_local_speed_checks;
-    unsigned int cpr_local_aircraft_relative;
-    unsigned int cpr_local_receiver_relative;
-    unsigned int cpr_filtered;
+    uint32_t cpr_surface;
+    uint32_t cpr_airborne;
+    uint32_t cpr_global_ok;
+    uint32_t cpr_global_bad;
+    uint32_t cpr_global_skipped;
+    uint32_t cpr_global_range_checks;
+    uint32_t cpr_global_speed_checks;
+    uint32_t cpr_local_ok;
+    uint32_t cpr_local_skipped;
+    uint32_t cpr_local_range_checks;
+    uint32_t cpr_local_speed_checks;
+    uint32_t cpr_local_aircraft_relative;
+    uint32_t cpr_local_receiver_relative;
+    uint32_t cpr_filtered;
 
     // number of altitude messages ignored because
     // we had a recent DF17/18 altitude
-    unsigned int suppressed_altitude_messages;
+    uint32_t suppressed_altitude_messages;
 
     // aircraft:
     // total "new" aircraft (i.e. not seen in the last 30 or 300s)
-    unsigned int unique_aircraft;
+    uint32_t unique_aircraft;
     // we saw only a single message
-    unsigned int single_message_aircraft;
+    uint32_t single_message_aircraft;
     // we never considered the track reliable
-    unsigned int unreliable_aircraft;
+    uint32_t unreliable_aircraft;
 
     // range histogram
 #define RANGE_BUCKET_COUNT 76
@@ -150,5 +156,9 @@ void display_stats(struct stats *st);
 void reset_stats(struct stats *st);
 
 void add_timespecs(const struct timespec *x, const struct timespec *y, struct timespec *z);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

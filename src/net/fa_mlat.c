@@ -611,7 +611,7 @@ static void *fa_mlat_thread_entry(void *arg) {
 
         // When internet is offline, drain queue without processing
         if (!atomic_load(&net_available)) {
-            while (feeder_queue_pop(&fa_mlat_queue, &mm)) { /* discard */ }
+            while (msg_queue_pop(fa_mlat_queue, &mm)) { /* discard */ }
             usleep(500000);
             continue;
         }
@@ -651,7 +651,7 @@ static void *fa_mlat_thread_entry(void *arg) {
         // Process messages from queue
         int got_msg = 0;
 
-        while (feeder_queue_pop(&fa_mlat_queue, &mm)) {
+        while (msg_queue_pop(fa_mlat_queue, &mm)) {
             got_msg = 1;
 
             // Skip MLAT results (don't feed back)
@@ -867,7 +867,7 @@ static void fa_inject_beast_message(const uint8_t *frame, int len) {
     if (result < 0)
         return;
 
-    feeder_queue_push(&mlat_inject_queue, &mm);
+    msg_queue_push(mlat_inject_queue, &mm);
 }
 
 // ============================= Public API ================================
@@ -913,7 +913,7 @@ void faMlatEnable(const char *host, int port, uint32_t key) {
     pthread_mutex_unlock(&FaMlat.ctl_mutex);
 
     // Initialize the fa_mlat_queue
-    feeder_queue_init(&fa_mlat_queue);
+    msg_queue_clear(fa_mlat_queue);
 
     if (pthread_create(&FaMlat.thread, NULL, fa_mlat_thread_entry, NULL) != 0) {
         fprintf(stderr, "FA-MLAT: failed to create thread: %s\n", strerror(errno));

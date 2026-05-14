@@ -78,6 +78,51 @@ static inline int br_read_length(bitreader_t *br) {
     return (int)br_read(br, 14);  // < 16384
 }
 
+static uint8_t sib2_ra_preambles_to_value(uint32_t idx)
+{
+    static const uint8_t values[] = {
+        4, 8, 12, 16, 20, 24, 28, 32,
+        36, 40, 44, 48, 52, 56, 60, 64
+    };
+    return (idx < (sizeof(values) / sizeof(values[0]))) ? values[idx] : 64;
+}
+
+static uint8_t sib2_power_ramping_to_db(uint32_t idx)
+{
+    static const uint8_t values[] = { 0, 2, 4, 6 };
+    return (idx < 4) ? values[idx] : 6;
+}
+
+static uint8_t sib2_preamble_trans_max_to_value(uint32_t idx)
+{
+    static const uint8_t values[] = { 3, 4, 5, 6, 7, 8, 10, 20, 50, 100, 200 };
+    return (idx < (sizeof(values) / sizeof(values[0]))) ? values[idx] : 200;
+}
+
+static uint8_t sib2_ra_window_to_sf(uint32_t idx)
+{
+    static const uint8_t values[] = { 2, 3, 4, 5, 6, 7, 8, 10 };
+    return (idx < 8) ? values[idx] : 10;
+}
+
+static uint8_t sib2_ul_bw_to_rb(uint32_t idx)
+{
+    static const uint8_t values[] = { 6, 15, 25, 50, 75, 100 };
+    return (idx < 6) ? values[idx] : 100;
+}
+
+static uint16_t sib2_time_align_to_sf(uint32_t idx)
+{
+    static const uint16_t values[] = { 500, 750, 1280, 1920, 2560, 5120, 10240, 0xFFFF };
+    return (idx < 8) ? values[idx] : 0xFFFF;
+}
+
+static uint8_t sib3_q_hyst_to_db(uint32_t idx)
+{
+    static const uint8_t values[] = { 0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24 };
+    return (idx < (sizeof(values) / sizeof(values[0]))) ? values[idx] : 24;
+}
+
 // ======================== CRC-24A (for PDSCH transport blocks) ========================
 
 static uint32_t crc24a(const uint8_t *bits, int nbits)
@@ -925,6 +970,109 @@ bool lte_parse_sib1(const uint8_t *bits, int nbits, lte_sib1_info_t *sib1)
     return sib1->valid;
 }
 
+// Parse SystemInformationBlockType2 (common RACH/UL configuration)
+static bool parse_sib2(bitreader_t *br, lte_sib2_t *sib2)
+{
+    memset(sib2, 0, sizeof(*sib2));
+
+    bool ext = br_read_bool(br);
+    (void)ext;
+
+    // ac-BarringInfo OPTIONAL
+    if (br_read_bool(br)) {
+        bool mo_sig_present = br_read_bool(br);
+        bool mo_data_present = br_read_bool(br);
+        br_skip(br, 1); // ac-BarringForEmergency
+        if (mo_sig_present) br_skip(br, 4 + 3 + 5);
+        if (mo_data_present) br_skip(br, 4 + 3 + 5);
+    }
+
+    // radioResourceConfigCommon
+    br_read_bool(br); // extension marker
+
+    // rach-ConfigCommon
+    uint32_t ra_preambles_idx = br_read(br, 4);
+    sib2->ra_preambles = sib2_ra_preambles_to_value(ra_preambles_idx);
+
+    // preamblesGroupAConfig OPTIONAL
+    if (br_read_bool(br))
+        br_skip(br, 4 + 4 + 3 + 4);
+
+    sib2->power_ramping_step_db = sib2_power_ramping_to_db(br_read(br, 2));
+    sib2->preamble_target_dbm = (int8_t)(-120 + 2 * (int)br_read(br, 4));
+    sib2->preamble_trans_max = sib2_preamble_trans_max_to_value(br_read(br, 4));
+    sib2->ra_response_window_sf = sib2_ra_window_to_sf(br_read(br, 3));
+    br_skip(br, 3); // mac-ContentionResolutionTimer
+    sib2->max_harq_msg3_tx = (uint8_t)br_read_constrained(br, 1, 8);
+
+    // Skip the rest of RadioResourceConfigCommonSIB conservatively.
+    br_skip(br, 2);          // BCCH-Config.modificationPeriodCoeff
+    br_skip(br, 2 + 3);      // PCCH-Config
+    br_skip(br, 10 + 6 + 1 + 4 + 7); // PRACH-ConfigSIB
+    br_skip(br, 7 + 2);      // PDSCH-ConfigCommon
+    br_skip(br, 2 + 1 + 7 + 1 + 1 + 5 + 1 + 3); // PUSCH-ConfigCommon
+    br_skip(br, 2 + 7 + 3 + 11); // PUCCH-ConfigCommon
+    if (br_read_bool(br)) {  // SoundingRS-UL-ConfigCommon = release/setup
+        br_read_bool(br);    // extension marker in setup
+        br_skip(br, 3 + 4 + 1 + 1);
+    }
+    br_skip(br, 7 + 3 + 5 + 2 + 2 + 1 + 2 + 2); // UplinkPowerControlCommon
+    br_skip(br, 1);          // ul-CyclicPrefixLength
+    if (br_read_bool(br)) br_skip(br, 2); // antennaInfoCommon OPTIONAL
+    if (br_read_bool(br)) br_skip(br, 6); // p-Max OPTIONAL
+    if (br_read_bool(br)) br_skip(br, 3 + 4); // tdd-Config OPTIONAL
+
+    // ue-TimersAndConstants
+    br_skip(br, 3 + 3 + 3 + 3 + 3 + 3);
+
+    // freqInfo
+    sib2->ul_carrier_freq_present = br_read_bool(br);
+    sib2->ul_bandwidth_present = br_read_bool(br);
+    if (sib2->ul_carrier_freq_present)
+        sib2->ul_carrier_freq = (uint16_t)br_read(br, 16);
+    if (sib2->ul_bandwidth_present)
+        sib2->ul_bandwidth_rb = sib2_ul_bw_to_rb(br_read(br, 3));
+    br_skip(br, 5); // additionalSpectrumEmission
+
+    sib2->time_alignment_timer_sf = sib2_time_align_to_sf(br_read(br, 3));
+    sib2->valid = (br_remaining(br) >= 0);
+    return sib2->valid;
+}
+
+// Parse SystemInformationBlockType3 (cell reselection parameters)
+static bool parse_sib3(bitreader_t *br, lte_sib3_t *sib3)
+{
+    memset(sib3, 0, sizeof(*sib3));
+
+    bool ext = br_read_bool(br);
+    (void)ext;
+
+    sib3->q_hyst_db = sib3_q_hyst_to_db(br_read(br, 4));
+
+    sib3->s_non_intra_search_present = br_read_bool(br);
+    if (sib3->s_non_intra_search_present)
+        sib3->s_non_intra_search = (uint8_t)br_read(br, 5);
+    sib3->thresh_serving_low = (uint8_t)br_read(br, 5);
+    sib3->cell_reselection_priority = (uint8_t)br_read(br, 3);
+
+    bool p_max_present = br_read_bool(br);
+    sib3->s_intra_search_present = br_read_bool(br);
+    bool allowed_meas_bw_present = br_read_bool(br);
+    bool t_reselection_sf_present = br_read_bool(br);
+
+    sib3->q_rxlevmin = (int8_t)br_read_constrained(br, 0, 48) - 70;
+    if (p_max_present) br_skip(br, 6);
+    if (sib3->s_intra_search_present)
+        sib3->s_intra_search = (uint8_t)br_read(br, 5);
+    if (allowed_meas_bw_present) br_skip(br, 3);
+    br_skip(br, 1 + 2); // presenceAntennaPort1 + neighCellConfig
+    sib3->t_reselection_eutra = (uint8_t)br_read(br, 3);
+    if (t_reselection_sf_present) br_skip(br, 6);
+
+    sib3->valid = (br_remaining(br) >= 0);
+    return sib3->valid;
+}
+
 // Parse SystemInformationBlockType4 (intra-freq neighbors)
 static bool parse_sib4(bitreader_t *br, lte_sib4_t *sib4)
 {
@@ -1270,6 +1418,12 @@ bool lte_parse_si_msg(const uint8_t *bits, int nbits, lte_sib_results_t *results
         uint32_t sib_type_idx = br_read(&br, 5); // up to 32 choices
 
         switch (sib_type_idx) {
+            case 0: // SIB2
+                parse_sib2(&br, &results->sib2);
+                break;
+            case 1: // SIB3
+                parse_sib3(&br, &results->sib3);
+                break;
             case 2: // SIB4
                 parse_sib4(&br, &results->sib4);
                 break;

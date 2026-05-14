@@ -21,6 +21,12 @@
 #ifndef MODE_S_H
 #define MODE_S_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+
 #include <assert.h>
 
 //
@@ -80,8 +86,8 @@ typedef enum {
 } score_rank;
 
 int modesMessageLenByType(int type);
-score_rank scoreModesMessage(const unsigned char *msg);
-int decodeModesMessage (struct modesMessage *mm, const unsigned char *msg);
+score_rank scoreModesMessage(const uint8_t *msg);
+int decodeModesMessage (struct modesMessage *mm, const uint8_t *msg);
 void displayModesMessage(struct modesMessage *mm);
 void useModesMessage    (struct modesMessage *mm);
 
@@ -91,28 +97,28 @@ void useModesMessage    (struct modesMessage *mm);
 // with how the specs number them.
 
 // Extract one bit from a message.
-static inline  __attribute__((always_inline)) unsigned getbit(const unsigned char *data, unsigned bitnum)
+static inline  __attribute__((always_inline)) uint32_t getbit(const uint8_t *data, uint32_t bitnum)
 {
-    unsigned bi = bitnum - 1;
-    unsigned by = bi >> 3;
-    unsigned mask = 1 << (7 - (bi & 7));
+    uint32_t bi = bitnum - 1;
+    uint32_t by = bi >> 3;
+    uint32_t mask = 1 << (7 - (bi & 7));
 
     return (data[by] & mask) != 0;
 }
 
 // Extract some bits (firstbit .. lastbit inclusive) from a message.
-static inline  __attribute__((always_inline)) unsigned getbits(const unsigned char *data, unsigned firstbit, unsigned lastbit)
+static inline  __attribute__((always_inline)) uint32_t getbits(const uint8_t *data, uint32_t firstbit, uint32_t lastbit)
 {
-    unsigned fbi = firstbit - 1;
-    unsigned lbi = lastbit - 1;
-    unsigned nbi = (lastbit - firstbit + 1);
+    uint32_t fbi = firstbit - 1;
+    uint32_t lbi = lastbit - 1;
+    uint32_t nbi = (lastbit - firstbit + 1);
 
-    unsigned fby = fbi >> 3;
-    unsigned lby = lbi >> 3;
-    unsigned nby = (lby - fby) + 1;
+    uint32_t fby = fbi >> 3;
+    uint32_t lby = lbi >> 3;
+    uint32_t nby = (lby - fby) + 1;
 
-    unsigned shift = 7 - (lbi & 7);
-    unsigned topmask = 0xFF >> (fbi & 7);
+    uint32_t shift = 7 - (lbi & 7);
+    uint32_t topmask = 0xFF >> (fbi & 7);
 
     assert (fbi <= lbi);
     assert (nbi <= 32);
@@ -147,5 +153,9 @@ static inline  __attribute__((always_inline)) unsigned getbits(const unsigned ch
         return 0;
     }
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

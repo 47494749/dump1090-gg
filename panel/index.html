@@ -20,6 +20,7 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 .card h3{color:var(--accent);margin-bottom:12px;font-size:15px;border-bottom:1px solid var(--border);padding-bottom:6px}
 .field{display:grid;grid-template-columns:200px 1fr;gap:8px;align-items:center;margin-bottom:8px}
 .field label{color:var(--dim);font-size:13px;text-align:right}
+.field label[title]{cursor:help;border-bottom:1px dotted var(--dim)}
 .field input,.field select,.field textarea{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit}
 .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);outline:none}
 .field input[type=checkbox]{width:18px;height:18px;justify-self:start}
@@ -58,6 +59,7 @@ tr:hover td{background:var(--hover)}
 <a href="/gsm.html">📶 GSM</a>
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
+<a href="/fanet.html">🚩 FANET</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -282,6 +284,55 @@ function renderConfigForm(){
         html+=`</div></div>`;
     }
 
+    // Airframes.io — ACARS/VDL2 Feeds
+    {
+        const af=cfg.airframes||{};
+        const afAcars=af.acars||{};
+        const afVdl2=af.vdl2||{};
+        const acarsOn=afAcars.active;
+        const vdl2On=afVdl2.active;
+        const anyOn=acarsOn||vdl2On;
+        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">✈️ Airframes.io — ACARS/VDL2 Feeds</h3><div>`;
+        html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:20px;width:20px;text-align:center">${anyOn?'🟢':'🔴'}</span>
+            <div style="flex:1"><strong style="color:var(--accent)">ACARS/VDL2 Decoders</strong><br><span style="color:var(--dim);font-size:12px">${acarsOn&&vdl2On?'Both ACARS and VDL2 active':acarsOn?'ACARS active, VDL2 inactive':vdl2On?'VDL2 active, ACARS inactive':'Inactive — assign a dongle with role <code>acars</code> or <code>vdl2</code> from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
+            <a href="https://app.airframes.io" target="_blank" style="color:var(--link);font-size:12px">Airframes ↗</a>
+        </div>`;
+        html+=`<div style="padding:8px 0 4px 32px">
+            <div class="field"><label>Station ID</label><input type="text" data-key="airframes.station_id" value="${af.station_id||'dump1090-gg'}"></div>
+            <div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Identifies your station on airframes.io (e.g. XX-EDDF1)</div>
+        </div>`;
+        if(!anyOn){
+            html+=`<div style="padding:8px 12px;background:var(--input-bg);border-radius:6px;color:var(--dim);font-size:12px;margin:8px 0">
+                ⚠️ Airframes feeds unavailable — no ACARS or VDL2 dongle assigned.
+            </div>`;
+        }
+        html+=`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+            <strong style="color:var(--dim);font-size:12px">Feed destinations</strong>
+        </div>`;
+        // ACARS feed
+        html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!acarsOn?'opacity:0.45;pointer-events:none':''}">
+            <input type="checkbox" data-key="airframes.acars.enabled" ${afAcars.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!acarsOn?'disabled':''}>
+            <div style="flex:1;min-width:0">
+                <strong style="color:${afAcars.enabled&&acarsOn?'var(--accent)':'var(--dim)'}">Airframes ACARS</strong>
+                <br><span style="color:var(--dim);font-size:11px">Send decoded ACARS messages (acarsdec JSON format via UDP)</span>
+            </div>
+            <span style="color:var(--dim);font-size:11px;flex-shrink:0">${afAcars.host||'feed.acars.io'}:${afAcars.port||5550}</span>
+            <a href="https://app.airframes.io" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0;${!acarsOn?'pointer-events:auto':''}">↗</a>
+        </div>`;
+        // VDL2 feed
+        html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!vdl2On?'opacity:0.45;pointer-events:none':''}">
+            <input type="checkbox" data-key="airframes.vdl2.enabled" ${afVdl2.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!vdl2On?'disabled':''}>
+            <div style="flex:1;min-width:0">
+                <strong style="color:${afVdl2.enabled&&vdl2On?'var(--accent)':'var(--dim)'}">Airframes VDL2</strong>
+                <br><span style="color:var(--dim);font-size:11px">Send decoded VDL2 messages (dumpvdl2 JSON format via UDP)</span>
+            </div>
+            <span style="color:var(--dim);font-size:11px;flex-shrink:0">${afVdl2.host||'feed.acars.io'}:${afVdl2.port||5552}</span>
+            <a href="https://app.airframes.io" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0;${!vdl2On?'pointer-events:auto':''}">↗</a>
+        </div>`;
+        html+=`</div></div>`;
+    }
+
     // MLAT section
     if(cfg.mlat&&cfg.mlat.servers){
         html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 MLAT (${cfg.mlat.servers.length} server)</h3><div>`;
@@ -301,16 +352,14 @@ function renderConfigForm(){
         html+=`</div></div>`;
     }
 
-    // Dynamic SDR Receivers section
-    html+=`<div id="sdr-receivers-config"></div>`;
-    // Decoder configs section (loaded from /api/decoders)
+    // Dynamic SDR Receivers section (decoder configs only, dongles are on Devices page)
     html+=`<div id="decoder-configs"></div>`;
     document.getElementById('config-form').innerHTML=html;
     loadSdrReceiverConfig();
 }
 
-const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)',gsm:'GSM (935 MHz)',lte:'LTE (800 MHz)',iot868:'IoT 868 MHz'};
-const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟',gsm:'📶',lte:'📶',iot868:'🌡️'};
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)',gsm:'GSM (935 MHz)',lte:'LTE (800 MHz)',iot868:'IoT 868 MHz',fanet:'FANET (868.2 MHz)',sarsat:'SARSAT (406 MHz)'};
+const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟',gsm:'📶',lte:'📶',iot868:'🌡️',fanet:'🚩',sarsat:'🚨'};
 
 let decoderCfg={};  // loaded from /api/decoders
 
@@ -331,55 +380,6 @@ async function loadSdrReceiverConfig(){
             }
         }
 
-        // ===== USB Dongles section =====
-        let html='';
-        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🔌 USB Dongles</h3><div>`;
-        const assigned=devRes.sdr_devices.filter(d=>d.role&&d.role!=='none');
-        if(assigned.length===0&&rxRes.count===0){
-            html+=`<p style="color:var(--dim)">No SDR dongles assigned. Use the <a href="/devices.html" style="color:var(--accent)">Devices</a> page to assign roles.</p>`;
-        }else{
-            for(const dev of assigned){
-                const rx=rxRes.receivers.find(r=>r.serial===dev.serial||r.serial_actual===dev.serial);
-                const role=rx?rx.role:dev.role;
-                const gain=rx?rx.gain:40.0;
-                const ppm=rx?rx.ppm:0;
-                const state=rx?rx.state:'?';
-                const stCls=state==='running'?'ok':state==='error'?'err':'info';
-                const icon=roleIcons[role]||'📡';
-                const label=roleLabels[role]||role.toUpperCase();
-                html+=`<div style="padding:10px 0;border-bottom:1px solid var(--border)">`;
-                html+=`<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">`;
-                html+=`<span style="font-size:18px">${icon}</span>`;
-                html+=`<strong style="color:var(--accent)">${dev.serial}</strong>`;
-                html+=`<span class="badge ${stCls}" style="margin-left:4px">${state}</span>`;
-                html+=`<span style="color:var(--dim);font-size:12px">→ ${label}</span>`;
-                html+=`<span style="color:var(--dim);font-size:11px;margin-left:auto">${dev.tuner} (${dev.freq_range})</span>`;
-                html+=`</div>`;
-                // Gain selector
-                let gainHtml='';
-                const gList=(rx&&rx.gain_list&&rx.gain_list.length>0)?rx.gain_list:null;
-                if(gList){
-                    gainHtml=`<select id="rx_gain_${dev.serial}" style="min-width:80px">`;
-                    for(const g of gList){
-                        const sel=Math.abs(g-gain)<0.05?' selected':'';
-                        gainHtml+=`<option value="${g.toFixed(1)}"${sel}>${g.toFixed(1)}</option>`;
-                    }
-                    gainHtml+=`</select>`;
-                }else{
-                    gainHtml=`<input type="number" step="0.1" value="${gain.toFixed(1)}" id="rx_gain_${dev.serial}" min="-10" max="50">`;
-                }
-                html+=`<div class="field"><label>Gain (dB)</label><div style="display:flex;gap:8px;align-items:center">${gainHtml}`;
-                if(rx&&state==='running'){
-                    html+=`<button id="ag_${dev.serial}" onclick="autoGain('${dev.serial}')" style="font-size:12px;padding:4px 12px;background:#2a1a0a;border:1px solid #ff9800;color:#ff9800;border-radius:4px;cursor:pointer;white-space:nowrap" title="Sweep all gain steps and pick the best">🔍 Auto</button>`;
-                }
-                html+=`</div></div>`;
-                html+=`<div class="field"><label>PPM</label><span style="color:var(--text)">${ppm}</span></div>`;
-                html+=`</div>`;
-            }
-        }
-        html+=`</div></div>`;
-        document.getElementById('sdr-receivers-config').innerHTML=html;
-
         // ===== Decoder configs section =====
         let dhtml='';
 
@@ -388,21 +388,21 @@ async function loadSdrReceiverConfig(){
         const dc=decRes.adsb||{};
         dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">✈️ ADS-B Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
         dhtml+=`<div style="margin-bottom:12px"><strong style="color:var(--dim);font-size:12px">Decode Options</strong></div>`;
-        dhtml+=`<div class="field"><label>Error Correction</label><input type="number" step="1" data-dkey="adsb.fix_crc" value="${dc.fix_crc!=null?dc.fix_crc:1}" min="0" max="2"></div>`;
-        dhtml+=`<div class="field"><label>CRC check</label><input type="checkbox" data-dkey="adsb.check_crc" ${dc.check_crc?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Fix DF</label><input type="checkbox" data-dkey="adsb.fix_df" ${dc.fix_df?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>DF24 (Comm-D)</label><input type="checkbox" data-dkey="adsb.enable_df24" ${dc.enable_df24?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Mode A/C</label><input type="checkbox" data-dkey="adsb.mode_ac" ${dc.mode_ac?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Mode A/C auto</label><input type="checkbox" data-dkey="adsb.mode_ac_auto" ${dc.mode_ac_auto?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>CRC Rescue</label><input type="checkbox" data-dkey="adsb.crc_rescue" ${dc.crc_rescue?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Use GNSS alt</label><input type="checkbox" data-dkey="adsb.use_gnss" ${dc.use_gnss?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>MLAT timestamps</label><input type="checkbox" data-dkey="adsb.mlat" ${dc.mlat?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Number of bit errors to correct in CRC (0=none, 1=1-bit, 2=2-bit). Higher values recover more messages but may increase false positives.">Error Correction</label><input type="number" step="1" data-dkey="adsb.fix_crc" value="${dc.fix_crc!=null?dc.fix_crc:1}" min="0" max="2"></div>`;
+        dhtml+=`<div class="field"><label title="Validate CRC checksum on received messages. Disabling accepts messages without CRC verification.">CRC check</label><input type="checkbox" data-dkey="adsb.check_crc" ${dc.check_crc?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Attempt to correct the Downlink Format (DF) field in corrupted messages to recover otherwise lost data.">Fix DF</label><input type="checkbox" data-dkey="adsb.fix_df" ${dc.fix_df?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Enable decoding of DF24 Comm-D extended length messages used for advanced aircraft data exchange (ELM/EHS).">DF24 (Comm-D)</label><input type="checkbox" data-dkey="adsb.enable_df24" ${dc.enable_df24?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Enable decoding of legacy Mode A (squawk code) and Mode C (altitude) transponder signals at 1090 MHz.">Mode A/C</label><input type="checkbox" data-dkey="adsb.mode_ac" ${dc.mode_ac?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Automatically enable Mode A/C decoding only when ADS-B traffic is detected nearby, reducing false positives from noise.">Mode A/C auto</label><input type="checkbox" data-dkey="adsb.mode_ac_auto" ${dc.mode_ac_auto?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Recover messages with CRC errors by trying known ICAO addresses as error syndromes. Improves message count for already-seen aircraft.">CRC Rescue</label><input type="checkbox" data-dkey="adsb.crc_rescue" ${dc.crc_rescue?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Prefer GNSS (GPS) altitude over barometric altitude in aircraft position reports when both are available.">Use GNSS alt</label><input type="checkbox" data-dkey="adsb.use_gnss" ${dc.use_gnss?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Enable high-resolution 12 MHz timestamps needed for multilateration (MLAT) position calculation by feeding networks like FlightAware.">MLAT timestamps</label><input type="checkbox" data-dkey="adsb.mlat" ${dc.mlat?'checked':''}></div>`;
         dhtml+=`<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)"><strong style="color:var(--dim);font-size:12px">Adaptive Gain</strong></div>`;
-        dhtml+=`<div class="field"><label>Adaptive Range</label><input type="checkbox" data-dkey="adsb.adaptive_range" ${dc.adaptive_range?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Adaptive Burst</label><input type="checkbox" data-dkey="adsb.adaptive_burst" ${dc.adaptive_burst?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Min Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_min_gain" value="${dc.adaptive_min_gain||0}"></div>`;
-        dhtml+=`<div class="field"><label>Max Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_max_gain" value="${dc.adaptive_max_gain||99999}"></div>`;
-        dhtml+=`<div class="field"><label>Duty cycle</label><input type="number" step="0.01" data-dkey="adsb.adaptive_duty_cycle" value="${dc.adaptive_duty_cycle||0.5}"></div>`;
+        dhtml+=`<div class="field"><label title="Automatically adjust receiver gain based on the range of detected aircraft to optimize long-range reception.">Adaptive Range</label><input type="checkbox" data-dkey="adsb.adaptive_range" ${dc.adaptive_range?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Automatically reduce gain when strong signal bursts from nearby transmitters are detected, preventing receiver saturation.">Adaptive Burst</label><input type="checkbox" data-dkey="adsb.adaptive_burst" ${dc.adaptive_burst?'checked':''}></div>`;
+        dhtml+=`<div class="field"><label title="Minimum gain value (in dB) the adaptive algorithm is allowed to set. Prevents the gain from dropping too low.">Min Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_min_gain" value="${dc.adaptive_min_gain||0}"></div>`;
+        dhtml+=`<div class="field"><label title="Maximum gain value (in dB) the adaptive algorithm is allowed to set. Use 99999 for no upper limit.">Max Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_max_gain" value="${dc.adaptive_max_gain||99999}"></div>`;
+        dhtml+=`<div class="field"><label title="Fraction of time (0.0–1.0) the adaptive gain algorithm actively adjusts. Lower values change gain less frequently, reducing instability.">Duty cycle</label><input type="number" step="0.01" data-dkey="adsb.adaptive_duty_cycle" value="${dc.adaptive_duty_cycle||0.5}"></div>`;
         dhtml+=`</div></div>`;}
 
         // FLARM decoder (includes keys)
@@ -478,9 +478,16 @@ async function loadSdrReceiverConfig(){
         dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="iot868.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
         dhtml+=`</div></div>`;}
 
+        // FANET decoder
+        {const active=activeDecoders.has('fanet');
+        const dc=decRes.fanet||{};
+        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🚩 FANET Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
+        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="fanet.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
+        dhtml+=`</div></div>`;}
+
         document.getElementById('decoder-configs').innerHTML=dhtml;
     }catch(e){
-        document.getElementById('sdr-receivers-config').innerHTML=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--danger)">Error: ${e}</p></div>`;
+        document.getElementById('decoder-configs').innerHTML=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--danger)">Error: ${e}</p></div>`;
     }
 }
 

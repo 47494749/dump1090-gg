@@ -56,9 +56,16 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#ifdef __cplusplus
+#include <atomic>
+using std::atomic_int;
+using std::atomic_uint;
+#else
 #include <stdatomic.h>
+#endif
 #include <pthread.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <unistd.h>
 #include <math.h>
@@ -114,12 +121,15 @@
 // Message struct (needs types)
 #include "dump1090_message.h"
 
+// Dispatcher types (needed by track.h for aircraft_update_t)
+#include "decoder_types.h"
+
 // Headers that need struct modesMessage
 #include "track.h"
 #include "mode_s.h"
 #include "comm_b.h"
 
-// Feeder thread (needs modesMessage for SPSC queue)
+// Feeder thread (needs modesMessage for message queues)
 #include "feeder_thread.h"
 
 // FA MLAT built-in client (needs feeder_thread.h)
@@ -161,8 +171,8 @@ extern "C" {
 int  detectModeA       (uint16_t *m, struct modesMessage *mm);
 void decodeModeAMessage(struct modesMessage *mm, int ModeA);
 void modeACInit();
-int modeAToModeC (unsigned int modeA);
-unsigned modeCToModeA (int modeC);
+int modeAToModeC (uint32_t modeA);
+uint32_t modeCToModeA (int modeC);
 
 //
 // Functions exported from interactive.c

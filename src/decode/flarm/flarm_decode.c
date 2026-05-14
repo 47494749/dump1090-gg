@@ -67,8 +67,10 @@ static void btea(uint32_t *v, int8_t n, const uint32_t key[4])
 }
 
 // ======================== Key generation ========================
-// Keys are NOT hardcoded. They must be loaded at runtime via --flarm-keys <file>.
-// Without keys, FLARM packets are received but NOT decrypted.
+// Keys derived from public open-source implementations:
+//   SoftRF Legacy.h by Linar Yusupov (GPL-3.0)
+//   OGN Tracker by Pawel Jalocha
+// These keys are publicly available in multiple open-source repositories.
 
 static uint32_t key_table[12] = {0};
 static uint32_t flarm_KEY2 = 0;
@@ -77,6 +79,29 @@ static uint32_t flarm_KEY4 = 0;
 static uint32_t key5[4] = {0};
 static int flarm_keys_loaded = 0;
 
+// Built-in keys from SoftRF Legacy.h (GPL-3.0, public domain knowledge)
+static const uint32_t BUILTIN_KEY_TABLE[12] = {
+    0xe43276df, 0xdca83759, 0x9802b8ac, 0x4675a56b,
+    0xfc78ea65, 0x804b90ea, 0xb76542cd, 0x329dfa32,
+    0, 0, 0, 0  // entries 8-11 not used in V6
+};
+static const uint32_t BUILTIN_KEY2 = 0x045d9f3b;
+static const uint32_t BUILTIN_KEY3 = 0x87b562f4;
+static const uint32_t BUILTIN_KEY4 = 0x956F6C77;
+static const uint32_t BUILTIN_KEY5[4] = {0xA5F9B21C, 0xAB3F9D12, 0xC6F34E34, 0xD72FA378};
+
+void flarm_load_keys_builtin(void)
+{
+    if (flarm_keys_loaded) return;  // Don't override file-loaded keys
+    memcpy(key_table, BUILTIN_KEY_TABLE, sizeof(key_table));
+    flarm_KEY2 = BUILTIN_KEY2;
+    flarm_KEY3 = BUILTIN_KEY3;
+    flarm_KEY4 = BUILTIN_KEY4;
+    memcpy(key5, BUILTIN_KEY5, sizeof(key5));
+    flarm_keys_loaded = 1;
+    fprintf(stderr, "FLARM: using built-in decryption keys (SoftRF/OGN public)\n");
+}
+
 int flarm_keys_are_loaded(void) { return flarm_keys_loaded; }
 void flarm_get_key_table(uint32_t out[12]) { memcpy(out, key_table, sizeof(key_table)); }
 uint32_t flarm_get_key2(void) { return flarm_KEY2; }
@@ -84,7 +109,7 @@ uint32_t flarm_get_key3(void) { return flarm_KEY3; }
 uint32_t flarm_get_key4(void) { return flarm_KEY4; }
 void flarm_get_key5(uint32_t out[4]) { memcpy(out, key5, sizeof(key5)); }
 
-static long obscure(uint32_t key, uint32_t seed)
+static uint32_t obscure(uint32_t key, uint32_t seed)
 {
     uint32_t m1 = seed * (key ^ (key >> 16));
     uint32_t m2 = (seed * (m1 ^ (m1 >> 16)));
@@ -93,9 +118,12 @@ static long obscure(uint32_t key, uint32_t seed)
 
 static void make_v6_key(uint32_t out_key[4], uint32_t timestamp, uint32_t address)
 {
+    // Address XOR format (verified from ogn-decode 0.3.2 disassembly):
+    // UBFIZ W4, W2, #8, #0x10 → (addr & 0xFFFF) << 8
+    uint32_t addr_xor = (address & 0xFFFF) << 8;
     for (int i = 0; i < 4; i++) {
         int ndx = ((timestamp >> 23) & 1) ? i + 4 : i;
-        out_key[i] = obscure(key_table[ndx] ^ ((timestamp >> 6) ^ address), flarm_KEY2) ^ flarm_KEY3;
+        out_key[i] = obscure(key_table[ndx] ^ ((timestamp >> 6) ^ addr_xor), flarm_KEY2) ^ flarm_KEY3;
     }
 }
 
@@ -122,9 +150,9 @@ static void make_v7_key(uint32_t key[4])
 
 // ======================== Parity check ========================
 
-static unsigned count_bits(unsigned char byte)
+static uint32_t count_bits(uint8_t byte)
 {
-    unsigned count = 0;
+    uint32_t count = 0;
     while (byte) {
         count += byte & 1;
         byte >>= 1;
@@ -134,16 +162,16 @@ static unsigned count_bits(unsigned char byte)
 
 // ======================== V7 helper: descale ========================
 
-static int descale(unsigned int value, unsigned int mbits, unsigned int ebits)
+static int descale(uint32_t value, uint32_t mbits, uint32_t ebits)
 {
-    unsigned int offset   = (1 << mbits);
-    unsigned int signbit  = (offset << ebits);
-    unsigned int negative = (value & signbit);
+    uint32_t offset   = (1 << mbits);
+    uint32_t signbit  = (offset << ebits);
+    uint32_t negative = (value & signbit);
 
     value &= (signbit - 1);
 
     if (value >= offset) {
-        unsigned int exp = value >> mbits;
+        uint32_t exp = value >> mbits;
         value &= (offset - 1);
         value += offset;
         value <<= exp;
@@ -165,10 +193,10 @@ static const uint16_t lon_div_table[] = {
 
 // ======================== CRC-16 CCITT ========================
 
-uint16_t flarm_crc16(const uint8_t *data, unsigned len)
+uint16_t flarm_crc16(const uint8_t *data, uint32_t len)
 {
     uint16_t crc = 0xFFFF;
-    for (unsigned i = 0; i < len; i++) {
+    for (uint32_t i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
         for (int j = 0; j < 8; j++) {
             if (crc & 0x8000)
@@ -180,7 +208,7 @@ uint16_t flarm_crc16(const uint8_t *data, unsigned len)
     return crc;
 }
 
-bool flarm_check_crc(const uint8_t *data, unsigned len)
+bool flarm_check_crc(const uint8_t *data, uint32_t len)
 {
     if (len < 2) return false;
     uint16_t computed = flarm_crc16(data, len - 2);
@@ -191,26 +219,26 @@ bool flarm_check_crc(const uint8_t *data, unsigned len)
 // ======================== V6 packet structure (packed) ========================
 
 typedef struct {
-    unsigned int addr:24;
-    unsigned int type:4;
-    unsigned int addr_type:3;
-    unsigned int _unk1:1;
+    uint32_t addr:24;
+    uint32_t type:4;
+    uint32_t addr_type:3;
+    uint32_t _unk1:1;
 
     int vs:10;
-    unsigned int _unk2:2;
-    unsigned int airborne:1;
-    unsigned int stealth:1;
-    unsigned int no_track:1;
-    unsigned int parity:1;
-    unsigned int gps:12;
-    unsigned int aircraft_type:4;
+    uint32_t _unk2:2;
+    uint32_t airborne:1;
+    uint32_t stealth:1;
+    uint32_t no_track:1;
+    uint32_t parity:1;
+    uint32_t gps:12;
+    uint32_t aircraft_type:4;
 
-    unsigned int lat:19;
-    unsigned int alt:13;
+    uint32_t lat:19;
+    uint32_t alt:13;
 
-    unsigned int lon:20;
-    unsigned int _unk3:10;
-    unsigned int smult:2;
+    uint32_t lon:20;
+    uint32_t _unk3:10;
+    uint32_t smult:2;
 
     int8_t ns[4];
     int8_t ew[4];
@@ -219,37 +247,37 @@ typedef struct {
 // ======================== V7 packet structure (packed) ========================
 
 typedef struct {
-    unsigned int addr:24;
-    unsigned int type:4;
-    unsigned int addr_type:3;
-    unsigned int _unk1:1;
+    uint32_t addr:24;
+    uint32_t type:4;
+    uint32_t addr_type:3;
+    uint32_t _unk1:1;
 
-    unsigned int _unk2:22;
-    unsigned int stealth:1;
-    unsigned int no_track:1;
-    unsigned int _unk3:2;
-    unsigned int _unk4:2;
-    unsigned int _unk5:2;
-    unsigned int _unk6:2;
+    uint32_t _unk2:22;
+    uint32_t stealth:1;
+    uint32_t no_track:1;
+    uint32_t _unk3:2;
+    uint32_t _unk4:2;
+    uint32_t _unk5:2;
+    uint32_t _unk6:2;
 
-    unsigned int _unk7:2;
-    unsigned int tstamp:4;
-    unsigned int aircraft_type:4;
-    unsigned int _unk8:1;
-    unsigned int alt:13;
+    uint32_t _unk7:2;
+    uint32_t tstamp:4;
+    uint32_t aircraft_type:4;
+    uint32_t _unk8:1;
+    uint32_t alt:13;
 
-    unsigned int lat:20;
-    unsigned int lon:20;
+    uint32_t lat:20;
+    uint32_t lon:20;
     int          turn:9;
-    unsigned int hs:10;
+    uint32_t hs:10;
     int          vs:9;
-    unsigned int course:10;
-    unsigned int airborne:2;
+    uint32_t course:10;
+    uint32_t airborne:2;
 
-    unsigned int hp:6;
-    unsigned int vp:5;
-    unsigned int _unk9:5;
-    unsigned int _unk10:8;
+    uint32_t hp:6;
+    uint32_t vp:5;
+    uint32_t _unk9:5;
+    uint32_t _unk10:8;
 } __attribute__((packed)) legacy_v7_pkt_t;
 
 // ======================== Init ========================
@@ -320,10 +348,9 @@ bool flarm_load_keys(const char *path)
 
 void flarm_decode_init(void)
 {
-    // Keys must be loaded via flarm_load_keys() before decryption works.
-    // Without keys, FLARM packets are received and CRC-checked but not decrypted.
+    // If no keys were loaded from file, use built-in keys
     if (!flarm_keys_loaded) {
-        fprintf(stderr, "FLARM: no decryption keys loaded — packets will be received but not decoded\n");
+        flarm_load_keys_builtin();
     }
 }
 
@@ -340,7 +367,7 @@ static bool decode_v6(const uint8_t *payload, double ref_lat, double ref_lon,
 
     // Decrypt: BTEA on words 1..5 (skip word 0 = header)
     uint32_t key[4];
-    make_v6_key(key, timestamp, (pkt.addr << 8) & 0xffffff);
+    make_v6_key(key, timestamp, pkt.addr & 0xffffff);
     uint32_t wpkt6[sizeof(pkt)/sizeof(uint32_t)];
     memcpy(wpkt6, &pkt, sizeof(pkt));
     btea(&wpkt6[1], -5, key);
@@ -348,8 +375,8 @@ static bool decode_v6(const uint8_t *payload, double ref_lat, double ref_lon,
 
     // Parity check
     uint8_t pkt_parity = 0;
-    for (unsigned i = 0; i < sizeof(legacy_v6_pkt_t); i++) {
-        pkt_parity += count_bits(((unsigned char *)&pkt)[i]);
+    for (uint32_t i = 0; i < sizeof(legacy_v6_pkt_t); i++) {
+        pkt_parity += count_bits(((uint8_t *)&pkt)[i]);
     }
     if (pkt_parity % 2) return false;
 
@@ -398,9 +425,11 @@ static bool decode_v6(const uint8_t *payload, double ref_lat, double ref_lon,
     out->course        = direction;
     out->vs            = (float)vs10 / 10.0f;    // m/s
     out->turnrate      = 0;
+    out->airborne      = pkt.airborne ? 2 : 1;
     out->timestamp     = timestamp;
     out->version       = 6;
     out->valid         = true;
+    out->header_only   = false;
 
     return true;
 }
@@ -413,7 +442,7 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
     legacy_v7_pkt_t pkt;
     memcpy(&pkt, payload, sizeof(pkt));
 
-    if (pkt.type != 2) return false;  // Not V7 position packet
+    if (pkt.type != 2) return false;  // Only V7 (type=2) is supported
     if (!flarm_keys_loaded) return false;  // No keys — cannot decrypt
 
     uint32_t wpkt_buf[sizeof(pkt)/sizeof(uint32_t)];
@@ -424,10 +453,12 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
     btea(&wpkt[2], -4, key5);
 
     // Step 2: Generate V7 XOR key from header + timestamp
+    // Key layout (verified from ogn-decode 0.3.2 disassembly):
+    //   [0]=word0, [1]=timestamp>>4, [2]=word1, [3]=KEY4
     uint32_t key_v7[4];
     key_v7[0] = wpkt[0];
-    key_v7[1] = wpkt[1];
-    key_v7[2] = timestamp >> 4;
+    key_v7[1] = timestamp >> 4;
+    key_v7[2] = wpkt[1];
     key_v7[3] = flarm_KEY4;
     make_v7_key(key_v7);
 
@@ -439,6 +470,12 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
 
     // Copy decrypted data back into packed struct for field access
     memcpy(&pkt, wpkt_buf, sizeof(pkt));
+
+    // Timestamp validation: 4-bit tstamp field must match timestamp & 0xF
+    // This is the primary integrity check for V7 (no parity bit)
+    if (pkt.tstamp != (timestamp & 0xF)) {
+        return false;
+    }
 
     // Altitude (enscaled)
     int16_t alt = (int16_t)(descale(pkt.alt, 12, 1) - 1000);
@@ -471,6 +508,11 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
     // Turn rate (enscaled, in 0.05 deg/s)
     float turnrate = (float)descale(pkt.turn, 6, 2) / 20.0f;
 
+    // V7 has no parity check, so validate decrypted fields to reject wrong timestamps
+    if (alt < -1000 || alt > 12000) return false;
+    if (speed10 > 1500) return false;  // >150 m/s = 540 km/h: unrealistic
+    if (vs10 > 500 || vs10 < -500) return false;  // >50 m/s vertical: unrealistic
+
     // Fill output
     out->addr          = pkt.addr;
     out->addr_type     = pkt.addr_type;
@@ -484,9 +526,51 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
     out->course        = course;
     out->vs            = (float)vs10 / 10.0f;       // m/s
     out->turnrate      = turnrate;
+    out->airborne      = pkt.airborne;
     out->timestamp     = timestamp;
     out->version       = 7;
     out->valid         = true;
+    out->header_only   = false;
+
+    return true;
+}
+
+// ======================== Type 1 "Other Message" Header-only decode ========================
+// Type 1 = non-traffic messages (public V7 spec: "other non-traffic messages").
+// The first 4 bytes (word 0) are unencrypted and contain address + type + addr_type.
+// Words 1-5 are encrypted with unknown keys/format — payload cannot be decoded.
+// From FTD-109 (2024), these likely carry Messaging (AREG, PNAME, VHF, TEAM, etc.)
+// but no public RF-level payload specification exists.
+
+static bool decode_type1_header(const uint8_t *payload, flarm_message_t *out)
+{
+    // Type 1 packets have the same unencrypted header as V6/V7.
+    // The first 4 bytes contain: addr(24), type(4), addr_type(3), _unk1(1)
+    // The payload beyond the header is of unknown format.
+    // We can still extract the identity fields from the header.
+
+    legacy_v6_pkt_t hdr;
+    memcpy(&hdr, payload, sizeof(hdr));
+
+    if (hdr.type != 1) return false;
+
+    out->addr          = hdr.addr;
+    out->addr_type     = hdr.addr_type;
+    out->aircraft_type = 0;    // Not available in type 1 header
+    out->stealth       = 0;    // Encrypted region — cannot extract
+    out->no_track      = 0;    // Encrypted region — cannot extract
+    out->latitude      = 0;
+    out->longitude     = 0;
+    out->altitude      = 0;
+    out->speed         = 0;
+    out->course        = 0;
+    out->vs            = 0;
+    out->turnrate      = 0;
+    out->airborne      = 0;
+    out->timestamp     = 0;
+    out->version       = 1;    // Indicates "other message" / non-traffic type
+    out->valid         = true;
+    out->header_only   = true; // Only header fields are reliable
 
     return true;
 }
@@ -509,6 +593,9 @@ bool flarm_decode_packet(const uint8_t *raw_payload,
         return decode_v7(raw_payload, ref_lat, ref_lon, ref_alt_geoid, timestamp, out);
     } else if (type_field == 0) {
         return decode_v6(raw_payload, ref_lat, ref_lon, ref_alt_geoid, timestamp, out);
+    } else if (type_field == 1) {
+        // "Other message" — extract header fields only
+        return decode_type1_header(raw_payload, out);
     }
 
     return false;

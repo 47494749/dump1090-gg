@@ -50,6 +50,12 @@
 #ifndef DUMP1090_TRACK_H
 #define DUMP1090_TRACK_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+
 /* Maximum age of a reliable tracked aircraft in milliseconds */
 #define TRACK_AIRCRAFT_TTL 300000
 
@@ -105,12 +111,12 @@ struct aircraft {
     addrtype_t    addrtype;       // highest priority address type seen for this aircraft
 
     uint64_t      seen;           // Time (millis) at which the last packet was received
-    long          messages;       // Number of Mode S messages received
+    int64_t       messages;       // Number of Mode S messages received
 
     int           reliable;       // Do we think this is a real aircraft, not noise?
-    long          reliableDF11;   // Number of "reliable" DF11s (no CRC errors corrected, IID = 0) received
-    long          reliableDF17;   // Number of "reliable" DF17s (no CRC errors corrected) received
-    long          discarded;      // Number of messages discarded as possibly-noise
+    int64_t       reliableDF11;   // Number of "reliable" DF11s (no CRC errors corrected, IID = 0) received
+    int64_t       reliableDF17;   // Number of "reliable" DF17s (no CRC errors corrected) received
+    int64_t       discarded;      // Number of messages discarded as possibly-noise
 
     double        signalLevel[8]; // Last 8 Signal Amplitudes
     int           signalNext;     // next index of signalLevel to use
@@ -132,10 +138,10 @@ struct aircraft {
     float         gs;
 
     data_validity ias_valid;
-    unsigned      ias;
+    uint32_t      ias;
 
     data_validity tas_valid;
-    unsigned      tas;
+    uint32_t      tas;
 
     data_validity mach_valid;
     float         mach;
@@ -162,12 +168,12 @@ struct aircraft {
     int           geom_rate;      // Vertical rate (geometric)
 
     data_validity squawk_valid;
-    unsigned      squawk;         // Squawk
+    uint32_t      squawk;         // Squawk
 
     data_validity emergency_valid;
     emergency_t   emergency;      // Emergency/priority status
 
-    unsigned      category;       // Aircraft category A0 - D7 encoded as a single hex byte. 00 = unset
+    uint32_t      category;       // Aircraft category A0 - D7 encoded as a single hex byte. 00 = unset
 
     data_validity airground_valid;
     airground_t   airground;      // air/ground status
@@ -192,22 +198,22 @@ struct aircraft {
 
     data_validity cpr_odd_valid;        // Last seen even CPR message
     cpr_type_t    cpr_odd_type;
-    unsigned      cpr_odd_lat;
-    unsigned      cpr_odd_lon;
-    unsigned      cpr_odd_nic;
-    unsigned      cpr_odd_rc;
+    uint32_t      cpr_odd_lat;
+    uint32_t      cpr_odd_lon;
+    uint32_t      cpr_odd_nic;
+    uint32_t      cpr_odd_rc;
 
     data_validity cpr_even_valid;       // Last seen odd CPR message
     cpr_type_t    cpr_even_type;
-    unsigned      cpr_even_lat;
-    unsigned      cpr_even_lon;
-    unsigned      cpr_even_nic;
-    unsigned      cpr_even_rc;
+    uint32_t      cpr_even_lat;
+    uint32_t      cpr_even_lon;
+    uint32_t      cpr_even_nic;
+    uint32_t      cpr_even_rc;
 
     data_validity position_valid;
     double        lat, lon;       // Coordinates obtained from CPR encoded data
-    unsigned      pos_nic;        // NIC of last computed position
-    unsigned      pos_rc;         // Rc of last computed position
+    uint32_t      pos_nic;        // NIC of last computed position
+    uint32_t      pos_rc;         // Rc of last computed position
 
     // data extracted from opstatus etc
     int           adsb_version;   // ADS-B version (from ADS-B operational status); -1 means no ADS-B messages seen
@@ -225,15 +231,15 @@ struct aircraft {
     data_validity gva_valid;
     data_validity sda_valid;
 
-    unsigned      nic_a : 1;     // NIC supplement A from opstatus
-    unsigned      nic_c : 1;     // NIC supplement C from opstatus
-    unsigned      nic_baro : 1;  // NIC baro supplement from TSS or opstatus
-    unsigned      nac_p;         // NACp from TSS or opstatus
-    unsigned      nac_v;         // NACv from airborne velocity or opstatus
-    unsigned      sil;           // SIL from TSS or opstatus
+    uint32_t      nic_a : 1;     // NIC supplement A from opstatus
+    uint32_t      nic_c : 1;     // NIC supplement C from opstatus
+    uint32_t      nic_baro : 1;  // NIC baro supplement from TSS or opstatus
+    uint32_t      nac_p;         // NACp from TSS or opstatus
+    uint32_t      nac_v;         // NACv from airborne velocity or opstatus
+    uint32_t      sil;           // SIL from TSS or opstatus
     sil_type_t    sil_type;      // SIL supplement from TSS or opstatus
-    unsigned      gva;           // GVA from opstatus
-    unsigned      sda;           // SDA from opstatus
+    uint32_t      gva;           // GVA from opstatus
+    uint32_t      sda;           // SDA from opstatus
 
     // data extracted from MRAR
     data_validity mrar_source_valid;
@@ -281,35 +287,35 @@ struct aircraft {
 
     data_validity waypoint_info_valid;
     int           waypoint_crossing_alt;   // feet
-    unsigned      waypoint_crossing_speed; // kts
+    uint32_t      waypoint_crossing_speed; // kts
 
     // data extracted from ACAS RA (BDS 3,0 or TC28/sub2)
     data_validity acas_ra_valid;
-    unsigned      acas_ara;        // 14 bits: Active Resolution Advisories
-    unsigned      acas_rac;        // 4 bits: Resolution Advisory Complement
-    unsigned      acas_rat;        // RA Terminated
-    unsigned      acas_mte;        // Multiple Threat Encounter
-    unsigned      acas_tti;        // 2 bits: Threat Type Indicator
-    unsigned      acas_threat_id;  // 26 bits: Threat Identity Data
+    uint32_t      acas_ara;        // 14 bits: Active Resolution Advisories
+    uint32_t      acas_rac;        // 4 bits: Resolution Advisory Complement
+    uint32_t      acas_rat;        // RA Terminated
+    uint32_t      acas_mte;        // Multiple Threat Encounter
+    uint32_t      acas_tti;        // 2 bits: Threat Type Indicator
+    uint32_t      acas_threat_id;  // 26 bits: Threat Identity Data
 
     // data extracted from Operational Status (TC31)
     data_validity opstatus_valid;
-    unsigned      opstatus_version;    // ADS-B version
-    unsigned      opstatus_om_acas_ra; // OM: ACAS RA active
-    unsigned      opstatus_om_ident;   // OM: IDENT active
-    unsigned      opstatus_om_atc;     // OM: receiving ATC services
-    unsigned      opstatus_om_saf;     // OM: SAF (v2)
-    unsigned      opstatus_cc_acas;    // CC: ACAS operational
-    unsigned      opstatus_cc_cdti;    // CC: CDTI operational
-    unsigned      opstatus_cc_1090_in; // CC: 1090 MHz ES IN capable
-    unsigned      opstatus_cc_arv;     // CC: Air-Referenced Velocity capable
-    unsigned      opstatus_cc_ts;      // CC: Target State report capable
-    unsigned      opstatus_cc_tc;      // CC: Target Change report capable
-    unsigned      opstatus_cc_uat_in;  // CC: UAT IN capable
-    unsigned      opstatus_cc_poa;     // CC: Position Offset Applied
-    unsigned      opstatus_cc_b2_low;  // CC: Class B2 transmit power < 70W
-    unsigned      opstatus_cc_lw;      // CC: L/W codes (wingspan/length)
-    unsigned      opstatus_cc_antenna_offset; // CC: GPS antenna lateral offset
+    uint32_t      opstatus_version;    // ADS-B version
+    uint32_t      opstatus_om_acas_ra; // OM: ACAS RA active
+    uint32_t      opstatus_om_ident;   // OM: IDENT active
+    uint32_t      opstatus_om_atc;     // OM: receiving ATC services
+    uint32_t      opstatus_om_saf;     // OM: SAF (v2)
+    uint32_t      opstatus_cc_acas;    // CC: ACAS operational
+    uint32_t      opstatus_cc_cdti;    // CC: CDTI operational
+    uint32_t      opstatus_cc_1090_in; // CC: 1090 MHz ES IN capable
+    uint32_t      opstatus_cc_arv;     // CC: Air-Referenced Velocity capable
+    uint32_t      opstatus_cc_ts;      // CC: Target State report capable
+    uint32_t      opstatus_cc_tc;      // CC: Target Change report capable
+    uint32_t      opstatus_cc_uat_in;  // CC: UAT IN capable
+    uint32_t      opstatus_cc_poa;     // CC: Position Offset Applied
+    uint32_t      opstatus_cc_b2_low;  // CC: Class B2 transmit power < 70W
+    uint32_t      opstatus_cc_lw;      // CC: L/W codes (wingspan/length)
+    uint32_t      opstatus_cc_antenna_offset; // CC: GPS antenna lateral offset
 
     // Derived wind (computed from TAS + heading + GS + track)
     float         derived_wind_speed;    // knots
@@ -323,7 +329,7 @@ struct aircraft {
     uint64_t      oat_updated;           // when OAT/TAT was last computed
 
     // Squawk debounce
-    unsigned      squawkTentative;       // tentative new squawk, needs confirmation
+    uint32_t      squawkTentative;       // tentative new squawk, needs confirmation
     uint64_t      squawkTentativeChanged; // when tentative squawk was first seen
 
     // Altitude reliability scoring
@@ -352,8 +358,8 @@ struct aircraft {
     float         fatsv_emitted_true_heading;     //      -"-         true heading
     float         fatsv_emitted_roll;             //      -"-         roll angle
     float         fatsv_emitted_gs;               //      -"-         groundspeed
-    unsigned      fatsv_emitted_ias;              //      -"-         IAS
-    unsigned      fatsv_emitted_tas;              //      -"-         TAS
+    uint32_t      fatsv_emitted_ias;              //      -"-         IAS
+    uint32_t      fatsv_emitted_tas;              //      -"-         TAS
     float         fatsv_emitted_mach;             //      -"-         Mach number
     airground_t   fatsv_emitted_airground;        //      -"-         air/ground state
     int           fatsv_emitted_nav_altitude_mcp; //      -"-         MCP altitude
@@ -362,22 +368,22 @@ struct aircraft {
     float         fatsv_emitted_nav_heading;      //      -"-         target heading
     nav_modes_t   fatsv_emitted_nav_modes;        //      -"-         enabled navigation modes
     float         fatsv_emitted_nav_qnh;          //      -"-         altimeter setting
-    unsigned char fatsv_emitted_bds_10[7];        //      -"-         BDS 1,0 message
-    unsigned char fatsv_emitted_bds_17[7];        //      -"-         BDS 1,7 message
-    unsigned char fatsv_emitted_bds_30[7];        //      -"-         BDS 3,0 message
-    unsigned char fatsv_emitted_unknown_commb[7]; //      -"-         unrecognized Comm-B message
-    unsigned char fatsv_emitted_es_status[7];     //      -"-         ES operational status message
-    unsigned char fatsv_emitted_es_acas_ra[7];    //      -"-         ES ACAS RA report message
+    uint8_t       fatsv_emitted_bds_10[7];        //      -"-         BDS 1,0 message
+    uint8_t       fatsv_emitted_bds_17[7];        //      -"-         BDS 1,7 message
+    uint8_t       fatsv_emitted_bds_30[7];        //      -"-         BDS 3,0 message
+    uint8_t       fatsv_emitted_unknown_commb[7]; //      -"-         unrecognized Comm-B message
+    uint8_t       fatsv_emitted_es_status[7];     //      -"-         ES operational status message
+    uint8_t       fatsv_emitted_es_acas_ra[7];    //      -"-         ES ACAS RA report message
     char          fatsv_emitted_callsign[9];      //      -"-         callsign
     addrtype_t    fatsv_emitted_addrtype;         //      -"-         address type (assumed ADSB_ICAO initially)
     int           fatsv_emitted_adsb_version;     //      -"-         ADS-B version (assumed non-ADS-B initially)
-    unsigned      fatsv_emitted_category;         //      -"-         ADS-B emitter category (assumed A0 initially)
-    unsigned      fatsv_emitted_squawk;           //      -"-         squawk
-    unsigned      fatsv_emitted_nac_p;            //      -"-         NACp
-    unsigned      fatsv_emitted_nac_v;            //      -"-         NACv
-    unsigned      fatsv_emitted_sil;              //      -"-         SIL
+    uint32_t      fatsv_emitted_category;         //      -"-         ADS-B emitter category (assumed A0 initially)
+    uint32_t      fatsv_emitted_squawk;           //      -"-         squawk
+    uint32_t      fatsv_emitted_nac_p;            //      -"-         NACp
+    uint32_t      fatsv_emitted_nac_v;            //      -"-         NACv
+    uint32_t      fatsv_emitted_sil;              //      -"-         SIL
     sil_type_t    fatsv_emitted_sil_type;         //      -"-         SIL supplement
-    unsigned      fatsv_emitted_nic_baro;         //      -"-         NICbaro
+    uint32_t      fatsv_emitted_nic_baro;         //      -"-         NICbaro
     emergency_t   fatsv_emitted_emergency;        //      -"-         emergency/priority status
 
     uint64_t      fatsv_last_emitted;             // time (millis) aircraft was last FA emitted
@@ -385,8 +391,8 @@ struct aircraft {
 
     // GPS integrity monitoring
     int           gps_integrity;           // 0=normal, 1=degraded, 2=suspect
-    unsigned      prev_nic;                // previous NIC value for drop detection
-    unsigned      prev_nac_p;              // previous NACp value for drop detection
+    uint32_t      prev_nic;                // previous NIC value for drop detection
+    uint32_t      prev_nac_p;              // previous NACp value for drop detection
     uint64_t      gps_integrity_updated;   // when gps_integrity was last evaluated
 
     // Circling detection
@@ -397,6 +403,29 @@ struct aircraft {
     int           heading_history_count;   // number of valid entries
     int           circling;                // 1 if aircraft is circling (>360° heading change in window)
     uint64_t      circling_updated;        // when circling was last evaluated
+
+    // FLARM/FANET/OGN aircraft type (0 = not set / not FLARM)
+    uint8_t       flarm_acft_type;         // enum flarm_aircraft_type value (1-15), 0=unset
+    uint8_t       flarm_addr_type;         // FLARM address type (0=random,1=ICAO,2=FLARM,3=anon)
+    uint8_t       flarm_proto_version;     // FLARM protocol version (6=V6, 7=V7, 1=type1/non-traffic)
+
+    // FANET extra info (type 8 = HW info, type 9 = thermal)
+    struct {
+        uint8_t  device_type;
+        uint16_t uptime_minutes;
+        int8_t   rssi;
+        uint8_t  valid;            // non-zero if HW info received
+    } fanet_hwinfo;
+    struct {
+        double   latitude;
+        double   longitude;
+        int      altitude;         // meters
+        float    climb;            // m/s
+        float    wind_speed;       // km/h
+        float    wind_heading;     // degrees
+        uint8_t  confidence;       // 0-7
+        uint8_t  valid;            // non-zero if thermal received
+    } fanet_thermal;
 
     struct aircraft *next;        // Next aircraft in our linked list
 };
@@ -437,17 +466,22 @@ static inline uint64_t trackDataAge(const data_validity *v)
 struct modesMessage;
 struct aircraft *trackUpdateFromMessage(struct modesMessage *mm);
 
+/* Update aircraft from a pre-decoded decoder update (FLARM, FANET, etc.)
+ * Position is already resolved (no CPR needed).
+ */
+struct aircraft *trackUpdateFromDecoder(const aircraft_update_t *upd);
+
 /* Call periodically */
 void trackPeriodicUpdate();
 
 /* Convert from a (hex) mode A value to a 0-4095 index */
-static inline unsigned modeAToIndex(unsigned modeA)
+static inline uint32_t modeAToIndex(uint32_t modeA)
 {
     return (modeA & 0x0007) | ((modeA & 0x0070) >> 1) | ((modeA & 0x0700) >> 2) | ((modeA & 0x7000) >> 3);
 }
 
 /* Convert from a 0-4095 index to a (hex) mode A value */
-static inline unsigned indexToModeA(unsigned index)
+static inline uint32_t indexToModeA(uint32_t index)
 {
     return (index & 0007) | ((index & 0070) << 1) | ((index & 0700) << 2) | ((index & 07000) << 3);
 }
@@ -458,5 +492,9 @@ double greatcircle(double lat0, double lon0, double lat1, double lon1);
 /* Get bearing from 2 points */
 double get_bearing(double lat0, double lon0, double lat1, double lon1);
 
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -20,6 +20,10 @@
 #ifndef FIFO_H
 #define FIFO_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -53,9 +57,9 @@ typedef enum {
 
 struct mag_buf {
     uint16_t       *data;            // Magnitude data, starting with overlap from the previous block
-    unsigned        totalLength;     // Maximum number of samples (allocated size of "data")
-    unsigned        validLength;     // Number of valid samples in "data", including overlap samples
-    unsigned        overlap;         // Number of leading overlap samples at the start of "data";
+    uint32_t        totalLength;     // Maximum number of samples (allocated size of "data")
+    uint32_t        validLength;     // Number of valid samples in "data", including overlap samples
+    uint32_t        overlap;         // Number of leading overlap samples at the start of "data";
                                      // also the number of trailing samples that will be preserved for next time
 
     uint64_t        sampleTimestamp; // Clock timestamp of the start of this block, 12MHz clock
@@ -64,7 +68,7 @@ struct mag_buf {
     mag_buf_flags   flags;           // bitwise flags for this buffer
     double          mean_level;      // Mean of normalized (0..1) signal level
     double          mean_power;      // Mean of normalized (0..1) power level
-    unsigned        dropped;         // (approx) number of dropped samples, if flag MAGBUF_DISCONTINUOUS is set; zero if not discontinuous
+    uint32_t        dropped;         // (approx) number of dropped samples, if flag MAGBUF_DISCONTINUOUS is set; zero if not discontinuous
 
     struct mag_buf *next;            // linked list forward link
 };
@@ -74,7 +78,7 @@ struct mag_buf {
 //   buffer_count - the number of buffers to preallocate
 //   buffer_size  - the size of each magnitude buffer, in samples, including overlap
 //   overlap      - the number of samples to overlap between adjacent buffers
-bool fifo_create(unsigned buffer_count, unsigned buffer_size, unsigned overlap);
+bool fifo_create(uint32_t buffer_count, uint32_t buffer_size, uint32_t overlap);
 
 // Destroy the fifo structures allocated in magbuf_fifo_create. Not threadsafe; ensure all FIFO users
 // are done before calling.
@@ -115,5 +119,9 @@ struct mag_buf *fifo_dequeue(uint32_t timeout_ms);
 
 // Release a buffer previously returned by fifo_acquire() or fifo_pop() back to the freelist.
 void fifo_release(struct mag_buf *buf);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

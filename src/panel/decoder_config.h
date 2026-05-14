@@ -9,6 +9,10 @@
 #ifndef DECODER_CONFIG_H
 #define DECODER_CONFIG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -24,6 +28,8 @@ typedef enum {
     DECODER_GSM,
     DECODER_LTE,
     DECODER_IOT868,
+    DECODER_FANET,
+    DECODER_SARSAT,
     DECODER_TYPE_COUNT
 } decoder_type_t;
 
@@ -49,18 +55,18 @@ typedef struct {
     float   adaptive_duty_cycle;
     // Burst control
     float   adaptive_burst_alpha;
-    unsigned adaptive_burst_change_delay;
+    uint32_t adaptive_burst_change_delay;
     float   adaptive_burst_loud_rate;
-    unsigned adaptive_burst_loud_runlength;
+    uint32_t adaptive_burst_loud_runlength;
     float   adaptive_burst_quiet_rate;
-    unsigned adaptive_burst_quiet_runlength;
+    uint32_t adaptive_burst_quiet_runlength;
     // Range control
     float   adaptive_range_alpha;
-    unsigned adaptive_range_percentile;
+    uint32_t adaptive_range_percentile;
     float   adaptive_range_target;
-    unsigned adaptive_range_change_delay;
-    unsigned adaptive_range_scan_delay;
-    unsigned adaptive_range_rescan_delay;
+    uint32_t adaptive_range_change_delay;
+    uint32_t adaptive_range_scan_delay;
+    uint32_t adaptive_range_rescan_delay;
 } adsb_decoder_config_t;
 
 // ======================== FLARM Decoder Config ========================
@@ -147,6 +153,22 @@ typedef struct {
     double  center_freq;
 } iot868_decoder_config_t;
 
+// ======================== FANET Decoder Config ========================
+
+typedef struct {
+    bool    enabled;
+    bool    output_enabled;
+    double  center_freq;
+} fanet_decoder_config_t;
+
+// ======================== Sarsat Decoder Config ========================
+
+typedef struct {
+    bool    enabled;
+    bool    output_enabled;
+    double  center_freq;
+} sarsat_decoder_config_t;
+
 // ======================== USB Dongle Config ========================
 
 typedef struct {
@@ -173,6 +195,8 @@ typedef struct {
     gsm_decoder_config_t        gsm;
     lte_decoder_config_t        lte;
     iot868_decoder_config_t     iot868;
+    fanet_decoder_config_t      fanet;
+    sarsat_decoder_config_t     sarsat;
 } all_decoder_configs_t;
 
 extern all_decoder_configs_t DecoderConfigs;
@@ -206,5 +230,9 @@ bool decoderConfigSaveFlarmKeys(const char *path);
 bool decoderConfigParseJson(const char *json);
 
 #define DECODER_CONFIG_PATH "/etc/dump1090-gg/decoders.json"
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DECODER_CONFIG_H

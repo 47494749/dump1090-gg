@@ -5,8 +5,16 @@
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Sync new config structs from legacy Modes struct.
 // Call this after CLI argument parsing is complete.
 void appConfigSyncFromModes(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // APP_CONFIG_H

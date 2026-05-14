@@ -21,6 +21,10 @@
 #ifndef SDR_SOAPY_H
 #define SDR_SOAPY_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void soapyInitConfig();
 void soapyShowHelp();
 bool soapyOpen();
@@ -31,5 +35,9 @@ int soapyGetGain();
 int soapyGetMaxGain();
 double soapyGetGainDb(int step);
 int soapySetGain(int step);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

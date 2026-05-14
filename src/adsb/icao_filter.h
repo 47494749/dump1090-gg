@@ -20,6 +20,12 @@
 #ifndef DUMP1090_ICAO_FILTER_H
 #define DUMP1090_ICAO_FILTER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+
 // Special address bit used to mark ADS-B (NT) emitters
 #define ICAO_FILTER_ADSB_NT (1 << 25)
 
@@ -40,5 +46,9 @@ uint32_t icaoFilterTestFuzzy(uint32_t partial);
 // Call this periodically to allow the filter to expire
 // old entries.
 void icaoFilterExpire();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

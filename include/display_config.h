@@ -5,6 +5,10 @@
 #ifndef DISPLAY_CONFIG_H
 #define DISPLAY_CONFIG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 typedef enum {
@@ -29,5 +33,9 @@ typedef struct {
 } display_config_t;
 
 extern display_config_t DisplayConfig;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DISPLAY_CONFIG_H

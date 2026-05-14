@@ -1,12 +1,14 @@
 # dump1090-gg-light
 
-**dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / OGNTP / ACARS / VDL2 /
-Radiosonde / CPDLC / GSM / LTE / POCSAG receiver and multi-feed relay for Linux.
+**dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / OGNTP / ADS-L /
+P3I / FANET+ / ACARS / VDL2 / Radiosonde / CPDLC / COSPAS-SARSAT / GSM / LTE /
+POCSAG / IoT 868 MHz receiver and multi-feed relay for Linux.
 It is a fork of [dump1090-fa](https://github.com/flightaware/dump1090) by FlightAware,
 extended with native threaded feeder clients, a multi-SDR receiver architecture
-with pluggable backends (librtlsdr and libsdrgg),
-decoders for aeronautical communication, weather sounding, and cellular/paging
-signals, and a built-in web control panel with version display.
+with pluggable backends (librtlsdr and libsdrgg), a C++17 message dispatcher,
+decoders for aeronautical communication and surveillance, weather sounding,
+emergency beacons, cellular/paging/IoT signals, and a built-in web control
+panel with version display.
 
 Fork maintainer and project direction: **Luigi Origa**.
 
@@ -28,9 +30,11 @@ authorship and copyright. Large portions of the upstream code remain intact,
 but this fork also extends several upstream files with new options, feeder
 integration, decoder hooks, panel endpoints, and build changes. All of the
 **new functionality** — the native feeder
-clients, multi-SDR architecture, FLARM / OGNTP / ACARS / VDL2 / Radiosonde / CPDLC /
-GSM / POCSAG decoders, the web control panel, Makefile modifications, protocol
-implementations, the information gathering, and this README itself — was
+clients, multi-SDR architecture, FLARM / OGNTP / ADS-L / P3I / FANET+ /
+ACRS / VDL2 / Radiosonde / CPDLC / COSPAS-SARSAT / GSM / LTE / POCSAG / IoT
+decoders, the airframes.io feed, the C++17 message dispatcher, the web control
+panel, Makefile modifications, protocol implementations, the information
+gathering, and this README itself — was
 **written entirely by AI**,
 under the **continuous supervision of a human** who directed what to do, how to do
 it, which design decisions to make, and which approaches to take.
@@ -96,14 +100,20 @@ compiling, and deploying code — proved highly effective for this project.
 | Beast feeds (11 networks) | not supported | **native thread** (ADSBx, adsb.fi, FlyItaly, adsb.one, adsb.lol, airplanes.live, Planespotters, TheAirTraffic, AVDelphi, PlaneWatch, ADSBHub) |
 | SondeHub upload | not supported | **native thread** (HTTPS PUT to SondeHub v2 API) |
 | FLARM / OGNTP / OGN feed | not supported | **native** (2nd RTL-SDR, GFSK demod, LDPC, OGN APRS-IS) |
+| ADS-L (EASA EC) | not supported | **native** (868 MHz, XXTEA, Mode-S CRC-24) |
+| PilotAware P3I | not supported | **native** (869.5 MHz, 2-FSK 38.4 kbps) |
+| FANET+ LoRa | not supported | **native** (868.2 MHz, LoRa CSS SF7 BW250k) |
 | ACARS decoding | not supported | **native** (AM envelope + MSK demod, 5 channels) |
 | VDL2 decoding | not supported | **native** (D8PSK demod, AVLC parsing, ACARS extraction) |
+| Airframes.io feed | not supported | **native** (UDP JSON for ACARS + VDL2 to airframes.io) |
 | Radiosonde decoding | not supported | **native** (RS41/RS92/DFM/M10, RS ECC, GPS, PTU) |
 | CPDLC decoding | not supported | **native** (FANS-1/A ASN.1 UPER via ELM) |
 | ELM reassembly (DF24–31) | not supported | **native** (ACARS/CPDLC extraction from Comm-D) |
+| COSPAS-SARSAT 406 MHz | not supported | **native** (ELT/EPIRB/PLB beacon decoder, BCH FEC) |
 | GSM cell scanning | not supported | **native** (GMSK demod, FCCH/SCH sync, SI decode, cell tracking) |
 | POCSAG pager decoding | not supported | **native** (FSK demod, BCH ECC, alpha/numeric, multi-baud) |
-| Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR) |
+| IoT 868 MHz | not supported | **native** (OOK/FSK: Bresser, LaCrosse, Honeywell) |
+| Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR, 11 roles) |
 | SDR backend | librtlsdr only | **pluggable** (librtlsdr + libsdrgg optimized USB driver) |
 | Web control panel | not supported | **native** (HTTP REST API, live configuration) |
 
@@ -127,22 +137,40 @@ RTL-SDR #1 (1090 MHz) ──► ADS-B decode ──┬──► PiAware thread  
 
 RTL-SDR #2 (868 MHz)  ──► FLARM demod ───┬──► OGN thread       → aprs.glidernet.org:14580 (APRS-IS)
                           OGNTP demod ────┤
+                          ADS-L demod ────┤
+                          P3I demod ──────┤
                                           └──► Synthetic DF18   → ADS-B pipeline (merged)
 
-RTL-SDR #3 (131 MHz)  ──► ACARS demod ───┬──► Message display  (5 EU channels, AM-MSK)
-                          VDL2 demod  ────┤    (3 EU channels, D8PSK 10.5 ksym/s)
+RTL-SDR #3 (131 MHz)  ──► ACARS demod ───┬──► Airframes feed   → feed.acars.io:5550 (UDP JSON)
+                                          ├──► Message display  (5 EU channels, AM-MSK)
                                           └──► aircraft.json integration
 
-RTL-SDR #4 (403 MHz)  ──► Sonde demod ───┬──► SondeHub thread  → api.v2.sondehub.org (HTTPS PUT)
+RTL-SDR #4 (136 MHz)  ──► VDL2 demod  ───┬──► Airframes feed   → feed.acars.io:5552 (UDP JSON)
+                                          ├──► Message display  (3 EU channels, D8PSK 10.5 ksym/s)
+                                          └──► aircraft.json integration
+
+RTL-SDR #5 (403 MHz)  ──► Sonde demod ───┬──► SondeHub thread  → api.v2.sondehub.org (HTTPS PUT)
                           (RS41/RS92/    │
                            DFM/M10)      └──► Message display  (FFT freq scan, RS ECC)
 
-RTL-SDR #5 (935 MHz)  ──► GSM decode  ───┬──► Cell tracker     (FCCH/SCH sync, SI3 decode)
+RTL-SDR #6 (868.2 MHz)──► FANET+ demod ──┬──► Synthetic DF18   → ADS-B pipeline (merged)
+                          (LoRa CSS SF7)  └──► FANET Monitor    → /api/fanet statistics
+
+RTL-SDR #7 (406 MHz)  ──► SARSAT demod ──┬──► Message display  (ELT/EPIRB/PLB beacons)
+                          (BPSK, BCH FEC) └──► Beacon alerts    (country, position, type)
+
+RTL-SDR #8 (935 MHz)  ──► GSM decode  ───┬──► Cell tracker     (FCCH/SCH sync, SI3 decode)
                           (GMSK 271 ksym) │    /api/gsm         (MCC/MNC/LAC/CellID/ARFCN)
                                           └──► PPM calibration  (crystal offset from carrier)
 
-RTL-SDR #6 (466 MHz)  ──► POCSAG demod ──┬──► Message display  (512/1200/2400 baud)
+                       ──► POCSAG demod ──┬──► Message display  (512/1200/2400 baud)
                           (FSK, BCH ECC)  └──► /api/messages    (alpha + numeric pages)
+
+                       ──► LTE decode  ───┬──► Cell scanner     (PSS/SSS, MIB, SIB1-14)
+                          (OFDM, ZC seq)  └──► ETWS/CMAS alerts (earthquake/tsunami warnings)
+
+                       ──► IoT 868 demod ─┬──► Message display  (Bresser, LaCrosse, Honeywell)
+                          (OOK/FSK)       └──► Temperature data
 
 Web control panel (port 8888) ──► Live config, status, logs, device management
 ```
@@ -228,7 +256,7 @@ Live configuration is also possible via the web control panel.
 | `--fix` | Enable single-bit CRC error correction |
 | `--enable-df24` | Enable DF24–31 Comm-D ELM decoding (required for CPDLC) |
 | `--receiver <spec>` | Add SDR receiver: `serial:role[:gain=X][:ppm=Y][:agc][:backend=name]` |
-| | Role: `adsb`, `flarm`, `acars`, `vdl2`, `radiosonde`, `gsm`, `pocsag`, `lte` |
+| | Role: `adsb`, `flarm`, `acars`, `vdl2`, `radiosonde`, `gsm`, `pocsag`, `lte`, `iot868`, `fanet`, `sarsat` |
 | | Backend: `rtlsdr` (default), `sdrgg` |
 
 #### FLARM / OGN
@@ -274,6 +302,18 @@ Live configuration is also possible via the web control panel.
 | `--opensky-user <name>` | OpenSky username |
 | `--opensky-serial <n>` | OpenSky serial number |
 | `--sondehub <callsign>` | Enable SondeHub upload with this callsign |
+
+#### Airframes.io feed (ACARS/VDL2)
+
+| Option | Description |
+|---|---|
+| `--airframes-acars` | Enable ACARS feed to airframes.io |
+| `--airframes-vdl2` | Enable VDL2 feed to airframes.io |
+| `--airframes-acars-host <host>` | ACARS feed host (default: feed.acars.io) |
+| `--airframes-acars-port <port>` | ACARS feed port (default: 5550) |
+| `--airframes-vdl2-host <host>` | VDL2 feed host (default: feed.acars.io) |
+| `--airframes-vdl2-port <port>` | VDL2 feed port (default: 5552) |
+| `--airframes-station-id <id>` | Station identifier for airframes.io |
 
 #### Beast feed networks (11 supported)
 
@@ -611,6 +651,120 @@ on the same 868 MHz RTL-SDR dongle.
 
 **Standards:** OGN Tracking Protocol (community-documented), LDPC(208,160).
 
+### ADS-L decoder (`adsl_decode.c/.h`)
+
+**ADS-L** (Lightweight Surveillance) decoder implementing the EASA SRD-860
+Electronic Conspicuity standard for drones and UAS on 868.2/868.4 MHz.
+
+- **Same RF as FLARM**: 100 kbps 2-FSK, ±50 kHz deviation, Manchester encoding
+- **Dedicated syncword**: `0xF5724B18` (pre-Manchester), 8 bytes post-Manchester
+- **Payload inverted** on-air (all bytes flipped after Manchester decode)
+- **XXTEA descramble**: zero key, 5 × uint32 words, 6 rounds
+- **Mode-S CRC-24** integrity check (polynomial `0xFFFA0480`)
+- **FANET cordic position** decoding (same encoding as FANET protocol)
+- **Speed/altitude**: UnsVR6/UnsVR12 variable-rate encoding
+- **Climb rate**: 9-bit sign-magnitude, UnsVR6 × 0.125 m/s
+- **Track**: 9-bit × 45/64 degrees
+- **Callsign prefix**: `ADL` (orange label in UI)
+- **Synthetic DF18 CF=5** messages for aircraft tracking integration
+- Runs in parallel with FLARM/OGNTP in `flarm_demod.c` as 3rd NCC sync template
+
+**Standards:** EASA SRD-860 Issue 1, reference from [SoftRF](https://github.com/lyusupov/SoftRF) (GPL-3.0).
+
+### PilotAware P3I decoder (`p3i_decode.c/.h`, `p3i_demod.c/.h`)
+
+**PilotAware P3I** anti-collision protocol decoder for general aviation aircraft
+awareness systems operating on 869.525 MHz.
+
+- **2-FSK modulation** at 38.4 kbps, ±10 kHz deviation
+- **10-byte preamble** (`0xAA` pattern) + 2-byte syncword (`0xB4`, `0x2B`)
+- **Net ID** (4 bytes) + length byte (`0x18` = 24) + CRC seed (`0x71`)
+- **Position decoding**: latitude, longitude, altitude, aircraft type
+- **Callsign prefix**: `P3I` in aircraft display
+- Integrated into 868 MHz FLARM multi-protocol demodulator as 4th NCC template
+
+**Standards:** PilotAware P3I protocol (community-documented).
+
+### FANET+ LoRa decoder (`fanet_decode.c/.h`)
+
+Complete **FANET+** (Flying Ad-hoc NETwork) decoder for paragliders, hang-gliders,
+and light aircraft using LoRa Chirp Spread Spectrum modulation on 868.2 MHz.
+
+- **LoRa CSS demodulation**: SF7, BW250kHz, 500 kSPS, 128 chips/symbol
+- **Preamble detection**: 8 upchirps via FFT bin correlation
+- **Sync word**: configurable (0xF1 for FANET)
+- **SFD**: 2.25 downchirps (Start of Frame Delimiter)
+- **Explicit header** (CR=4/8): payload length, coding rate, CRC enable
+- **Payload decoding**: variable coding rate (CR 4/5 to 4/8), gray decode,
+  deinterleave, Hamming FEC, CRC-16 CCITT
+- **All FANET message types**:
+  - Type 0: ACK/NACK
+  - Type 1: Tracking (air position, speed, altitude, heading)
+  - Type 2: Name (pilot/aircraft name, cached for ~1h)
+  - Type 3: Text message
+  - Type 4: Service/Weather (temperature, wind, pressure, humidity, battery)
+  - Type 5: Landmark (airspace, waypoints, polygons)
+  - Type 7: Ground tracking (vehicle, person on ground)
+  - Type 9: Thermal (updraft information)
+  - Type 0xA: Hardware info v2
+- **Name cache**: 64 entries with ~1h TTL for pilot/aircraft identification
+- **Synthetic DF18** track integration: FANET positions appear on Aircraft page
+  with `FNT` callsign prefix and FLARM-style type icons (paraglider, balloon, UAV, etc.)
+- **FANET Monitor** panel page with real-time decoder statistics
+- **SDR role**: `SDR_ROLE_FANET` for dedicated dongle assignment
+
+**Standards:** LoRa CSS modulation (Semtech), FANET protocol (community-documented).
+
+### COSPAS-SARSAT 406 MHz beacon decoder (`sarsat_decode.c/.h`)
+
+Emergency distress beacon decoder for **COSPAS-SARSAT** 406 MHz beacons
+(ELT, EPIRB, PLB, SSAS, ELT-DT).
+
+- **Signal chain**: 2.4 MSPS IQ → FM discriminator → 60× decimation (40 kHz IF)
+  → DC removal (α=0.001) → 21-tap Blackman LPF (2 kHz cutoff) → AGC →
+  PLL (800 half-symbol/s, BW=0.008) → Biphase-L/Manchester decode
+- **Burst detection**: preamble alternation pattern (1,0,1,0…), ≥26/30
+  transitions threshold
+- **Frame sync**: 9-bit sync word (`0x0D0` normal, `0x02F` test)
+- **BCH FEC**:
+  - **BCH-1(82,61) t=3**: corrects up to 3 bit errors in PDF-1
+  - **BCH-2(38,26) t=2**: corrects up to 2 bit errors in PDF-2
+- **Protocol fields**: beacon type (ELT/EPIRB/PLB/SSAS/ELT-DT), country code
+  (200+ countries), MMSI, ICAO address, certificate/serial numbers
+- **Position**: long-format encoded lat/lon (0.25° resolution)
+- **SDR role**: `SDR_ROLE_SARSAT` for dedicated dongle assignment
+
+**Standards:** C/S T.001 (COSPAS-SARSAT 406 MHz beacon specification).
+
+### Airframes.io feed (`airframes_feed.c/.h`)
+
+UDP JSON feeder for sending decoded ACARS and VDL2 messages to
+[airframes.io](https://airframes.io), the global ACARS/VDL2 message aggregation
+platform.
+
+- **ACARS feed**: acarsdec-compatible JSON format → `feed.acars.io:5550` (UDP)
+  - Fields: timestamp, station_id, channel, freq, level, error, mode, label,
+    block_id, ack, tail, flight, msgno, text
+- **VDL2 feed**: dumpvdl2-compatible JSON format → `feed.acars.io:5552` (UDP)
+  - Fields: vdl2 envelope with app info, timestamp, freq, signal/noise levels,
+    station, AVLC frame with src/dst/ACARS
+- **Configurable** station ID, host, port per feed; enable/disable per feed
+- **Panel UI**: per-feed toggle controls (checkboxes grayed out when decoder
+  inactive)
+- **DNS resolution** with retry on startup
+- **Statistics** reported at shutdown (messages sent per feed)
+
+### ACARS label lookup (`acars_label.c/.h`)
+
+Semantic lookup table for **ACARS message labels** per ARINC 618/620.
+
+- **Human-readable descriptions** for standard 2-character ACARS labels
+- **8 categories**: ATC, AOC (Airline Operational Control), AAC, Service,
+  Emergency, Weather, Printer, Unknown
+- Used by the Messages panel page for label enrichment
+
+**Standards:** ARINC 618 (ACARS character encoding), ARINC 620 (ACARS applications).
+
 ### OGN / APRS-IS client (`ogn_client.c/.h`)
 
 Submits decoded FLARM positions to the Open Glider Network.
@@ -635,9 +789,9 @@ Submits decoded FLARM positions to the Open Glider Network.
 Dynamic assignment of multiple RTL-SDR dongles to different decoder roles.
 Each receiver is identified by its USB serial number and configured via
 `--receiver <serial>:<role>` where role is one of `adsb`, `flarm`, `acars`,
-`vdl2`, `radiosonde`, `gsm`, or `pocsag`.
+`vdl2`, `radiosonde`, `gsm`, `pocsag`, `lte`, `iot868`, `fanet`, or `sarsat`.
 
-- Supports up to **8 simultaneous RTL-SDR devices**
+- Supports up to **8 simultaneous RTL-SDR devices** with **11 decoder roles**
 - Each receiver runs its own async IQ reader thread
 - Role can be changed via the web configuration panel dropdown
 - Automatic gain control and sample rate configuration per role
@@ -868,6 +1022,10 @@ restarts for most settings.
   | `/api/logs` | GET | Ring-buffered log viewer (2000 lines) |
   | `/api/messages` | GET | Decoded message ring buffer (500 messages) |
   | `/api/devices` | GET | SDR device enumeration and tuner info |
+  | `/api/receivers` | GET | Multi-SDR receiver status (role, gain, state) |
+  | `/api/decoders` | GET | Per-decoder configuration and dongle assignments |
+  | `/api/gsm` | GET | GSM cell tracker (MCC/MNC/LAC/CellID/ARFCN) |
+  | `/api/fanet` | GET | FANET decoder statistics (preambles, packets, CRC) |
 - **Configurable items** (via POST, applied at runtime):
   - Beast feed networks: enable/disable per network
   - OpenSky Network: enable/disable, username
@@ -953,11 +1111,19 @@ which is listed in the protocol source column.
 | `vdl2_demod.c/.h` | VDL Mode 2 D8PSK demodulator | ICAO Doc 9776, Annex 10 Vol III | GPL-3.0-or-later |
 | `sonde_demod.c/.h` | Multi-protocol radiosonde decoder (RS41/RS92/DFM/M10) | Community-documented formats and references from [rs1729/RS](https://github.com/rs1729/RS) (GPL-3.0) and radiosonde_auto_rx (GPL-3.0) | GPL-3.0-or-later |
 | `ogntp_decode.c/.h` | OGN Tracking Protocol decoder (LDPC) | Community-documented OGN-TP format | GPL-3.0-or-later |
+| `adsl_decode.c/.h` | ADS-L (EASA EC) decoder | EASA SRD-860, [SoftRF](https://github.com/lyusupov/SoftRF) (GPL-3.0) | GPL-3.0-or-later |
+| `p3i_decode.c/.h`, `p3i_demod.c/.h` | PilotAware P3I decoder | Community-documented P3I protocol | GPL-3.0-or-later |
+| `fanet_decode.c/.h` | FANET+ LoRa decoder (SF7 BW250k CSS) | LoRa PHY (Semtech), FANET protocol (community) | GPL-3.0-or-later |
+| `sarsat_decode.c/.h` | COSPAS-SARSAT 406 MHz beacon decoder | C/S T.001 (COSPAS-SARSAT specification) | GPL-3.0-or-later |
+| `airframes_feed.c/.h` | Airframes.io ACARS/VDL2 UDP JSON feeder | [airframes.io](https://airframes.io) API (public) | GPL-3.0-or-later |
+| `acars_label.c/.h` | ACARS label semantic lookup table | ARINC 618/620 (public standards) | GPL-3.0-or-later |
+| `dispatcher.cpp/.h`, `msg_queue.cpp`, `decoder_queue.h`, `decoder_types.h` | C++17 central message dispatcher | Original implementation | GPL-3.0-or-later |
 | `sondehub_client.c/.h` | SondeHub v2 telemetry uploader | [SondeHub API](https://github.com/projecthorus/sondehub-infra/wiki), reference: [radiosonde_auto_rx](https://github.com/projecthorus/radiosonde_auto_rx) | GPL-3.0-or-later |
 | `gsm_decode.c/.h` | GSM broadcast channel decoder (GMSK, Viterbi, SI) | 3GPP TS 05.02/05.03/04.08/03.41/04.06 (public standards) | GPL-3.0-or-later |
 | `gsm_tracker.c/.h` | GSM cell tracker and JSON API | Original implementation | GPL-3.0-or-later |
 | `gsm_calibrate.c/.h` | RTL-SDR PPM calibration via GSM carriers | Approach from [ogn-rf](https://github.com/glidernet/ogn-rf) (GPL-3.0) | GPL-3.0-or-later |
 | `lte_decode.c/.h`, `lte_sib.c/.h`, `lte_tracker.c/.h` | LTE cell scanner, SIB decoder and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
+| `iot_decode.c/.h`, `iot_tracker.c/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell) | Published sensor protocols, [rtl_433](https://github.com/merbanan/rtl_433) protocol reference (GPL-2.0) | GPL-3.0-or-later |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (FSK, BCH, multi-baud) | ITU-R M.584, ETSI ETS 300 133-2 (public standards) | GPL-3.0-or-later |
 | `elm.c/.h` | Comm-D ELM reassembly | ICAO Annex 10 Vol IV (Comm-D framing) | GPL-3.0-or-later |
 | `cpdlc_decode.c/.h` | FANS-1/A CPDLC message decoder | ICAO Doc 9705, RTCA DO-258A, ASN.1 constraints from [libacars](https://github.com/szpajder/libacars) | GPL-3.0-or-later |
@@ -1105,6 +1271,34 @@ These decoders are implemented from **published aviation standards** and
   [OGN protocol wiki](http://wiki.glidernet.org/) and in the
   [ogn-decode](https://github.com/glidernet) source code
 
+### ADS-L / P3I / FANET+ / SARSAT
+
+These decoders are implemented from **published standards** and **open-source
+reference implementations**:
+
+- **ADS-L**: EASA SRD-860 Electronic Conspicuity standard, reference from the
+  open-source [SoftRF](https://github.com/lyusupov/SoftRF) project (GPL-3.0)
+  which documents the XXTEA scrambling, CRC-24, and position encoding
+- **PilotAware P3I**: Community-documented protocol parameters (frequency,
+  modulation, syncword, framing) from public aviation forum discussions and
+  the PilotAware open hardware documentation
+- **FANET+**: LoRa CSS physical layer from Semtech's published modulation
+  specification. FANET protocol documented by the open-source
+  [FANET](https://github.com/3s1d/fanet-stm32) project. Whitening table from
+  [gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr)
+- **COSPAS-SARSAT**: C/S T.001 specification (COSPAS-SARSAT 406 MHz beacon
+  standard), publicly available from the COSPAS-SARSAT Secretariat. BCH coding
+  parameters, frame structure, and protocol fields documented in the standard.
+
+### Airframes.io feed
+
+The airframes.io feed protocol uses the **publicly documented UDP JSON formats**
+compatible with existing open-source feeders:
+
+- **ACARS**: [acarsdec](https://github.com/TLeconte/acarsdec) JSON output format
+- **VDL2**: [dumpvdl2](https://github.com/szpajder/dumpvdl2) JSON output format
+- **airframes.io**: <https://app.airframes.io> (public aggregation platform)
+
 ### GSM broadcast channel
 
 The GSM decoder is implemented from **published 3GPP standards**:
@@ -1226,6 +1420,12 @@ Oliver Jowett `<oliver@mutability.co.uk>` (see `LICENSE` file).
 - **Open Glider Network** — OGN Tracking Protocol documentation, APRS-IS feed protocol
 - **Open Glider Network** — [ogn-rf](https://github.com/glidernet/ogn-rf) GSM calibration technique (GPL-3.0)
 - **OpenSky Network** — [opensky-sensor](https://github.com/openskynetwork/opensky-sensor) v2.1.7 (binary feeder protocol, BSD 3-Clause)
+- **Airframes.io** — ACARS/VDL2 message aggregation platform and public feed protocol
+- **COSPAS-SARSAT** — 406 MHz emergency beacon specification (C/S T.001)
+- **Semtech** — LoRa CSS modulation technology (FANET+ PHY layer)
+- **PilotAware** — P3I anti-collision protocol for general aviation
+- **Benjamin Larsson** — [rtl_433](https://github.com/merbanan/rtl_433) (ISM band protocol reference for IoT 868 MHz decoder, GPL-2.0)
+- **Jérome Music** (tapparelj) — [gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr) (LoRa demodulation reference, whitening table)
 - **James Peroulas** — [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (PSS/SSS Zadoff-Chu correlation, PBCH decoding approach, AGPL-3.0)
 - **3GPP** — GSM broadcast channel standards (TS 05.02, 05.03, 04.08, 03.41, 04.06)
 - **3GPP** — LTE physical layer and RRC standards (TS 36.211, 36.212, 36.331)
@@ -1304,6 +1504,13 @@ These are included in the source tree and compiled directly into the binary.
 | `flarm_demod.c/.h` | GFSK demodulator for 868.2/868.4 MHz | Original |
 | `flarm_reader.c/.h` | Second RTL-SDR reader thread (868 MHz) | Original (librtlsdr API) |
 | `ogntp_decode.c/.h` | OGN Tracker Protocol (LDPC FEC, Whitening, TEA encryption) | [esp32-ogn-tracker](https://github.com/pjalocha/esp32-ogn-tracker) by Pawel Jalocha (GPL-2.0), [SoftRF](https://github.com/lyusupov/SoftRF) (GPL-3.0) |
+| `adsl_decode.c/.h` | ADS-L (EASA EC) decoder (XXTEA, Mode-S CRC-24) | EASA SRD-860, [SoftRF](https://github.com/lyusupov/SoftRF) (GPL-3.0) |
+| `p3i_decode.c/.h`, `p3i_demod.c/.h` | PilotAware P3I decoder (2-FSK 38.4 kbps, 869.525 MHz) | Community-documented P3I protocol |
+| `fanet_decode.c/.h` | FANET+ LoRa decoder (SF7 BW250k CSS, 868.2 MHz) | LoRa PHY (Semtech), FANET protocol (community), [gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr) whitening table |
+| `sarsat_decode.c/.h` | COSPAS-SARSAT 406 MHz beacon decoder (BPSK, BCH FEC) | C/S T.001 standard |
+| `airframes_feed.c/.h` | Airframes.io ACARS/VDL2 UDP JSON feeder | [airframes.io](https://airframes.io) public feed protocol |
+| `acars_label.c/.h` | ACARS label semantic lookup (ARINC 618/620) | ARINC standards |
+| `dispatcher.cpp/.h`, `msg_queue.cpp`, `decoder_queue.h` | C++17 central message dispatcher and queues | Original |
 | `ogn_client.c/.h` | OGN APRS-IS feed client | [OGN protocol wiki](http://wiki.glidernet.org/) |
 | `acars_demod.c/.h` | ACARS AM-MSK 2400 baud demodulator (5 channels) | Algorithms from [acarsdec](https://github.com/TLeconte/acarsdec) by Thierry Leconte (GPL-2.0) |
 | `vdl2_demod.c/.h` | VDL2 D8PSK 10.5 ksym/s demodulator + AVLC parser | Original (standard D8PSK algorithms) |
@@ -1321,6 +1528,8 @@ These are included in the source tree and compiled directly into the binary.
 | `lte_decode.c/.h` | LTE PSS/SSS synchronization, PBCH/SIB1 decode | Approach from [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) by James Peroulas (AGPL-3.0); 3GPP TS 36.211, 36.212, 36.331 standards |
 | `lte_sib.c/.h` | LTE SIB1–SIB14 decode, PDCCH/PDSCH, ETWS/CMAS alerts | 3GPP TS 36.212, 36.331 standards |
 | `lte_tracker.c/.h` | LTE cell tracker with cell database | Original |
+| `iot_decode.c/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell CM921) | Published sensor protocols, [rtl_433](https://github.com/merbanan/rtl_433) (GPL-2.0) |
+| `iot_tracker.c/.h` | IoT device state tracker | Original |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (512/1200/2400 baud, BCH ECC) | ITU-R M.584, ETSI ETS 300 133-2 standards |
 | `sdr_receiver.c/.h` | Multi-SDR receiver manager (dynamic role assignment) | Original (sdr_backend abstraction layer) |
 | `sdr_backend.c/.h` | SDR hardware abstraction layer (vtable dispatch, rtlsdr wrapper) | Original |
@@ -1353,6 +1562,12 @@ These are included in the source tree and compiled directly into the binary.
 | Graw DFM-09/17 | `sonde_demod.c` | DFM radiosonde protocol |
 | FLARM radio specification | `flarm_demod.c` | 868.2/868.4 MHz, GFSK, 100 kbaud |
 | OGN Tracking Protocol v1 | `ogntp_decode.c` | OGN-TP encoding (LDPC, whitening, TEA) |
+| EASA SRD-860 Issue 1 | `adsl_decode.c` | ADS-L lightweight surveillance (868 MHz) |
+| PilotAware P3I | `p3i_decode.c` | P3I anti-collision (869.525 MHz, 38.4 kbps) |
+| LoRa CSS (Semtech) | `fanet_decode.c` | Chirp Spread Spectrum modulation (SF7, BW250k) |
+| FANET+ protocol | `fanet_decode.c` | Flying Ad-hoc NETwork message types |
+| C/S T.001 | `sarsat_decode.c` | COSPAS-SARSAT 406 MHz beacon specification |
+| ARINC 618/620 | `acars_label.c` | ACARS message label definitions |
 
 ---
 

@@ -17,10 +17,12 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <string.h>
 #include <math.h>
 #include <complex.h>
 #include "acars_demod.h"
+#include "acars_label.h"
 
 // ======================== Constants ========================
 
@@ -126,12 +128,12 @@ typedef struct {
     float    MskClk;        // Bit clock accumulator
     double   MskLvlSum;     // Signal level accumulator
     int      MskBitCount;   // Signal level sample count
-    unsigned MskS;          // Symbol counter (I/Q alternation)
+    uint32_t MskS;          // Symbol counter (I/Q alternation)
     int      idx;           // Matched filter input buffer index
     float complex *inb;     // Matched filter input buffer
 
     // Bit assembly
-    unsigned char outbits;  // Shift register for bit assembly
+    uint8_t outbits;  // Shift register for bit assembly
     int      nbits;         // Bits remaining before byte complete
 
     // ACARS framing
@@ -190,7 +192,7 @@ struct acars_state *acars_create(const acars_config_t *config)
         ch->decim_factor = decim;
 
         // Allocate mixer weights
-        ch->mixer = calloc((unsigned)decim, sizeof(float complex));
+        ch->mixer = calloc((uint32_t)decim, sizeof(float complex));
         if (!ch->mixer) { acars_destroy(s); return NULL; }
 
         // Precompute mixer: e^(-j*2*pi*f_offset*n / sample_rate) / (decim * 127.5)
@@ -205,7 +207,7 @@ struct acars_state *acars_create(const acars_config_t *config)
         if (!ch->dm_buffer) { acars_destroy(s); return NULL; }
 
         // Allocate matched filter input buffer
-        ch->inb = calloc((unsigned)MFLT_LEN, sizeof(float complex));
+        ch->inb = calloc((uint32_t)MFLT_LEN, sizeof(float complex));
         if (!ch->inb) { acars_destroy(s); return NULL; }
 
         // Initial state
@@ -243,6 +245,118 @@ void acars_get_stats(struct acars_state *state, acars_stats_t *stats)
     *stats = state->stats;
 }
 
+static char acars_ascii(uint8_t value)
+{
+    return (char)(value & 0x7F);
+}
+
+static bool acars_is_printable(char c)
+{
+    return c >= 0x20 && c <= 0x7E;
+}
+
+static bool acars_is_token_char(char c)
+{
+    return isalnum((uint8_t)c) || c == ' ';
+}
+
+static int acars_copy_ascii_field(char *dst, size_t dst_size,
+                                  const uint8_t *src, int start, int end, int len)
+{
+    int available = end - start;
+    int copy_len = len;
+
+    if (available < copy_len)
+        copy_len = available;
+    if (copy_len < 0)
+        copy_len = 0;
+    if (dst_size == 0)
+        return 0;
+    if (copy_len > (int)dst_size - 1)
+        copy_len = (int)dst_size - 1;
+
+    for (int i = 0; i < copy_len; i++)
+        dst[i] = acars_ascii(src[start + i]);
+    dst[copy_len] = '\0';
+    return copy_len;
+}
+
+static bool acars_match_token(const uint8_t *src, int start, int end, int len)
+{
+    if (end - start < len)
+        return false;
+
+    for (int i = 0; i < len; i++) {
+        char c = acars_ascii(src[start + i]);
+        if (!acars_is_token_char(c))
+            return false;
+    }
+    return true;
+}
+
+static bool acars_match_sublabel_mfi(const uint8_t *src, int start, int end)
+{
+    bool any_non_space = false;
+
+    if (end - start < 4)
+        return false;
+
+    for (int i = 0; i < 4; i++) {
+        char c = acars_ascii(src[start + i]);
+        if (!(isalnum((uint8_t)c) || c == ' '))
+            return false;
+        if (c != ' ')
+            any_non_space = true;
+    }
+
+    return any_non_space;
+}
+
+static int acars_parse_dsp_header(acars_msg_t *msg,
+                                  const uint8_t *src, int start, int end)
+{
+    int close = -1;
+
+    if (start >= end || acars_ascii(src[start]) != '/')
+        return start;
+
+    for (int i = start + 1; i < end && i - start <= 32; i++) {
+        char c = acars_ascii(src[i]);
+        if (c == '/') {
+            close = i;
+            break;
+        }
+        if (!acars_is_printable(c))
+            return start;
+    }
+
+    if (close <= start + 1)
+        return start;
+
+    acars_copy_ascii_field(msg->dsp_header, sizeof(msg->dsp_header),
+                           src, start + 1, close, close - start - 1);
+
+    if (msg->dsp_header[0]) {
+        const char *dot = strchr(msg->dsp_header, '.');
+        if (dot) {
+            size_t dest_len = (size_t)(dot - msg->dsp_header);
+            if (dest_len >= sizeof(msg->dsp_destination))
+                dest_len = sizeof(msg->dsp_destination) - 1;
+            memcpy(msg->dsp_destination, msg->dsp_header, dest_len);
+            msg->dsp_destination[dest_len] = '\0';
+
+            strncpy(msg->dsp_route, dot + 1, sizeof(msg->dsp_route) - 1);
+            msg->dsp_route[sizeof(msg->dsp_route) - 1] = '\0';
+        } else {
+            strncpy(msg->dsp_destination, msg->dsp_header,
+                    sizeof(msg->dsp_destination) - 1);
+            msg->dsp_destination[sizeof(msg->dsp_destination) - 1] = '\0';
+        }
+    }
+
+    return close + 1;
+}
+
 // ======================== ACARS Message Output ========================
 
 static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
@@ -275,22 +389,38 @@ static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
 
     msg.block_id = (ch->msg_len > 11) ? (ch->msg_buf[11] & 0x7F) : ' ';
 
-    // If there's text after STX (byte 12)
-    int text_start = 13;
+    int text_start = 12;
     int text_end = ch->msg_len;
 
-    // Extract message number and flight from beginning of text
-    if (text_end - text_start >= 4) {
-        for (int i = 0; i < 4 && text_start + i < text_end; i++)
-            msg.msgno[i] = ch->msg_buf[text_start + i] & 0x7F;
-        msg.msgno[4] = '\0';
+    if (ch->msg_len > 12) {
+        char marker = acars_ascii(ch->msg_buf[12]);
+        if (marker == STX_CHAR)
+            text_start = 13;
+        else if (marker == (ETX_CHAR & 0x7F) || marker == (ETB_CHAR & 0x7F))
+            text_start = text_end;
+    }
+
+    text_start = acars_parse_dsp_header(&msg, ch->msg_buf, text_start, text_end);
+
+    // Extract message number and flight from the start of the text body.
+    if (acars_match_token(ch->msg_buf, text_start, text_end, 4)) {
+        acars_copy_ascii_field(msg.msgno, sizeof(msg.msgno),
+                               ch->msg_buf, text_start, text_end, 4);
         text_start += 4;
     }
-    if (text_end - text_start >= 6) {
-        for (int i = 0; i < 6 && text_start + i < text_end; i++)
-            msg.flight[i] = ch->msg_buf[text_start + i] & 0x7F;
-        msg.flight[6] = '\0';
+
+    if (acars_match_token(ch->msg_buf, text_start, text_end, 6)) {
+        acars_copy_ascii_field(msg.flight, sizeof(msg.flight),
+                               ch->msg_buf, text_start, text_end, 6);
         text_start += 6;
+    }
+
+    if (acars_match_sublabel_mfi(ch->msg_buf, text_start, text_end)) {
+        acars_copy_ascii_field(msg.sublabel, sizeof(msg.sublabel),
+                               ch->msg_buf, text_start, text_end, 2);
+        acars_copy_ascii_field(msg.mfi, sizeof(msg.mfi),
+                               ch->msg_buf, text_start + 2, text_end, 2);
+        text_start += 4;
     }
 
     // Remaining text
@@ -298,10 +428,15 @@ static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
     if (tlen > ACARS_MAX_MSGLEN) tlen = ACARS_MAX_MSGLEN;
     if (tlen > 0) {
         for (int i = 0; i < tlen; i++)
-            msg.text[i] = ch->msg_buf[text_start + i] & 0x7F;
+            msg.text[i] = acars_ascii(ch->msg_buf[text_start + i]);
     }
     msg.text[tlen > 0 ? tlen : 0] = '\0';
     msg.text_len = tlen > 0 ? tlen : 0;
+
+    // Label semantic lookup
+    const acars_label_info_t *linfo = acars_label_lookup(msg.label);
+    msg.label_description = linfo->description;
+    msg.label_category = (acars_msg_category_t)linfo->category;
 
     state->stats.messages_decoded++;
 
@@ -321,7 +456,7 @@ static void acars_reset_frame(acars_channel_t *ch)
 
 static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
 {
-    unsigned char r = ch->outbits;
+    uint8_t r = ch->outbits;
 
     switch (ch->frame_state) {
     case ACARS_WSYN:
@@ -330,7 +465,7 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
             ch->nbits = 8;
             return;
         }
-        if (r == (unsigned char)~SYN_CHAR) {
+        if (r == (uint8_t)~SYN_CHAR) {
             ch->MskS ^= 2;
             ch->frame_state = ACARS_SYN2;
             ch->nbits = 8;
@@ -345,7 +480,7 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
             ch->nbits = 8;
             return;
         }
-        if (r == (unsigned char)~SYN_CHAR) {
+        if (r == (uint8_t)~SYN_CHAR) {
             ch->MskS ^= 2;
             ch->nbits = 8;
             return;
@@ -406,12 +541,7 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
         ch->crc_bytes[1] = r;
     process_msg:
         {
-            // Force STX/ETX markers
-            if (ch->msg_len >= 13)
-                ch->msg_buf[12] = (ch->msg_buf[12] & (ETX_CHAR | STX_CHAR)) |
-                                  (ETX_CHAR & STX_CHAR);
-
-            // CRC check
+            // CRC check (must be done BEFORE any buffer mutation)
             uint16_t crc = 0;
             for (int i = 0; i < ch->msg_len; i++) {
                 UPDATE_CRC(crc, ch->msg_buf[i]);
@@ -421,11 +551,15 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
 
             if (crc != 0) {
                 state->stats.crc_errors++;
-                // Try to fix with parity info — simplified, just reject for now
                 acars_reset_frame(ch);
                 ch->nbits = 8;
                 return;
             }
+
+            // Force STX/ETX markers (after CRC, as this modifies the buffer)
+            if (ch->msg_len >= 13)
+                ch->msg_buf[12] = (ch->msg_buf[12] & (ETX_CHAR | STX_CHAR)) |
+                                  (ETX_CHAR & STX_CHAR);
 
             // Strip parity bits
             for (int i = 0; i < ch->msg_len; i++)
@@ -523,17 +657,17 @@ static void acars_demod_msk(struct acars_state *state, acars_channel_t *ch, int 
 
 // ======================== IQ Processing ========================
 
-void acars_process(struct acars_state *state, const uint8_t *iq_data, unsigned len)
+void acars_process(struct acars_state *state, const uint8_t *iq_data, uint32_t len)
 {
-    unsigned samples = len / 2;  // IQ pairs
+    uint32_t samples = len / 2;  // IQ pairs
     int decim = state->iq_block_size;
     int nch = state->config.num_channels;
 
     state->stats.samples_processed += samples;
 
     // Process in blocks of decim IQ samples → 1 output sample per channel
-    unsigned pos = 0;
-    while (pos + (unsigned)decim * 2 <= len) {
+    uint32_t pos = 0;
+    while (pos + (uint32_t)decim * 2 <= len) {
         // For each channel: mix, integrate (decimate), take AM envelope
         for (int c = 0; c < nch; c++) {
             acars_channel_t *ch = &state->channels[c];
@@ -554,7 +688,7 @@ void acars_process(struct acars_state *state, const uint8_t *iq_data, unsigned l
         for (int c = 0; c < nch; c++)
             state->channels[c].dm_len++;
 
-        pos += (unsigned)(decim * 2);
+        pos += (uint32_t)(decim * 2);
 
         // When we have a block of decimated samples, demodulate
         if (state->channels[0].dm_len >= ACARS_DECIM_BUFSZ) {

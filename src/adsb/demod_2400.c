@@ -18,8 +18,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include "dispatcher.h"
 
 #include <assert.h>
+
+static adsb_queue_handle_t demod_adsb_queue = NULL;
 
 #ifdef MODEAC_DEBUG
 #include <gd.h>
@@ -61,14 +64,14 @@ static inline int slice_phase4(uint16_t *m) {
 static uint32_t valid_df_short_bitset;        // set of acceptable DF values for short messages
 static uint32_t valid_df_long_bitset;         // set of acceptable DF values for long messages
 
-static uint32_t generate_damage_set(uint8_t df, unsigned damage_bits)
+static uint32_t generate_damage_set(uint8_t df, uint32_t damage_bits)
 {
     uint32_t result = (1 << df);
     if (!damage_bits)
         return result;
 
-    for (unsigned bit = 0; bit < 5; ++bit) {
-        unsigned damaged_df = df ^ (1 << bit);
+    for (uint32_t bit = 0; bit < 5; ++bit) {
+        uint32_t damaged_df = df ^ (1 << bit);
         result |= generate_damage_set(damaged_df, damage_bits - 1);
     }
 
@@ -98,12 +101,15 @@ static void init_bitsets()
 //
 void demodulate2400(struct mag_buf *mag)
 {
+    if (!demod_adsb_queue)
+        demod_adsb_queue = dispatcher_register_adsb_queue("demod_2400");
+
     static struct modesMessage zeroMessage;
     struct modesMessage mm;
-    unsigned char msg1[MODES_LONG_MSG_BYTES], msg2[MODES_LONG_MSG_BYTES], *msg;
+    uint8_t msg1[MODES_LONG_MSG_BYTES], msg2[MODES_LONG_MSG_BYTES], *msg;
     uint32_t j;
 
-    static unsigned last_message_end = 0;
+    static uint32_t last_message_end = 0;
 
     // initialize bitsets on first call
     if (!valid_df_short_bitset)
@@ -114,7 +120,7 @@ void demodulate2400(struct mag_buf *mag)
         last_message_end = 0;
     }
 
-    unsigned char *bestmsg;
+    uint8_t *bestmsg;
     int bestscore, bestphase;
 
     // maximum lookahead we use
@@ -242,8 +248,8 @@ void demodulate2400(struct mag_buf *mag)
             pPtr = &m[j+19] + (try_phase/5);
             phase = try_phase % 5;
 
-            unsigned bytelen = 1;
-            for (unsigned i = 0; i < bytelen; ++i) {
+            uint32_t bytelen = 1;
+            for (uint32_t i = 0; i < bytelen; ++i) {
                 uint8_t theByte = 0;
 
                 switch (phase) {
@@ -329,7 +335,7 @@ void demodulate2400(struct mag_buf *mag)
                 if (i == 0) {
                     // inspect DF field early, only continue processing
                     // messages where the DF appears valid
-                    unsigned df = theByte >> 3;
+                    uint32_t df = theByte >> 3;
                     if (valid_df_long_bitset & (1 << df))
                         bytelen = MODES_LONG_MSG_BYTES;
                     else if (valid_df_short_bitset & (1 << df))
@@ -433,8 +439,8 @@ void demodulate2400(struct mag_buf *mag)
         //  overlap)
         j = last_message_end - 8*12/5;
 
-        // Pass data to the next layer
-        useModesMessage(&mm);
+        // Pass data to the next layer via dispatcher queue
+        dispatcher_push_adsb(demod_adsb_queue, &mm);
     }
 
     /* update noise power */
@@ -460,12 +466,12 @@ void demodulate2400(struct mag_buf *mag)
 
 #ifdef MODEAC_DEBUG
 
-static int yscale(unsigned signal)
+static int yscale(uint32_t signal)
 {
     return (int) (299 - 299.0 * signal / 65536.0);
 }
 
-static void draw_modeac(uint16_t *m, unsigned modeac, unsigned f1_clock, unsigned noise_threshold, unsigned signal_threshold, unsigned bits, unsigned noisy_bits, unsigned uncertain_bits)
+static void draw_modeac(uint16_t *m, uint32_t modeac, uint32_t f1_clock, uint32_t noise_threshold, uint32_t signal_threshold, uint32_t bits, uint32_t noisy_bits, uint32_t uncertain_bits)
 {
     // 25 bits at 87*60MHz
     // use 1 pixel = 30MHz = 1087 pixels
@@ -482,7 +488,7 @@ static void draw_modeac(uint16_t *m, unsigned modeac, unsigned f1_clock, unsigne
     gdImageFilledRectangle(im, 0, 0, 1087, 299, white);
 
     // draw samples
-    for (unsigned pixel = 0; pixel < 1088; ++pixel) {
+    for (uint32_t pixel = 0; pixel < 1088; ++pixel) {
         int clock_offset = (pixel - 150) * 2;
         int bit = clock_offset / 87;
         int sample = (f1_clock + clock_offset) / 25;
@@ -510,10 +516,10 @@ static void draw_modeac(uint16_t *m, unsigned modeac, unsigned f1_clock, unsigne
     }
 
     // draw bit boundaries
-    for (unsigned bit = 0; bit < 20; ++bit) {
-        unsigned clock = 87 * bit;
-        unsigned pixel0 = clock / 2 + 150;
-        unsigned pixel1 = (clock + 27) / 2 + 150;
+    for (uint32_t bit = 0; bit < 20; ++bit) {
+        uint32_t clock = 87 * bit;
+        uint32_t pixel0 = clock / 2 + 150;
+        uint32_t pixel1 = (clock + 27) / 2 + 150;
 
         gdImageLine(im, pixel0, 0, pixel0, 299, (bit == 0 || bit == 14) ? black : grey);
         gdImageLine(im, pixel1, 0, pixel1, 299, (bit == 0 || bit == 14) ? black : grey);
@@ -556,12 +562,12 @@ void demodulate2400AC(struct mag_buf *mag)
     struct modesMessage mm;
     uint16_t *m = mag->data;
     uint32_t mlen = mag->validLength - mag->overlap;
-    unsigned f1_sample;
+    uint32_t f1_sample;
 
     memset(&mm, 0, sizeof(mm));
 
     double noise_stddev = sqrt(mag->mean_power - mag->mean_level * mag->mean_level); // Var(X) = E[(X-E[X])^2] = E[X^2] - (E[X])^2
-    unsigned noise_level = (unsigned) ((mag->mean_power + noise_stddev) * 65535 + 0.5);
+    uint32_t noise_level = (uint32_t) ((mag->mean_power + noise_stddev) * 65535 + 0.5);
 
     for (f1_sample = 1; f1_sample < mlen; ++f1_sample) {
         // Mode A/C messages should match this bit sequence:
@@ -617,7 +623,7 @@ void demodulate2400AC(struct mag_buf *mag)
         if (m[f1_sample+2] > m[f1_sample+0] || m[f1_sample+2] > m[f1_sample+1])
             continue;      // quiet part of bit wasn't sufficiently quiet
 
-        unsigned f1_level = (m[f1_sample+0] + m[f1_sample+1]) / 2;
+        uint32_t f1_level = (m[f1_sample+0] + m[f1_sample+1]) / 2;
 
         if (noise_level * 2 > f1_level) {
             // require 6dB above noise
@@ -630,12 +636,12 @@ void demodulate2400AC(struct mag_buf *mag)
         float f1a_power = (float)m[f1_sample] * m[f1_sample];
         float f1b_power = (float)m[f1_sample+1] * m[f1_sample+1];
         float fraction = f1b_power / (f1a_power + f1b_power);
-        unsigned f1_clock = (unsigned) (25 * (f1_sample + fraction * fraction) + 0.5);
+        uint32_t f1_clock = (uint32_t) (25 * (f1_sample + fraction * fraction) + 0.5);
 
         // same again for F2
         // F2 is 20.3us / 14 bit periods after F1
-        unsigned f2_clock = f1_clock + (87 * 14);
-        unsigned f2_sample = f2_clock / 25;
+        uint32_t f2_clock = f1_clock + (87 * 14);
+        uint32_t f2_sample = f2_clock / 25;
         assert(f2_sample < mlen + mag->overlap);
 
         if (!(m[f2_sample-1] < m[f2_sample+0]))
@@ -644,27 +650,27 @@ void demodulate2400AC(struct mag_buf *mag)
         if (m[f2_sample+2] > m[f2_sample+0] || m[f2_sample+2] > m[f2_sample+1])
             continue;      // quiet part of bit wasn't sufficiently quiet
 
-        unsigned f2_level = (m[f2_sample+0] + m[f2_sample+1]) / 2;
+        uint32_t f2_level = (m[f2_sample+0] + m[f2_sample+1]) / 2;
 
         if (noise_level * 2 > f2_level) {
             // require 6dB above noise
             continue;
         }
 
-        unsigned f1f2_level = (f1_level > f2_level ? f1_level : f2_level);
+        uint32_t f1f2_level = (f1_level > f2_level ? f1_level : f2_level);
 
         float midpoint = sqrtf(noise_level * f1f2_level); // geometric mean of the two levels
-        unsigned signal_threshold = (unsigned) (midpoint * M_SQRT2 + 0.5); // +3dB
-        unsigned noise_threshold = (unsigned) (midpoint / M_SQRT2 + 0.5);  // -3dB
+        uint32_t signal_threshold = (uint32_t) (midpoint * M_SQRT2 + 0.5); // +3dB
+        uint32_t noise_threshold = (uint32_t) (midpoint / M_SQRT2 + 0.5);  // -3dB
 
         // Looks like a real signal. Demodulate all the bits.
-        unsigned uncertain_bits = 0;
-        unsigned noisy_bits = 0;
-        unsigned bits = 0;
-        unsigned bit;
-        unsigned clock;
+        uint32_t uncertain_bits = 0;
+        uint32_t noisy_bits = 0;
+        uint32_t bits = 0;
+        uint32_t bit;
+        uint32_t clock;
         for (bit = 0, clock = f1_clock; bit < 20; ++bit, clock += 87) {
-            unsigned sample = clock / 25;
+            uint32_t sample = clock / 25;
 
             bits <<= 1;
             noisy_bits <<= 1;
@@ -702,7 +708,7 @@ void demodulate2400AC(struct mag_buf *mag)
 
         // Convert to the form that we use elsewhere:
         //  00 A4 A2 A1  00 B4 B2 B1  SPI C4 C2 C1  00 D4 D2 D1
-        unsigned modeac =
+        uint32_t modeac =
             ((bits & 0x40000) ? 0x0010 : 0) |  // C1
             ((bits & 0x20000) ? 0x1000 : 0) |  // A1
             ((bits & 0x10000) ? 0x0020 : 0) |  // C2
@@ -732,8 +738,8 @@ void demodulate2400AC(struct mag_buf *mag)
 
         decodeModeAMessage(&mm, modeac);
 
-        // Pass data to the next layer
-        useModesMessage(&mm);
+        // Pass data to the next layer via dispatcher queue
+        dispatcher_push_adsb(demod_adsb_queue, &mm);
 
         f1_sample += (20*87 / 25);
         Modes.stats_current.demod_modeac++;

@@ -22,7 +22,11 @@
 #include <sys/stat.h>
 
 #include "dump1090.h"
+#include "dispatcher.h"
+#include "msg_queue.h"
 #include "ogntp_decode.h"
+#include "adsl_decode.h"
+#include "p3i_demod.h"
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
@@ -32,7 +36,7 @@
 
 flarm_reader_config_t FlarmConfig;
 
-// Thread-safe message queue: decoded FLARM messages to be consumed by main thread
+// Thread-safe message queues: decoded messages consumed by main thread
 #define FLARM_MSG_QUEUE_SIZE 64
 
 static struct {
@@ -44,19 +48,19 @@ static struct {
 #endif
 
     struct flarm_state *demod;
+    struct p3i_demod_state *p3i_demod;   // P3I demodulator (NULL if disabled)
 
-    // Lock-free SPSC queue (single producer = demod callback, single consumer = main thread)
-    flarm_message_t  msg_queue[FLARM_MSG_QUEUE_SIZE];
-    volatile unsigned msg_queue_head;   // written by producer
-    volatile unsigned msg_queue_tail;   // written by consumer
-
-    // OGNTP message queue (same lock-free SPSC pattern)
-    ogntp_message_t  ogntp_queue[FLARM_MSG_QUEUE_SIZE];
-    volatile unsigned ogntp_queue_head;
-    volatile unsigned ogntp_queue_tail;
+    // Thread-safe queues (C++ mutex-based, C-opaque handles)
+    msg_queue_t      msg_queue;
+    msg_queue_t      ogntp_queue;
+    msg_queue_t      p3i_queue;
+    msg_queue_t      adsl_queue;
 
     volatile int     stop_flag;
 } Flarm;
+
+// Dispatcher aircraft queue for FLARM/OGNTP/P3I/ADS-L (registered at init)
+static aircraft_queue_handle_t flarm_aircraft_queue = NULL;
 
 // ======================== Config defaults ========================
 
@@ -66,6 +70,7 @@ void flarmReaderInitConfig(void)
     FlarmConfig.enabled = 0;
     FlarmConfig.gain = 0;  // auto
     FlarmConfig.ppm_error = 0;
+    FlarmConfig.ifile_once = 0;
     strncpy(FlarmConfig.ogn_server, "aprs.glidernet.org", sizeof(FlarmConfig.ogn_server) - 1);
     FlarmConfig.ogn_port = 14580;
 
@@ -77,54 +82,85 @@ void flarmReaderInitConfig(void)
 static void flarm_enqueue_message(const flarm_message_t *msg, void *ctx)
 {
     (void)ctx;
-    unsigned next_head = (Flarm.msg_queue_head + 1) % FLARM_MSG_QUEUE_SIZE;
-    if (next_head == Flarm.msg_queue_tail) {
-        // Queue full, drop oldest
-        return;
-    }
-    Flarm.msg_queue[Flarm.msg_queue_head] = *msg;
-    __sync_synchronize();  // memory barrier
-    Flarm.msg_queue_head = next_head;
+    msg_queue_push(Flarm.msg_queue, msg);
 }
 
 static bool flarm_dequeue_message(flarm_message_t *msg)
 {
-    if (Flarm.msg_queue_tail == Flarm.msg_queue_head) {
-        return false;  // empty
-    }
-    *msg = Flarm.msg_queue[Flarm.msg_queue_tail];
-    __sync_synchronize();
-    Flarm.msg_queue_tail = (Flarm.msg_queue_tail + 1) % FLARM_MSG_QUEUE_SIZE;
-    return true;
+    return msg_queue_pop(Flarm.msg_queue, msg) != 0;
 }
 
 static void ogntp_enqueue_message(const ogntp_message_t *msg, void *ctx)
 {
     (void)ctx;
-    unsigned next_head = (Flarm.ogntp_queue_head + 1) % FLARM_MSG_QUEUE_SIZE;
-    if (next_head == Flarm.ogntp_queue_tail) {
-        return; // queue full, drop
-    }
-    Flarm.ogntp_queue[Flarm.ogntp_queue_head] = *msg;
-    __sync_synchronize();
-    Flarm.ogntp_queue_head = next_head;
+    msg_queue_push(Flarm.ogntp_queue, msg);
 }
 
 static bool ogntp_dequeue_message(ogntp_message_t *msg)
 {
-    if (Flarm.ogntp_queue_tail == Flarm.ogntp_queue_head) {
-        return false;
+    return msg_queue_pop(Flarm.ogntp_queue, msg) != 0;
+}
+
+static void p3i_enqueue_message(const p3i_message_t *msg, void *ctx)
+{
+    (void)ctx;
+    msg_queue_push(Flarm.p3i_queue, msg);
+}
+
+static bool p3i_dequeue_message(p3i_message_t *msg)
+{
+    return msg_queue_pop(Flarm.p3i_queue, msg) != 0;
+}
+
+static void adsl_enqueue_message(const adsl_message_t *msg, void *ctx)
+{
+    (void)ctx;
+    msg_queue_push(Flarm.adsl_queue, msg);
+}
+
+static bool adsl_dequeue_message(adsl_message_t *msg)
+{
+    return msg_queue_pop(Flarm.adsl_queue, msg) != 0;
+}
+
+static void ogntp_log_status(const ogntp_message_t *msg)
+{
+    char line[256];
+    int len = snprintf(line, sizeof(line),
+                       "OGNTP v%d %d:%06X status relay=%d time=%02ds hw=%02X fw=%02X sats=%d fix=%d V=%.2f Tx=%ddBm",
+                       msg->version,
+                       msg->addr_type,
+                       (uint32_t)(msg->addr & 0xFFFFFF),
+                       msg->relay,
+                       msg->status.time_seconds,
+                       (uint32_t)(msg->status.hardware & 0xFF),
+                       (uint32_t)(msg->status.firmware & 0xFF),
+                       msg->status.satellites,
+                       msg->status.fix_quality,
+                       msg->status.voltage_v,
+                       msg->status.tx_power_dbm);
+
+    if (msg->status.has_pressure && len > 0 && len < (int)sizeof(line)) {
+        len += snprintf(line + len, sizeof(line) - (size_t)len,
+                        " P=%.1fhPa", msg->status.pressure_hpa);
     }
-    *msg = Flarm.ogntp_queue[Flarm.ogntp_queue_tail];
-    __sync_synchronize();
-    Flarm.ogntp_queue_tail = (Flarm.ogntp_queue_tail + 1) % FLARM_MSG_QUEUE_SIZE;
-    return true;
+    if (msg->status.has_temperature && len > 0 && len < (int)sizeof(line)) {
+        len += snprintf(line + len, sizeof(line) - (size_t)len,
+                        " T=%.1fC", msg->status.temperature_c);
+    }
+    if (msg->status.has_humidity && len > 0 && len < (int)sizeof(line)) {
+        len += snprintf(line + len, sizeof(line) - (size_t)len,
+                        " H=%.1f%%", msg->status.humidity_percent);
+    }
+
+    fprintf(stderr, "%s\n", line);
+    panelLog("%s", line);
 }
 
 // ======================== RTL-SDR callback ========================
 
 #ifdef ENABLE_RTLSDR
-static void flarm_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
+static void flarm_rtlsdr_callback(uint8_t *buf, uint32_t len, void *ctx)
 {
     (void)ctx;
 
@@ -136,6 +172,9 @@ static void flarm_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
     if (Flarm.demod && len > 0) {
         flarm_demod_process(Flarm.demod, buf, len);
     }
+    if (Flarm.p3i_demod && len > 0) {
+        p3i_demod_process(Flarm.p3i_demod, buf, len);
+    }
 }
 #endif
 
@@ -143,14 +182,14 @@ static void flarm_rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 
 // Read raw IQ file in a loop, feeding samples to the demodulator at real-time rate.
 // File format: uint8 I/Q pairs at FLARM_SAMPLE_RATE (1.6 MSPS).
-// The file is replayed continuously until stop_flag is set.
+// The file is replayed continuously until stop_flag is set, unless single-pass mode is requested.
 
 static void *flarm_ifile_reader_thread(void *arg)
 {
     (void)arg;
 
     const char *path = FlarmConfig.ifile_path;
-    const unsigned buf_size = MODES_RTL_BUF_SIZE; // 256 KB
+    const uint32_t buf_size = MODES_RTL_BUF_SIZE; // 256 KB
     uint8_t *buf = malloc(buf_size);
     if (!buf) {
         fprintf(stderr, "flarm-ifile: failed to allocate read buffer\n");
@@ -159,7 +198,7 @@ static void *flarm_ifile_reader_thread(void *arg)
 
     fprintf(stderr, "flarm-ifile: reader thread started, file=%s\n", path);
 
-    unsigned loop_count = 0;
+    uint32_t loop_count = 0;
 
     while (!Flarm.stop_flag && !Modes.exit) {
         FILE *fp = fopen(path, "rb");
@@ -176,7 +215,10 @@ static void *flarm_ifile_reader_thread(void *arg)
         while (!Flarm.stop_flag && !Modes.exit) {
             size_t nread = fread(buf, 1, buf_size, fp);
             if (nread == 0) {
-                // EOF — loop back
+                if (FlarmConfig.ifile_once) {
+                    fprintf(stderr, "flarm-ifile: reached EOF after one pass, requesting shutdown\n");
+                    Modes.exit = 1;
+                }
                 break;
             }
 
@@ -184,7 +226,10 @@ static void *flarm_ifile_reader_thread(void *arg)
             nread &= ~(size_t)1;
 
             if (Flarm.demod && nread > 0) {
-                flarm_demod_process(Flarm.demod, buf, (unsigned)nread);
+                flarm_demod_process(Flarm.demod, buf, (uint32_t)nread);
+            }
+            if (Flarm.p3i_demod && nread > 0) {
+                p3i_demod_process(Flarm.p3i_demod, buf, (uint32_t)nread);
             }
 
             // Throttle to real-time pace
@@ -257,6 +302,10 @@ bool flarmReaderOpen(void)
 
     // ---- IQ file mode (--flarm-ifile) ----
     if (FlarmConfig.ifile_path[0] != '\0') {
+        // Determine SDR parameters based on P3I enable
+        uint32_t sample_rate = FlarmConfig.p3i_enabled ? FLARM_SAMPLE_RATE_P3I : FLARM_SAMPLE_RATE;
+        uint32_t center_freq = FlarmConfig.p3i_enabled ? FLARM_CENTER_FREQ_P3I : FLARM_CENTER_FREQ;
+
         // Verify file exists and is readable
         FILE *fp = fopen(FlarmConfig.ifile_path, "rb");
         if (!fp) {
@@ -269,20 +318,26 @@ bool flarmReaderOpen(void)
         long file_size = ftell(fp);
         fclose(fp);
 
-        double duration = (file_size / 2.0) / FLARM_SAMPLE_RATE;
+        double duration = (file_size / 2.0) / sample_rate;
         fprintf(stderr, "flarm-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
-                FlarmConfig.ifile_path, file_size, duration, FLARM_SAMPLE_RATE / 1e6);
+                FlarmConfig.ifile_path, file_size, duration, sample_rate / 1e6);
 
         // Create demodulator
         flarm_demod_config_t demod_config = {
             .ref_lat      = Modes.fUserLat,
             .ref_lon      = Modes.fUserLon,
             .ref_alt_geoid = 0,
-            .center_freq  = FLARM_CENTER_FREQ,
+            .center_freq  = center_freq,
+            .sample_rate  = sample_rate,
             .callback     = flarm_enqueue_message,
             .callback_ctx = NULL,
             .ogntp_callback     = ogntp_enqueue_message,
-            .ogntp_callback_ctx = NULL
+            .ogntp_callback_ctx = NULL,
+            .p3i_callback       = NULL,
+            .p3i_callback_ctx   = NULL,
+            .p3i_enabled        = 0,
+            .adsl_callback      = adsl_enqueue_message,
+            .adsl_callback_ctx  = NULL
         };
 
         Flarm.demod = flarm_demod_create(&demod_config);
@@ -299,7 +354,22 @@ bool flarmReaderOpen(void)
             fprintf(stderr, "flarm-ifile: using file mtime %u for decryption\n", file_time);
         }
 
-        fprintf(stderr, "flarm-ifile: initialized (will replay in loop)\n");
+        // Create P3I demodulator if enabled
+        if (FlarmConfig.p3i_enabled) {
+            p3i_demod_config_t p3i_cfg = {
+                .sample_rate  = sample_rate,
+                .center_freq  = center_freq,
+                .callback     = p3i_enqueue_message,
+                .callback_ctx = NULL
+            };
+            Flarm.p3i_demod = p3i_demod_create(&p3i_cfg);
+            if (Flarm.p3i_demod) {
+                fprintf(stderr, "flarm-ifile: P3I decoder enabled (869.525 MHz)\n");
+            }
+        }
+
+        fprintf(stderr, "flarm-ifile: initialized (%s)\n",
+            FlarmConfig.ifile_once ? "single-pass replay" : "will replay in loop");
         return true;
     }
 
@@ -333,10 +403,14 @@ bool flarmReaderOpen(void)
         return false;
     }
 
+    // Determine SDR parameters based on P3I enable
+    uint32_t sample_rate = FlarmConfig.p3i_enabled ? FLARM_SAMPLE_RATE_P3I : FLARM_SAMPLE_RATE;
+    uint32_t center_freq = FlarmConfig.p3i_enabled ? FLARM_CENTER_FREQ_P3I : FLARM_CENTER_FREQ;
+
     // Configure for FLARM reception
     rtlsdr_set_freq_correction(Flarm.dev, FlarmConfig.ppm_error);
-    rtlsdr_set_center_freq(Flarm.dev, FLARM_CENTER_FREQ);
-    rtlsdr_set_sample_rate(Flarm.dev, FLARM_SAMPLE_RATE);
+    rtlsdr_set_center_freq(Flarm.dev, center_freq);
+    rtlsdr_set_sample_rate(Flarm.dev, sample_rate);
 
     if (FlarmConfig.gain == 0) {
         // Auto gain
@@ -355,10 +429,17 @@ bool flarmReaderOpen(void)
         .ref_lat      = Modes.fUserLat,
         .ref_lon      = Modes.fUserLon,
         .ref_alt_geoid = 0,
+        .center_freq  = center_freq,
+        .sample_rate  = sample_rate,
         .callback     = flarm_enqueue_message,
         .callback_ctx = NULL,
         .ogntp_callback     = ogntp_enqueue_message,
-        .ogntp_callback_ctx = NULL
+        .ogntp_callback_ctx = NULL,
+        .p3i_callback       = NULL,
+        .p3i_callback_ctx   = NULL,
+        .p3i_enabled        = 0,
+        .adsl_callback      = adsl_enqueue_message,
+        .adsl_callback_ctx  = NULL
     };
 
     Flarm.demod = flarm_demod_create(&demod_config);
@@ -369,8 +450,23 @@ bool flarmReaderOpen(void)
         return false;
     }
 
-    fprintf(stderr, "flarm: initialized successfully (center freq: %.1f MHz, sample rate: %.1f MSPS)\n",
-            FLARM_CENTER_FREQ / 1e6, FLARM_SAMPLE_RATE / 1e6);
+    // Create P3I demodulator if enabled
+    if (FlarmConfig.p3i_enabled) {
+        p3i_demod_config_t p3i_cfg = {
+            .sample_rate  = sample_rate,
+            .center_freq  = center_freq,
+            .callback     = p3i_enqueue_message,
+            .callback_ctx = NULL
+        };
+        Flarm.p3i_demod = p3i_demod_create(&p3i_cfg);
+        if (Flarm.p3i_demod) {
+            fprintf(stderr, "flarm: P3I decoder enabled (869.525 MHz)\n");
+        }
+    }
+
+    fprintf(stderr, "flarm: initialized successfully (center freq: %.1f MHz, sample rate: %.1f MSPS%s)\n",
+            center_freq / 1e6, sample_rate / 1e6,
+            FlarmConfig.p3i_enabled ? ", P3I enabled" : "");
     return true;
 
 #else
@@ -384,6 +480,17 @@ bool flarmReaderOpen(void)
 void flarmReaderStart(void)
 {
     if (!FlarmConfig.enabled) return;
+
+    // Create thread-safe message queues
+    if (!Flarm.msg_queue) Flarm.msg_queue = msg_queue_create(sizeof(flarm_message_t), FLARM_MSG_QUEUE_SIZE);
+    if (!Flarm.ogntp_queue) Flarm.ogntp_queue = msg_queue_create(sizeof(ogntp_message_t), FLARM_MSG_QUEUE_SIZE);
+    if (!Flarm.p3i_queue) Flarm.p3i_queue = msg_queue_create(sizeof(p3i_message_t), FLARM_MSG_QUEUE_SIZE);
+    if (!Flarm.adsl_queue) Flarm.adsl_queue = msg_queue_create(sizeof(adsl_message_t), FLARM_MSG_QUEUE_SIZE);
+
+    // Register dispatcher queue for FLARM/OGNTP/P3I/ADS-L aircraft updates
+    if (!flarm_aircraft_queue) {
+        flarm_aircraft_queue = dispatcher_register_aircraft_queue("flarm");
+    }
 
     // IQ file mode
     if (FlarmConfig.ifile_path[0] != '\0') {
@@ -436,20 +543,40 @@ void flarmReaderClose(void)
         // Print final stats
         flarm_demod_stats_t stats;
         flarm_demod_get_stats(Flarm.demod, &stats);
-        fprintf(stderr, "flarm: final stats: samples=%llu detected=%llu crc_ok=%llu decoded=%llu failed=%llu\n",
-                (unsigned long long)stats.samples_processed,
-                (unsigned long long)stats.packets_detected,
-                (unsigned long long)stats.packets_crc_ok,
-                (unsigned long long)stats.packets_decoded,
-                (unsigned long long)stats.packets_failed);
-        fprintf(stderr, "flarm: OGNTP stats: detected=%llu ldpc_ok=%llu decoded=%llu failed=%llu\n",
-                (unsigned long long)stats.ogntp_packets_detected,
-                (unsigned long long)stats.ogntp_packets_ldpc_ok,
-                (unsigned long long)stats.ogntp_packets_decoded,
-                (unsigned long long)stats.ogntp_packets_failed);
+        fprintf(stderr, "flarm: final stats: samples=%" PRIu64 " detected=%" PRIu64 " crc_ok=%" PRIu64 " decoded=%" PRIu64 " failed=%" PRIu64 " type1=%" PRIu64 " type3=%" PRIu64 " type4=%" PRIu64 "\n",
+                (uint64_t)stats.samples_processed,
+                (uint64_t)stats.packets_detected,
+                (uint64_t)stats.packets_crc_ok,
+                (uint64_t)stats.packets_decoded,
+                (uint64_t)stats.packets_failed,
+                (uint64_t)stats.packets_type1,
+                (uint64_t)stats.packets_type3,
+                (uint64_t)stats.packets_type4);
+        fprintf(stderr, "flarm: OGNTP stats: detected=%" PRIu64 " ldpc_ok=%" PRIu64 " decoded=%" PRIu64 " failed=%" PRIu64 "\n",
+                (uint64_t)stats.ogntp_packets_detected,
+                (uint64_t)stats.ogntp_packets_ldpc_ok,
+                (uint64_t)stats.ogntp_packets_decoded,
+                (uint64_t)stats.ogntp_packets_failed);
+        fprintf(stderr, "flarm: ADS-L stats: detected=%" PRIu64 " crc_ok=%" PRIu64 " decoded=%" PRIu64 " failed=%" PRIu64 "\n",
+                (uint64_t)stats.adsl_packets_detected,
+                (uint64_t)stats.adsl_packets_crc_ok,
+                (uint64_t)stats.adsl_packets_decoded,
+                (uint64_t)stats.adsl_packets_failed);
 
         flarm_demod_destroy(Flarm.demod);
         Flarm.demod = NULL;
+    }
+
+    if (Flarm.p3i_demod) {
+        p3i_demod_stats_t p3i_stats;
+        p3i_demod_get_stats(Flarm.p3i_demod, &p3i_stats);
+        fprintf(stderr, "flarm: P3I stats: samples=%" PRIu64 " sync=%" PRIu64 " decoded=%" PRIu64 " failed=%" PRIu64 "\n",
+                (uint64_t)p3i_stats.samples_processed,
+                (uint64_t)p3i_stats.sync_detected,
+                (uint64_t)p3i_stats.packets_decoded,
+                (uint64_t)p3i_stats.packets_failed);
+        p3i_demod_destroy(Flarm.p3i_demod);
+        Flarm.p3i_demod = NULL;
     }
 
 #ifdef ENABLE_RTLSDR
@@ -458,317 +585,121 @@ void flarmReaderClose(void)
         Flarm.dev = NULL;
     }
 #endif
+
+    // Destroy message queues
+    if (Flarm.msg_queue) { msg_queue_destroy(Flarm.msg_queue); Flarm.msg_queue = NULL; }
+    if (Flarm.ogntp_queue) { msg_queue_destroy(Flarm.ogntp_queue); Flarm.ogntp_queue = NULL; }
+    if (Flarm.p3i_queue) { msg_queue_destroy(Flarm.p3i_queue); Flarm.p3i_queue = NULL; }
+    if (Flarm.adsl_queue) { msg_queue_destroy(Flarm.adsl_queue); Flarm.adsl_queue = NULL; }
 }
 
 // ======================== Synthetic Mode S message generation =================
 
-// CPR NL function (number of longitude zones for a given latitude)
-static int flarm_cprNL(double lat)
+// Map FLARM/OGN aircraft type to ADS-B emitter category (DO-260B)
+static uint32_t flarm_to_adsb_category(uint8_t aircraft_type)
 {
-    if (lat < 0) lat = -lat;
-    if (lat < 10.47047130)  return 59;
-    if (lat < 14.82817437)  return 58;
-    if (lat < 18.18626357)  return 57;
-    if (lat < 21.02939493)  return 56;
-    if (lat < 23.54504487)  return 55;
-    if (lat < 25.82924707)  return 54;
-    if (lat < 27.93898710)  return 53;
-    if (lat < 29.91135686)  return 52;
-    if (lat < 31.77209708)  return 51;
-    if (lat < 33.53993436)  return 50;
-    if (lat < 35.22899598)  return 49;
-    if (lat < 36.85025108)  return 48;
-    if (lat < 38.41241892)  return 47;
-    if (lat < 39.92256684)  return 46;
-    if (lat < 41.38651832)  return 45;
-    if (lat < 42.80914012)  return 44;
-    if (lat < 44.19454951)  return 43;
-    if (lat < 45.54626723)  return 42;
-    if (lat < 46.86733252)  return 41;
-    if (lat < 48.16039128)  return 40;
-    if (lat < 49.42776439)  return 39;
-    if (lat < 50.67150166)  return 38;
-    if (lat < 51.89342469)  return 37;
-    if (lat < 53.09516153)  return 36;
-    if (lat < 54.27817472)  return 35;
-    if (lat < 55.44378444)  return 34;
-    if (lat < 56.59318756)  return 33;
-    if (lat < 57.72747354)  return 32;
-    if (lat < 58.84763776)  return 31;
-    if (lat < 59.95459277)  return 30;
-    if (lat < 61.04917774)  return 29;
-    if (lat < 62.13216659)  return 28;
-    if (lat < 63.20427479)  return 27;
-    if (lat < 64.26616523)  return 26;
-    if (lat < 65.31845310)  return 25;
-    if (lat < 66.36171008)  return 24;
-    if (lat < 67.39646774)  return 23;
-    if (lat < 68.42322022)  return 22;
-    if (lat < 69.44242631)  return 21;
-    if (lat < 70.45451075)  return 20;
-    if (lat < 71.45986473)  return 19;
-    if (lat < 72.45884545)  return 18;
-    if (lat < 73.45177442)  return 17;
-    if (lat < 74.43893416)  return 16;
-    if (lat < 75.42056257)  return 15;
-    if (lat < 76.39684391)  return 14;
-    if (lat < 77.36789461)  return 13;
-    if (lat < 78.33374083)  return 12;
-    if (lat < 79.29428225)  return 11;
-    if (lat < 80.24923213)  return 10;
-    if (lat < 81.19801349)  return 9;
-    if (lat < 82.13956981)  return 8;
-    if (lat < 83.07199445)  return 7;
-    if (lat < 83.99173563)  return 6;
-    if (lat < 84.89166191)  return 5;
-    if (lat < 85.75541621)  return 4;
-    if (lat < 86.53536998)  return 3;
-    if (lat < 87.00000000)  return 2;
-    return 1;
-}
-
-// Positive fmod
-static double cprMod(double a, double b)
-{
-    double res = fmod(a, b);
-    if (res < 0) res += b;
-    return res;
-}
-
-// Encode latitude/longitude into 17-bit CPR format
-static void flarm_cpr_encode(double lat, double lon, int fflag,
-                              unsigned *cpr_lat, unsigned *cpr_lon)
-{
-    double Dlat = fflag ? (360.0 / 59.0) : (360.0 / 60.0);
-
-    double yz = floor(131072.0 * cprMod(lat, Dlat) / Dlat + 0.5);
-    *cpr_lat = ((unsigned)yz) & 0x1FFFF;
-
-    int nl = flarm_cprNL(lat) - fflag;
-    if (nl < 1) nl = 1;
-    double Dlon = 360.0 / nl;
-
-    double xz = floor(131072.0 * cprMod(lon, Dlon) / Dlon + 0.5);
-    *cpr_lon = ((unsigned)xz) & 0x1FFFF;
-}
-
-// Encode altitude in feet to AC12 field (25ft resolution, Q-bit encoding)
-static unsigned flarm_encode_ac12(int alt_ft)
-{
-    int n = (alt_ft + 1000) / 25;
-    if (n < 0) n = 0;
-    if (n > 0x7FF) n = 0x7FF;
-    // Re-insert Q bit at position 4
-    return ((n & 0x7F0) << 1) | 0x10 | (n & 0x0F);
-}
-
-// ADS-B char → 6-bit AIS index
-static unsigned char flarm_ais_encode(char c)
-{
-    // AIS charset: @ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !"#$%&'()*+,-./0123456789:;<=>?
-    if (c >= 'A' && c <= 'Z') return (unsigned char)(c - 'A' + 1);
-    if (c >= '0' && c <= '9') return (unsigned char)(c - '0' + 48);
-    if (c == ' ') return 32;
-    if (c == '@') return 0;
-    return 32; // space for unknown
-}
-
-// Compute Mode S CRC-24 and set the PI field for DF18.
-// For DF17/18, the PI field should make modesChecksum(msg, 112) == 0.
-static void flarm_set_crc(unsigned char *msg, int bytes)
-{
-    // Set last 3 bytes (PI field) to 0 for CRC calculation
-    msg[bytes - 3] = 0;
-    msg[bytes - 2] = 0;
-    msg[bytes - 1] = 0;
-
-    // modesChecksum with PI=0 gives us: CRC(first 11 bytes) XOR 0 = raw CRC
-    uint32_t crc = modesChecksum(msg, bytes * 8);
-
-    // Set PI = raw CRC so that modesChecksum(msg, 112) = rawCRC XOR PI = 0
-    msg[bytes - 3] = (crc >> 16) & 0xFF;
-    msg[bytes - 2] = (crc >> 8) & 0xFF;
-    msg[bytes - 1] = crc & 0xFF;
-}
-
-// Build a DF18 CF=5 (Fine TIS-B, non-ICAO) identity & category message
-static void flarm_build_ident_msg(unsigned char *msg, uint32_t addr,
-                                   const char *callsign, unsigned category)
-{
-    memset(msg, 0, 14);
-
-    // DF=18 (5 bits), CF=5 (3 bits) → byte 0 = (18 << 3) | 5 = 0x95
-    msg[0] = 0x95;
-
-    // AA field (24-bit address)
-    msg[1] = (addr >> 16) & 0xFF;
-    msg[2] = (addr >> 8) & 0xFF;
-    msg[3] = addr & 0xFF;
-
-    // ME field (7 bytes, bytes 4-10)
-    // metype from category: metype = 0x0E - (category >> 4)
-    unsigned metype = 0x0E - (category >> 4);
-    if (metype < 1) metype = 1;
-    if (metype > 4) metype = 4;
-    unsigned mesub = category & 0x0F;
-
-    // ME bits 1-5: metype, bits 6-8: mesub
-    msg[4] = (metype << 3) | (mesub & 0x07);
-
-    // ME bits 9-56: 8 chars × 6 bits each
-    // Callsign chars packed into bytes 5-10
-    char cs[9];
-    memset(cs, ' ', 8);
-    cs[8] = 0;
-    memcpy(cs, callsign, strlen(callsign) < 8 ? strlen(callsign) : 8);
-
-    unsigned char ais[8];
-    for (int i = 0; i < 8; i++)
-        ais[i] = flarm_ais_encode(cs[i]);
-
-    // Pack 8 × 6-bit values into 48 bits (6 bytes), starting at bit 9 of ME
-    // Byte 5: bits 9-16 → ais[0](6) + ais[1] high 2
-    msg[5] = (ais[0] << 2) | (ais[1] >> 4);
-    // Byte 6: bits 17-24 → ais[1] low 4 + ais[2] high 4
-    msg[6] = ((ais[1] & 0x0F) << 4) | (ais[2] >> 2);
-    // Byte 7: bits 25-32 → ais[2] low 2 + ais[3](6)
-    msg[7] = ((ais[2] & 0x03) << 6) | ais[3];
-    // Byte 8: bits 33-40 → ais[4](6) + ais[5] high 2
-    msg[8] = (ais[4] << 2) | (ais[5] >> 4);
-    // Byte 9: bits 41-48 → ais[5] low 4 + ais[6] high 4
-    msg[9] = ((ais[5] & 0x0F) << 4) | (ais[6] >> 2);
-    // Byte 10: bits 49-56 → ais[6] low 2 + ais[7](6)
-    msg[10] = ((ais[6] & 0x03) << 6) | ais[7];
-
-    flarm_set_crc(msg, 14);
-}
-
-// Build a DF18 CF=5 airborne position message (metype=11)
-static void flarm_build_position_msg(unsigned char *msg, uint32_t addr,
-                                      double lat, double lon, int alt_ft,
-                                      int fflag)
-{
-    memset(msg, 0, 14);
-
-    msg[0] = 0x95;  // DF=18, CF=5
-    msg[1] = (addr >> 16) & 0xFF;
-    msg[2] = (addr >> 8) & 0xFF;
-    msg[3] = addr & 0xFF;
-
-    // ME field
-    // metype=11 (airborne position, barometric altitude)
-    unsigned metype = 11;
-    unsigned ac12 = flarm_encode_ac12(alt_ft);
-
-    unsigned cpr_lat, cpr_lon;
-    flarm_cpr_encode(lat, lon, fflag, &cpr_lat, &cpr_lon);
-
-    // ME byte 4 (bits 1-8): metype(5) + SS(2) + NIC-B(1)
-    msg[4] = (metype << 3);  // SS=0, NIC-B=0
-
-    // ME byte 5 (bits 9-16): AC12 high 8 bits
-    msg[5] = (ac12 >> 4) & 0xFF;
-
-    // ME byte 6 (bits 17-24): AC12 low 4 + T(1) + F(1) + CPR_LAT high 2
-    msg[6] = ((ac12 & 0x0F) << 4) | (0 << 3) | (fflag << 2) | ((cpr_lat >> 15) & 0x03);
-
-    // ME byte 7 (bits 25-32): CPR_LAT bits 14-7
-    msg[7] = (cpr_lat >> 7) & 0xFF;
-
-    // ME byte 8 (bits 33-40): CPR_LAT low 7 + CPR_LON bit 16
-    msg[8] = ((cpr_lat & 0x7F) << 1) | ((cpr_lon >> 16) & 0x01);
-
-    // ME byte 9 (bits 41-48): CPR_LON bits 15-8
-    msg[9] = (cpr_lon >> 8) & 0xFF;
-
-    // ME byte 10 (bits 49-56): CPR_LON low 8
-    msg[10] = cpr_lon & 0xFF;
-
-    flarm_set_crc(msg, 14);
-}
-
-// Build a DF18 CF=5 airborne velocity message (metype=19, subtype=1)
-static void flarm_build_velocity_msg(unsigned char *msg, uint32_t addr,
-                                      float gs_kts, float track_deg,
-                                      int vrate_fpm)
-{
-    memset(msg, 0, 14);
-
-    msg[0] = 0x95;  // DF=18, CF=5
-    msg[1] = (addr >> 16) & 0xFF;
-    msg[2] = (addr >> 8) & 0xFF;
-    msg[3] = addr & 0xFF;
-
-    // ME field: metype=19, subtype=1 (ground speed, subsonic)
-    unsigned metype = 19;
-    unsigned subtype = 1;
-
-    // Decompose ground speed into E/W and N/S components
-    double track_rad = track_deg * M_PI / 180.0;
-    double ew_vel = gs_kts * sin(track_rad);
-    double ns_vel = gs_kts * cos(track_rad);
-
-    unsigned ew_sign = (ew_vel < 0) ? 1 : 0;
-    unsigned ew_raw = (unsigned)(fabs(ew_vel) + 0.5) + 1;
-    if (ew_raw > 1023) ew_raw = 1023;
-
-    unsigned ns_sign = (ns_vel < 0) ? 1 : 0;
-    unsigned ns_raw = (unsigned)(fabs(ns_vel) + 0.5) + 1;
-    if (ns_raw > 1023) ns_raw = 1023;
-
-    // Vertical rate encoding
-    unsigned vr_source = 0;  // 0 = geometric
-    unsigned vr_sign = (vrate_fpm < 0) ? 1 : 0;
-    unsigned vr_raw = (unsigned)(abs(vrate_fpm) / 64) + 1;
-    if (vr_raw > 511) vr_raw = 511;
-
-    // Pack ME bytes 4-10
-    // Byte 4 (ME bits 1-8): metype(5) + subtype(3)
-    msg[4] = (metype << 3) | (subtype & 0x07);
-
-    // Byte 5 (ME bits 9-16): IC(1) + resv(1) + NACv(3) + ew_sign(1) + ew_raw high 2
-    // IC=0, resv=0, NACv=0
-    msg[5] = (ew_sign << 2) | ((ew_raw >> 8) & 0x03);
-
-    // Byte 6 (ME bits 17-24): ew_raw low 8
-    msg[6] = ew_raw & 0xFF;
-
-    // Byte 7 (ME bits 25-32): ns_sign(1) + ns_raw(10) → ns_sign(1) + ns_raw high 7
-    msg[7] = (ns_sign << 7) | ((ns_raw >> 3) & 0x7F);
-
-    // Byte 8 (ME bits 33-40): ns_raw low 3 + vr_source(1) + vr_sign(1) + vr_raw high 3
-    msg[8] = ((ns_raw & 0x07) << 5) | (vr_source << 4) | (vr_sign << 3) | ((vr_raw >> 6) & 0x07);
-
-    // Byte 9 (ME bits 41-48): vr_raw low 6 + reserved(2)
-    msg[9] = ((vr_raw & 0x3F) << 2);
-
-    // Byte 10 (ME bits 49-56): delta_sign(1) + delta(7) = 0 (no baro/geom delta)
-    msg[10] = 0;
-
-    flarm_set_crc(msg, 14);
-}
-
-// Submit a synthetic modesMessage through the standard decode pipeline
-static void flarm_submit_synthetic(unsigned char *raw_msg, double signal_level)
-{
-    struct modesMessage mm;
-    memset(&mm, 0, sizeof(mm));
-
-    mm.timestampMsg = 12000000ULL * (mstime() / 1000);  // Approximate 12MHz timestamp
-    mm.sysTimestampMsg = mstime();
-    mm.signalLevel = signal_level;
-    mm.score = SR_NOT_SET;  // Let scoreModesMessage() score based on CRC
-    mm.remote = 0;
-
-    // Let the standard Mode S decoder process this message
-    // It will: decode DF18→extract fields, track aircraft, output to Beast/SBS/etc.
-    int result = decodeModesMessage(&mm, raw_msg);
-    if (result >= 0) {
-        useModesMessage(&mm);
+    switch (aircraft_type) {
+        case FLARM_ACFT_GLIDER:
+        case FLARM_ACFT_HANGGLIDER:
+        case FLARM_ACFT_PARAGLIDER:
+            return 0xB1;  // Glider/sailplane
+        case FLARM_ACFT_HELICOPTER:
+            return 0xA7;  // Rotorcraft
+        case FLARM_ACFT_BALLOON:
+        case FLARM_ACFT_ZEPPELIN:
+            return 0xB2;  // Lighter-than-air
+        case FLARM_ACFT_PARACHUTE:
+            return 0xB3;  // Parachutist/skydiver
+        case FLARM_ACFT_UAV:
+            return 0xB6;  // UAV
+        case FLARM_ACFT_POWERED:
+        case FLARM_ACFT_TOWPLANE:
+        case FLARM_ACFT_DROPPLANE:
+            return 0xA1;  // Light aircraft (<15500 lbs)
+        case FLARM_ACFT_JET:
+            return 0xA3;  // Large aircraft (75000-300000 lbs)
+        case FLARM_ACFT_STATIC:
+            return 0xB4;  // Ground obstruction
+        case FLARM_ACFT_RESERVED:
+            return 0xC1;  // Emergency/surface vehicle
+        default:
+            return 0xC0;  // No info
     }
 }
 
 // ======================== Periodic work (main thread) ========================
+
+// Push a decoded FLARM/OGNTP/P3I/ADS-L message as aircraft_update_t
+// through the dispatcher queue (bypasses synthetic DF18 generation).
+static void flarm_push_update(
+    uint32_t addr,
+    const char *callsign,
+    uint32_t category,
+    double lat, double lon,
+    int altitude_m,         // meters MSL (converted to feet internally)
+    float speed_ms,         // m/s ground speed
+    float course_deg,       // degrees track
+    float vs_ms,            // m/s vertical speed
+    double signal,
+    uint8_t acft_type,
+    uint8_t addr_type,
+    uint8_t proto_version,
+    decode_source_t source)
+{
+    if (!flarm_aircraft_queue) return;
+
+    aircraft_update_t upd;
+    memset(&upd, 0, sizeof(upd));
+
+    upd.addr = addr;
+    upd.timestamp_ms = mstime();
+    upd.signal_level = signal;
+    upd.source = source;
+
+    // Callsign
+    if (callsign && callsign[0]) {
+        strncpy(upd.callsign, callsign, sizeof(upd.callsign) - 1);
+        upd.callsign_valid = 1;
+    }
+
+    // Category
+    if (category > 0) {
+        upd.category = category;
+        upd.category_valid = 1;
+    }
+
+    // Position
+    if (lat != 0 && lon != 0) {
+        upd.lat = lat;
+        upd.lon = lon;
+        upd.position_valid = 1;
+    }
+
+    // Altitude (convert m → ft)
+    if (altitude_m != 0 || (lat != 0 && lon != 0)) {
+        upd.altitude_ft = (int)(altitude_m * 3.28084);
+        upd.altitude_valid = 1;
+        upd.altitude_is_baro = 0;  // FLARM uses geometric (GPS) altitude
+    }
+
+    // Velocity
+    if (speed_ms > 0.1f || fabsf(vs_ms) > 0.1f) {
+        upd.ground_speed_kt = speed_ms * 1.94384f;
+        upd.heading_deg = course_deg;
+        upd.vert_rate_fpm = (int)(vs_ms * 196.85f);
+        upd.velocity_valid = 1;
+    }
+
+    // Air/ground
+    upd.air_ground = DECODE_AG_AIRBORNE;
+
+    // FLARM metadata
+    upd.flarm_acft_type = acft_type;
+    upd.flarm_addr_type = addr_type;
+    upd.flarm_proto_version = proto_version;
+
+    dispatcher_push_aircraft(flarm_aircraft_queue, &upd);
+}
 
 // Convert decoded FLARM messages into synthetic DF18 TIS-B messages
 // and feed them through the standard Mode S pipeline (tracking + Beast output).
@@ -785,81 +716,32 @@ void flarmReaderPeriodicWork(void)
         // Submit to OGN APRS-IS feed
         ognClientSubmit(&msg);
 
-        // Use the raw FLARM address (24-bit) as the DF18 AA field
         uint32_t addr = msg.addr & 0xFFFFFF;
 
         double signal = msg.signal_level;
         if (signal <= 0) signal = 0.001;
         if (signal > 1.0) signal = 1.0;
 
-        // Map FLARM aircraft type to ADS-B category
-        unsigned category;
-        switch (msg.aircraft_type) {
-            case FLARM_ACFT_GLIDER:
-            case FLARM_ACFT_HANGGLIDER:
-            case FLARM_ACFT_PARAGLIDER:
-                category = 0xB1;  // Glider/sailplane
-                break;
-            case FLARM_ACFT_HELICOPTER:
-                category = 0xA7;  // Rotorcraft
-                break;
-            case FLARM_ACFT_BALLOON:
-            case FLARM_ACFT_ZEPPELIN:
-                category = 0xB2;  // Lighter-than-air
-                break;
-            case FLARM_ACFT_PARACHUTE:
-                category = 0xB3;  // Parachutist
-                break;
-            case FLARM_ACFT_UAV:
-                category = 0xB6;  // UAV
-                break;
-            case FLARM_ACFT_POWERED:
-            case FLARM_ACFT_TOWPLANE:
-            case FLARM_ACFT_DROPPLANE:
-                category = 0xA1;  // Light aircraft
-                break;
-            case FLARM_ACFT_JET:
-                category = 0xA3;  // Large aircraft
-                break;
-            default:
-                category = 0xC0;  // No info
-                break;
-        }
+        uint32_t category = flarm_to_adsb_category(msg.aircraft_type);
 
-        // Build callsign from FLARM address
         char callsign[9];
         snprintf(callsign, sizeof(callsign), "FLR%05X", addr & 0xFFFFF);
 
-        unsigned char raw[14];
-
-        // 1. Send identity & category message
-        flarm_build_ident_msg(raw, addr, callsign, category);
-        flarm_submit_synthetic(raw, signal);
-
-        // 2. Send airborne position messages (both even AND odd for CPR resolution)
-        if (msg.latitude != 0 && msg.longitude != 0) {
-            int alt_ft = (int)(msg.altitude * 3.28084);
-            // Even frame
-            flarm_build_position_msg(raw, addr, msg.latitude, msg.longitude, alt_ft, 0);
-            flarm_submit_synthetic(raw, signal);
-            // Odd frame
-            flarm_build_position_msg(raw, addr, msg.latitude, msg.longitude, alt_ft, 1);
-            flarm_submit_synthetic(raw, signal);
-        }
-
-        // 3. Send velocity message
-        if (msg.speed > 0.1f || fabsf(msg.vs) > 0.1f) {
-            float gs_kts = msg.speed * 1.94384f;
-            int vrate_fpm = (int)(msg.vs * 196.85f);
-            flarm_build_velocity_msg(raw, addr, gs_kts, msg.course, vrate_fpm);
-            flarm_submit_synthetic(raw, signal);
-        }
+        flarm_push_update(addr, callsign, category,
+                          msg.latitude, msg.longitude, msg.altitude,
+                          msg.speed, msg.course, msg.vs,
+                          signal, msg.aircraft_type, msg.addr_type,
+                          msg.version, DECODE_SOURCE_FLARM);
     }
 
     // ---- Drain OGNTP queue ----
     ogntp_message_t omsg;
     while (ogntp_dequeue_message(&omsg)) {
         if (!omsg.valid) continue;
+        if (omsg.status_valid) {
+            ogntp_log_status(&omsg);
+        }
+        if (!omsg.position_valid) continue;
 
         uint32_t addr = omsg.addr & 0xFFFFFF;
 
@@ -867,58 +749,62 @@ void flarmReaderPeriodicWork(void)
         if (signal <= 0) signal = 0.001;
         if (signal > 1.0) signal = 1.0;
 
-        // Map OGN aircraft type to ADS-B category (same table as FLARM)
-        unsigned category;
-        switch (omsg.aircraft_type) {
-            case FLARM_ACFT_GLIDER:
-            case FLARM_ACFT_HANGGLIDER:
-            case FLARM_ACFT_PARAGLIDER:
-                category = 0xB1; break;
-            case FLARM_ACFT_HELICOPTER:
-                category = 0xA7; break;
-            case FLARM_ACFT_BALLOON:
-            case FLARM_ACFT_ZEPPELIN:
-                category = 0xB2; break;
-            case FLARM_ACFT_PARACHUTE:
-                category = 0xB3; break;
-            case FLARM_ACFT_UAV:
-                category = 0xB6; break;
-            case FLARM_ACFT_POWERED:
-            case FLARM_ACFT_TOWPLANE:
-            case FLARM_ACFT_DROPPLANE:
-                category = 0xA1; break;
-            case FLARM_ACFT_JET:
-                category = 0xA3; break;
-            default:
-                category = 0xC0; break;
-        }
+        uint32_t category = flarm_to_adsb_category(omsg.aircraft_type);
 
-        // OGN callsign: OGN prefix + lower 20 bits of address
         char callsign[9];
         snprintf(callsign, sizeof(callsign), "OGN%05X", addr & 0xFFFFF);
 
-        unsigned char raw[14];
+        flarm_push_update(addr, callsign, category,
+                          omsg.latitude, omsg.longitude, omsg.altitude,
+                          omsg.speed, omsg.course, omsg.vs,
+                          signal, omsg.aircraft_type, omsg.addr_type,
+                          omsg.version, DECODE_SOURCE_OGNTP);
+    }
 
-        // 1. Identity message
-        flarm_build_ident_msg(raw, addr, callsign, category);
-        flarm_submit_synthetic(raw, signal);
+    // ---- Drain P3I queue ----
+    p3i_message_t pmsg;
+    while (p3i_dequeue_message(&pmsg)) {
+        if (!pmsg.valid) continue;
 
-        // 2. Position messages (even and odd for CPR resolution)
-        if (omsg.latitude != 0 && omsg.longitude != 0) {
-            int alt_ft = (int)(omsg.altitude * 3.28084);
-            flarm_build_position_msg(raw, addr, omsg.latitude, omsg.longitude, alt_ft, 0);
-            flarm_submit_synthetic(raw, signal);
-            flarm_build_position_msg(raw, addr, omsg.latitude, omsg.longitude, alt_ft, 1);
-            flarm_submit_synthetic(raw, signal);
-        }
+        uint32_t addr = pmsg.addr & 0xFFFFFF;
 
-        // 3. Velocity message
-        if (omsg.speed > 0.1f || fabsf(omsg.vs) > 0.1f) {
-            float gs_kts = omsg.speed * 1.94384f;
-            int vrate_fpm = (int)(omsg.vs * 196.85f);
-            flarm_build_velocity_msg(raw, addr, gs_kts, omsg.course, vrate_fpm);
-            flarm_submit_synthetic(raw, signal);
-        }
+        double signal = pmsg.signal_level;
+        if (signal <= 0) signal = 0.001;
+        if (signal > 1.0) signal = 1.0;
+
+        uint32_t category = flarm_to_adsb_category(pmsg.aircraft_type);
+
+        char callsign[9];
+        snprintf(callsign, sizeof(callsign), "PAW%05X", addr & 0xFFFFF);
+
+        flarm_push_update(addr, callsign, category,
+                          pmsg.latitude, pmsg.longitude, pmsg.altitude,
+                          pmsg.speed, pmsg.course, 0,
+                          signal, pmsg.aircraft_type, 0,
+                          0, DECODE_SOURCE_P3I);
+    }
+
+    // ---- Drain ADS-L queue ----
+    adsl_message_t amsg;
+    while (adsl_dequeue_message(&amsg)) {
+        if (!amsg.valid) continue;
+
+        uint32_t addr = amsg.addr & 0xFFFFFF;
+
+        double signal = amsg.signal_level;
+        if (signal <= 0) signal = 0.001;
+        if (signal > 1.0) signal = 1.0;
+
+        uint32_t category = flarm_to_adsb_category(amsg.aircraft_type);
+
+        char callsign[9];
+        snprintf(callsign, sizeof(callsign), "ADL%05X", addr & 0xFFFFF);
+
+        flarm_push_update(addr, callsign, category,
+                          amsg.latitude, amsg.longitude, amsg.altitude,
+                          amsg.speed, amsg.course, amsg.vs,
+                          signal, amsg.aircraft_type, amsg.addr_type,
+                          0, DECODE_SOURCE_ADSL);
     }
 }
 
@@ -927,7 +813,7 @@ void flarmReaderPeriodicWork(void)
 // These allow FLARM reception to be managed by SdrManager instead of the
 // standalone Flarm.dev / Flarm.thread subsystem. The RTL-SDR device is
 // opened and the reader thread is managed by SdrManager; these ops only
-// handle the demodulator, SPSC queue, and message processing.
+// handle the demodulator, queue, and message processing.
 
 #include "sdr_receiver.h"
 #include "ogn_client.h"
@@ -936,28 +822,18 @@ void flarmReaderPeriodicWork(void)
 
 typedef struct {
     struct flarm_state *demod;
-    flarm_message_t     queue[FLARM_DEC_QUEUE_SIZE];
-    volatile unsigned   head;
-    volatile unsigned   tail;
+    msg_queue_t         queue;
 } flarm_decoder_state_t;
 
 static void flarm_dec_enqueue(const flarm_message_t *msg, void *ctx)
 {
     flarm_decoder_state_t *st = (flarm_decoder_state_t *)ctx;
-    unsigned next = (st->head + 1) % FLARM_DEC_QUEUE_SIZE;
-    if (next == st->tail) return;  // queue full, drop
-    st->queue[st->head] = *msg;
-    __sync_synchronize();
-    st->head = next;
+    msg_queue_push(st->queue, msg);
 }
 
 static bool flarm_dec_dequeue(flarm_decoder_state_t *st, flarm_message_t *out)
 {
-    if (st->tail == st->head) return false;
-    *out = st->queue[st->tail];
-    __sync_synchronize();
-    st->tail = (st->tail + 1) % FLARM_DEC_QUEUE_SIZE;
-    return true;
+    return msg_queue_pop(st->queue, out) != 0;
 }
 
 bool flarmDecoderInit(struct sdr_receiver *rx)
@@ -965,13 +841,19 @@ bool flarmDecoderInit(struct sdr_receiver *rx)
     flarm_decoder_state_t *st = calloc(1, sizeof(*st));
     if (!st) return false;
 
+    st->queue = msg_queue_create(sizeof(flarm_message_t), FLARM_DEC_QUEUE_SIZE);
+    if (!st->queue) { free(st); return false; }
+
     flarm_demod_config_t cfg = {
         .ref_lat      = Modes.fUserLat,
         .ref_lon      = Modes.fUserLon,
         .ref_alt_geoid = 0,
         .center_freq  = (uint32_t)rx->config.freq,
+        .sample_rate  = (uint32_t)rx->config.sample_rate,
         .callback     = flarm_dec_enqueue,
-        .callback_ctx = st
+        .callback_ctx = st,
+        .ogntp_callback     = NULL,    // OGNTP not supported via SdrManager yet
+        .ogntp_callback_ctx = NULL
     };
 
     st->demod = flarm_demod_create(&cfg);
@@ -995,6 +877,11 @@ bool flarmDecoderInit(struct sdr_receiver *rx)
     // Initialize OGN client if station is configured
     if (FlarmConfig.ogn_station[0]) {
         ognClientInit();
+    }
+
+    // Register dispatcher queue for FLARM aircraft updates
+    if (!flarm_aircraft_queue) {
+        flarm_aircraft_queue = dispatcher_register_aircraft_queue("flarm");
     }
 
     fprintf(stderr, "rx[%d]: FLARM decoder created (868 MHz GFSK)\n", rx->id);
@@ -1025,47 +912,16 @@ void flarmDecoderDrain(struct sdr_receiver *rx)
         if (signal <= 0) signal = 0.001;
         if (signal > 1.0) signal = 1.0;
 
-        // Map aircraft type to ADS-B category
-        unsigned category;
-        switch (msg.aircraft_type) {
-            case FLARM_ACFT_GLIDER: case FLARM_ACFT_HANGGLIDER: case FLARM_ACFT_PARAGLIDER:
-                category = 0xB1; break;
-            case FLARM_ACFT_HELICOPTER: category = 0xA7; break;
-            case FLARM_ACFT_BALLOON: case FLARM_ACFT_ZEPPELIN: category = 0xB2; break;
-            case FLARM_ACFT_PARACHUTE: category = 0xB3; break;
-            case FLARM_ACFT_UAV: category = 0xB6; break;
-            case FLARM_ACFT_POWERED: case FLARM_ACFT_TOWPLANE: case FLARM_ACFT_DROPPLANE:
-                category = 0xA1; break;
-            case FLARM_ACFT_JET: category = 0xA3; break;
-            default: category = 0xC0; break;
-        }
+        uint32_t category = flarm_to_adsb_category(msg.aircraft_type);
 
         char callsign[9];
         snprintf(callsign, sizeof(callsign), "FLR%05X", addr & 0xFFFFF);
 
-        unsigned char raw[14];
-
-        // Identity & category (submit twice to reach reliability threshold faster)
-        flarm_build_ident_msg(raw, addr, callsign, category);
-        flarm_submit_synthetic(raw, signal);
-        flarm_submit_synthetic(raw, signal);
-
-        // Position (even + odd CPR)
-        if (msg.latitude != 0 && msg.longitude != 0) {
-            int alt_ft = (int)(msg.altitude * 3.28084);
-            flarm_build_position_msg(raw, addr, msg.latitude, msg.longitude, alt_ft, 0);
-            flarm_submit_synthetic(raw, signal);
-            flarm_build_position_msg(raw, addr, msg.latitude, msg.longitude, alt_ft, 1);
-            flarm_submit_synthetic(raw, signal);
-        }
-
-        // Velocity
-        if (msg.speed > 0.1f || fabsf(msg.vs) > 0.1f) {
-            float gs_kts = msg.speed * 1.94384f;
-            int vrate_fpm = (int)(msg.vs * 196.85f);
-            flarm_build_velocity_msg(raw, addr, gs_kts, msg.course, vrate_fpm);
-            flarm_submit_synthetic(raw, signal);
-        }
+        flarm_push_update(addr, callsign, category,
+                          msg.latitude, msg.longitude, msg.altitude,
+                          msg.speed, msg.course, msg.vs,
+                          signal, msg.aircraft_type, msg.addr_type,
+                          msg.version, DECODE_SOURCE_FLARM);
     }
 }
 
@@ -1077,16 +933,20 @@ void flarmDecoderStop(struct sdr_receiver *rx)
     if (st->demod) {
         flarm_demod_stats_t stats;
         flarm_demod_get_stats(st->demod, &stats);
-        fprintf(stderr, "rx[%d]: FLARM stats: samples=%llu detected=%llu crc_ok=%llu decoded=%llu failed=%llu\n",
+        fprintf(stderr, "rx[%d]: FLARM stats: samples=%" PRIu64 " detected=%" PRIu64 " crc_ok=%" PRIu64 " decoded=%" PRIu64 " failed=%" PRIu64 " type1=%" PRIu64 " type3=%" PRIu64 " type4=%" PRIu64 "\n",
                 rx->id,
-                (unsigned long long)stats.samples_processed,
-                (unsigned long long)stats.packets_detected,
-                (unsigned long long)stats.packets_crc_ok,
-                (unsigned long long)stats.packets_decoded,
-                (unsigned long long)stats.packets_failed);
+                (uint64_t)stats.samples_processed,
+                (uint64_t)stats.packets_detected,
+                (uint64_t)stats.packets_crc_ok,
+                (uint64_t)stats.packets_decoded,
+                (uint64_t)stats.packets_failed,
+                (uint64_t)stats.packets_type1,
+                (uint64_t)stats.packets_type3,
+                (uint64_t)stats.packets_type4);
         flarm_demod_destroy(st->demod);
     }
 
+    if (st->queue) msg_queue_destroy(st->queue);
     free(st);
     rx->decoder_state = NULL;
     fprintf(stderr, "rx[%d]: FLARM decoder destroyed\n", rx->id);
@@ -1103,11 +963,13 @@ void flarmReaderShowHelp(void)
         "--flarm                      Enable FLARM 868 MHz decoder\n"
         "--flarm-device <serial>      RTL-SDR serial number for 868 MHz dongle\n"
         "--flarm-ifile <path>         Read raw IQ from file instead of RTL-SDR (uint8 I/Q, 1.6 MSPS, loops)\n"
+        "--flarm-ifile-once          Stop after one --flarm-ifile replay pass\n"
         "--flarm-gain <dB>            Gain in dB (0 = auto, default: auto)\n"
         "--flarm-ppm <correction>     Frequency correction in PPM\n"
         "--ogn-station <name>         OGN station name for APRS-IS feed\n"
         "--ogn-server <host>          OGN APRS-IS server (default: aprs.glidernet.org)\n"
         "--ogn-port <port>            OGN APRS-IS port (default: 14580)\n"
+        "--p3i                        Enable P3I (PilotAware) decoder on 869.525 MHz\n"
         "\n"
     );
 }
@@ -1125,6 +987,9 @@ bool flarmReaderHandleOption(int argc, char **argv, int *jptr)
     } else if (!strcmp(argv[j], "--flarm-ifile") && more) {
         FlarmConfig.enabled = 1;
         strncpy(FlarmConfig.ifile_path, argv[++j], sizeof(FlarmConfig.ifile_path) - 1);
+    } else if (!strcmp(argv[j], "--flarm-ifile-once")) {
+        FlarmConfig.enabled = 1;
+        FlarmConfig.ifile_once = 1;
     } else if (!strcmp(argv[j], "--flarm-gain") && more) {
         float gain_db = atof(argv[++j]);
         FlarmConfig.gain = (int)(gain_db * 10);
@@ -1138,6 +1003,8 @@ bool flarmReaderHandleOption(int argc, char **argv, int *jptr)
         strncpy(FlarmConfig.ogn_server, argv[++j], sizeof(FlarmConfig.ogn_server) - 1);
     } else if (!strcmp(argv[j], "--ogn-port") && more) {
         FlarmConfig.ogn_port = atoi(argv[++j]);
+    } else if (!strcmp(argv[j], "--p3i")) {
+        FlarmConfig.p3i_enabled = 1;
     } else {
         return false;
     }

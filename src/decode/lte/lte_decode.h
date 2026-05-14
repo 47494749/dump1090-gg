@@ -14,8 +14,14 @@
 #ifndef LTE_DECODE_H
 #define LTE_DECODE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
+
+#include "lte_sib.h"
 
 // ======================== Constants ========================
 
@@ -87,9 +93,14 @@ typedef struct {
     bool     valid;
 } lte_sib1_t;
 
+// LTE alert types
+typedef enum {
+    LTE_ALERT_NONE = 0, LTE_ALERT_ETWS, LTE_ALERT_CMAS, LTE_ALERT_EAB
+} lte_alert_type_t;
+
 // LTE alert (ETWS/CMAS/EAB) — decoded from SIB10-14
 typedef struct {
-    enum { LTE_ALERT_NONE = 0, LTE_ALERT_ETWS, LTE_ALERT_CMAS, LTE_ALERT_EAB } type;
+    lte_alert_type_t type;
     uint16_t message_id;         // Warning message ID
     uint16_t serial_number;      // Serial number (scope + code)
     char     text[256];          // Decoded alert text (UTF-8)
@@ -113,6 +124,8 @@ typedef struct {
     float           freq_offset_hz;  // Measured frequency offset
     lte_mib_t       mib;             // Decoded MIB
     lte_sib1_t      sib1;            // Decoded SIB1 (partial)
+    lte_sib2_t      sib2;            // Decoded SIB2 (partial)
+    lte_sib3_t      sib3;            // Decoded SIB3 (partial)
     lte_alert_t     alerts[LTE_MAX_ALERTS]; // Active alerts (ETWS/CMAS/EAB)
     int             alert_count;     // Number of active alerts
     lte_sync_state_t sync_state;     // Current sync level
@@ -155,7 +168,7 @@ struct lte_state;
 
 struct lte_state *lte_create(const lte_config_t *cfg);
 void lte_destroy(struct lte_state *st);
-void lte_process(struct lte_state *st, const uint8_t *iq_data, unsigned len);
+void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len);
 void lte_get_stats(const struct lte_state *st, lte_stats_t *out);
 int  lte_get_cells(const struct lte_state *st, lte_cell_info_t *out, int max_cells);
 lte_sync_state_t lte_get_best_sync(const struct lte_state *st);
@@ -181,5 +194,9 @@ const char *lte_bw_string(uint8_t dl_bw);
 
 // Get number of RBs from dl_bandwidth
 int lte_bw_to_nrb(uint8_t dl_bw);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // LTE_DECODE_H

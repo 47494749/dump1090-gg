@@ -293,8 +293,8 @@ static int rs41_rs_correct(uint8_t *frame, int len)
     int data_per_cw = (data_len + 1) / 2;
     int cw_len = 24 + data_per_cw;
 
-    uint8_t *cw1 = calloc((unsigned)cw_len, 1);
-    uint8_t *cw2 = calloc((unsigned)cw_len, 1);
+    uint8_t *cw1 = calloc((uint32_t)cw_len, 1);
+    uint8_t *cw2 = calloc((uint32_t)cw_len, 1);
     if (!cw1 || !cw2) { free(cw1); free(cw2); return -1; }
 
     // CW1: first 24 parity bytes + data at even offsets from byte 48
@@ -687,7 +687,7 @@ static void sonde_parse_frame(struct sonde_state *state)
 
 static void sonde_process_bit(struct sonde_state *state, int bit)
 {
-    state->shift_reg = (state->shift_reg << 1) | (unsigned)(bit & 1);
+    state->shift_reg = (state->shift_reg << 1) | (uint32_t)(bit & 1);
 
     if (!state->in_frame) {
         // Check for RS41 syncword (4 bytes = 32 bits)
@@ -739,12 +739,12 @@ static void sonde_process_bit(struct sonde_state *state, int bit)
 
 // ======================== IQ Processing ========================
 
-void sonde_process(struct sonde_state *state, const uint8_t *iq_data, unsigned len)
+void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t len)
 {
-    unsigned samples = len / 2;
+    uint32_t samples = len / 2;
     state->stats.samples_processed += samples;
 
-    for (unsigned i = 0; i < samples; i++) {
+    for (uint32_t i = 0; i < samples; i++) {
         int ci = (int)iq_data[i * 2]     - 128;
         int cq = (int)iq_data[i * 2 + 1] - 128;
 
