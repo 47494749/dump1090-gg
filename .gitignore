@@ -30,8 +30,9 @@ untrackedDeveloperSettings.js
 # Test IQ samples (large binary files)
 samples/
 
+# Tests and tools (not part of production build)
+tests/
+tools/
+
 # Instance-specific config
 receivers.json
-
-# Large data files (download separately for aircraft DB rebuild)
-tools/*.csv.xz
