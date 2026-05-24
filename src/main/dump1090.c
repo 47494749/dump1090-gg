@@ -651,6 +651,8 @@ static void modesInitConfig(void) {
     Modes.adaptive_range_scan_delay = 300;
     Modes.adaptive_range_rescan_delay = 3600;
 
+    Modes.beast_reduce_interval = 250;  // 250ms default BeastReduce interval
+
     sdrInitConfig();
     flarmReaderInitConfig();
     memset(&PocsagConfig, 0, sizeof(PocsagConfig));
@@ -917,6 +919,10 @@ static void showHelp(void)
 "--forward-mlat           Allow forwarding of received mlat results\n"
 "\n"
 "      Beast feed outputs (ADS-B data sharing networks)\n"
+"      BeastReduce: per-aircraft rate limiting for bandwidth-efficient feeding.\n"
+"      All beast feeds use BeastReduce by default (250ms interval).\n"
+"\n"
+"--beast-reduce-interval <ms> BeastReduce min interval in ms (default: 250, 0=off)\n"
 "\n"
 "--adsbx                  Enable ADSBexchange feed (feed.adsbexchange.com:30005)\n"
 "--adsbx-host <host>      ADSBexchange feed host override\n"
@@ -1260,7 +1266,7 @@ static int addBeastFeed(const char *name, const char *default_host, int default_
     snprintf(Modes.beast_feeds[idx].name, sizeof(Modes.beast_feeds[idx].name), "%s", name);
     Modes.beast_feeds[idx].host = strdup(default_host);
     Modes.beast_feeds[idx].port = default_port;
-    Modes.beast_feeds[idx].format = FEED_FORMAT_BEAST;
+    Modes.beast_feeds[idx].format = FEED_FORMAT_BEAST_REDUCE;
     Modes.beast_feeds[idx].enabled = 1;
     return idx;
 }
@@ -1468,6 +1474,10 @@ int main(int argc, char **argv) {
             Modes.net_verbatim = 1;
         } else if (!strcmp(argv[j],"--forward-mlat")) {
             Modes.forward_mlat = 1;
+
+        // BeastReduce interval
+        } else if (!strcmp(argv[j],"--beast-reduce-interval") && more) {
+            Modes.beast_reduce_interval = atoi(argv[++j]);
 
         // Beast feed networks
         } else if (!strcmp(argv[j],"--adsbx")) {
@@ -2392,6 +2402,9 @@ int main(int argc, char **argv) {
     // Write final stats
     flush_stats(0);
     writeJsonToFile("stats.json", generateStatsJson);
+
+    // Stop panel (saves stats history to disk)
+    panelStop();
     if (Modes.stats) {
         display_stats(&Modes.stats_alltime);
     }

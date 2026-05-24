@@ -174,6 +174,12 @@ typedef struct {
     uint32_t flarm_payload_start;
     uint32_t flarm_samples_needed;
 
+    // FLARM peak-hold sync detection (finds true NCC peak at low SNR)
+    int      flarm_peak_searching;     // 1 = scanning for NCC peak after threshold crossing
+    float    flarm_peak_best_ncc;      // best |NCC| found during peak search
+    uint32_t flarm_peak_best_start;    // sync_start at best NCC position
+    int      flarm_peak_countdown;     // remaining coarse checks in search window
+
     // OGNTP packet state
     int      ogntp_collecting;
     int      ogntp_polarity;
@@ -185,6 +191,12 @@ typedef struct {
     int      adsl_polarity;
     uint32_t adsl_payload_start;
     uint32_t adsl_samples_needed;
+
+    // ADS-L peak-hold sync detection (same strategy as FLARM)
+    int      adsl_peak_searching;
+    float    adsl_peak_best_ncc;
+    uint32_t adsl_peak_best_start;
+    int      adsl_peak_countdown;
 
     // Diagnostics
     float    diag_best_flarm_ncc;
@@ -459,30 +471,107 @@ static int try_bit_correction(uint8_t *payload, uint32_t len, uint32_t max_corre
 
 // ======================== Try decode FLARM ========================
 
-static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
+// Attempt FLARM payload decode at a given ring buffer offset.
+// Returns: number of corrections applied (0-2), or -1 if CRC failed.
+static int try_decode_flarm_at_offset(struct flarm_state *state, flarm_channel_t *ch,
+                                      uint32_t start, uint8_t *payload_out,
+                                      uint32_t *violations_out)
 {
     uint8_t manchester_bits[PAYLOAD_CHIPS];
-    extract_payload_bits(ch->fm_filt_ring, ch->flarm_payload_start,
+    extract_payload_bits(ch->fm_filt_ring, start,
                          ch->flarm_polarity, manchester_bits, state->samples_per_bit,
                          PAYLOAD_CHIPS);
 
-    uint8_t payload[FLARM_PACKET_TOTAL];
     uint32_t payload_len = 0;
+    *violations_out = 0;
+
+    if (!manchester_decode_payload(manchester_bits, PAYLOAD_CHIPS, payload_out,
+                                   &payload_len, violations_out))
+        return -1;
+    if (payload_len < FLARM_PACKET_TOTAL)
+        return -1;
+
+    uint32_t max_corr = (*violations_out <= 5) ? 2 : 0;
+    return try_bit_correction(payload_out, FLARM_PACKET_TOTAL, max_corr);
+}
+
+static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
+{
+    uint8_t payload[FLARM_PACKET_TOTAL];
     uint32_t violations = 0;
+    int corrections;
 
-    if (!manchester_decode_payload(manchester_bits, PAYLOAD_CHIPS, payload, &payload_len, &violations)) {
-        state->stats.packets_failed++;
-        return;
-    }
-    if (payload_len < FLARM_PACKET_TOTAL) {
-        state->stats.packets_failed++;
-        return;
+    // ---- Try OGN-TP LDPC first (same sync word, stricter check) ----
+    // LDPC requires exact alignment (no corrections possible), so try multiple offsets.
+    {
+        static const int ogntp_offsets[] = { 0, 1, -1, 2, 3 };
+        int samples_per_premanchbyte = 16 * state->samples_per_bit;
+
+        for (int oi = 0; oi < 5; oi++) {
+            uint32_t start = (ch->flarm_payload_start +
+                             ogntp_offsets[oi] * samples_per_premanchbyte) & FM_RING_MASK;
+            uint8_t manchester_bits[PAYLOAD_CHIPS];
+            extract_payload_bits(ch->fm_filt_ring, start,
+                                 ch->flarm_polarity, manchester_bits, state->samples_per_bit,
+                                 PAYLOAD_CHIPS);
+            uint8_t ogntp_payload[OGNTP_PACKET_TOTAL];
+            uint32_t ogntp_len = 0;
+            uint32_t ogntp_viol = 0;
+            if (!manchester_decode_payload(manchester_bits, PAYLOAD_CHIPS, ogntp_payload,
+                                           &ogntp_len, &ogntp_viol))
+                continue;
+            if (ogntp_len < OGNTP_PACKET_TOTAL)
+                continue;
+            // No violation threshold — LDPC check (48 parity equations) is strict enough
+            if (ogntp_ldpc_check(ogntp_payload) != 0)
+                continue;
+
+            // LDPC passed — this is OGN-TP!
+            state->stats.ogntp_packets_detected++;
+            state->stats.ogntp_packets_ldpc_ok++;
+            fprintf(stderr, "OGNTP LDPC OK! offset=%+d ncc=%.3f viol=%u payload=%02x%02x%02x%02x%02x%02x\n",
+                    ogntp_offsets[oi], ch->flarm_det_ncc, ogntp_viol,
+                    ogntp_payload[0], ogntp_payload[1], ogntp_payload[2],
+                    ogntp_payload[3], ogntp_payload[4], ogntp_payload[5]);
+
+            ogntp_message_t msg;
+            if (ogntp_decode_packet(ogntp_payload, state->config.ref_lat,
+                                    state->config.ref_lon, &msg)) {
+                state->stats.ogntp_packets_decoded++;
+                msg.signal_level = 0.0f;
+                if (state->config.ogntp_callback)
+                    state->config.ogntp_callback(&msg, state->config.ogntp_callback_ctx);
+            }
+            return;
+        }
     }
 
-    // Try up to 2-bit correction for signals with few violations (likely real)
-    // With >5 violations, it's likely noise — skip expensive correction
-    uint32_t max_corr = (violations <= 5) ? 2 : 0;
-    int corrections = try_bit_correction(payload, FLARM_PACKET_TOTAL, max_corr);
+    // ---- FLARM CRC-16 path ----
+    // Try at the detected position first
+    corrections = try_decode_flarm_at_offset(state, ch, ch->flarm_payload_start,
+                                             payload, &violations);
+
+    if (corrections < 0 && violations <= 5) {
+        // CRC failed with low violations — NCC sync may be misaligned.
+        // Try forward offsets in pre-Manchester byte steps (16 chips = 256 samples each).
+        // Also try one step backward for robustness.
+        static const int byte_offsets[] = { 1, 2, 3, -1 };
+        int samples_per_premanchbyte = 16 * state->samples_per_bit;
+
+        for (int i = 0; i < 4; i++) {
+            uint32_t start = (ch->flarm_payload_start +
+                             byte_offsets[i] * samples_per_premanchbyte) & FM_RING_MASK;
+            uint32_t off_viol = 0;
+            int off_corr = try_decode_flarm_at_offset(state, ch, start, payload, &off_viol);
+            if (off_corr >= 0) {
+                corrections = off_corr;
+                violations = off_viol;
+                fprintf(stderr, "flarm: sync realigned by %+d bytes (ncc=%.3f)\n",
+                        byte_offsets[i], ch->flarm_det_ncc);
+                break;
+            }
+        }
+    }
 
     if (corrections < 0) {
         // CRC failed. Type=3/4 packets use an undocumented protocol variant
@@ -636,13 +725,16 @@ static void try_decode_adsl(struct flarm_state *state, flarm_channel_t *ch)
     uint32_t violations = 0;
 
     if (!manchester_decode_payload(manchester_bits, ADSL_PAYLOAD_CHIPS, payload, &payload_len, &violations)) {
+        fprintf(stderr, "ADSL-DBG manchester fail len=%u viol=%u\n", payload_len, violations);
         state->stats.adsl_packets_failed++;
         return;
     }
     if (payload_len < ADSL_PACKET_TOTAL) {
+        fprintf(stderr, "ADSL-DBG short payload len=%u (need %d)\n", payload_len, ADSL_PACKET_TOTAL);
         state->stats.adsl_packets_failed++;
         return;
     }
+    fprintf(stderr, "ADSL-DBG manchester OK len=%u viol=%u pol=%d\n", payload_len, violations, ch->adsl_polarity);
 
     // ADS-L payload is INVERTED on-air: flip all bytes
     for (uint32_t i = 0; i < ADSL_PACKET_TOTAL; i++) {
@@ -650,10 +742,16 @@ static void try_decode_adsl(struct flarm_state *state, flarm_channel_t *ch)
     }
 
     // CRC-24 check
+    fprintf(stderr, "ADSL-DBG pre-crc: %02X %02X %02X %02X %02X %02X %02X %02X ... %02X %02X %02X\n",
+            payload[0], payload[1], payload[2], payload[3],
+            payload[4], payload[5], payload[6], payload[7],
+            payload[ADSL_PACKET_TOTAL-3], payload[ADSL_PACKET_TOTAL-2], payload[ADSL_PACKET_TOTAL-1]);
     if (!adsl_check_crc(payload)) {
+        fprintf(stderr, "ADSL-DBG CRC-24 FAIL\n");
         state->stats.adsl_packets_failed++;
         return;
     }
+    fprintf(stderr, "ADSL-DBG CRC-24 PASS!\n");
     state->stats.adsl_packets_crc_ok++;
 
     adsl_message_t msg;
@@ -726,6 +824,7 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
         c->lockout_remaining = 0;
 
         c->flarm_collecting = 0;
+        c->flarm_peak_searching = 0;
         c->ogntp_collecting = 0;
         c->adsl_collecting = 0;
 
@@ -856,10 +955,11 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
                 }
             }
 
-            // ---- Lockout ----
+            // ---- Lockout (FLARM only — other protocols check independently) ----
+            int flarm_locked_out = 0;
             if (ch->lockout_remaining > 0) {
                 ch->lockout_remaining--;
-                continue;
+                flarm_locked_out = 1;
             }
 
             // ---- Periodic NCC check ----
@@ -873,8 +973,8 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
             // Sync would end at current ring_wr, starts sync_template_len before
             uint32_t sync_start = (ch->ring_wr - stl) & FM_RING_MASK;
 
-            // ---- FLARM sync detection ----
-            if (!ch->flarm_collecting) {
+            // ---- FLARM sync detection (blocked during lockout) ----
+            if (!flarm_locked_out && !ch->flarm_collecting) {
                 float ncc = compute_ncc_ring(ch->fm_ring, sync_start,
                                             flarm_sync_template, flarm_template_energy, stl);
                 float abs_ncc = fabsf(ncc);
@@ -882,24 +982,60 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
                 if (abs_ncc > ch->diag_best_flarm_ncc)
                     ch->diag_best_flarm_ncc = abs_ncc;
 
-                if (abs_ncc >= SYNC_NCC_THRESHOLD) {
-                    // Refine to single-sample accuracy
-                    float refined_ncc;
-                    uint32_t best_start = refine_sync(ch->fm_ring, sync_start,
-                                                     flarm_sync_template,
-                                                     flarm_template_energy, stl, &refined_ncc);
-                    float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
-                                                       flarm_sync_template,
-                                                       flarm_template_energy, stl);
+                if (ch->flarm_peak_searching) {
+                    // Continue peak search — track maximum NCC position
+                    if (abs_ncc > ch->flarm_peak_best_ncc) {
+                        ch->flarm_peak_best_ncc = abs_ncc;
+                        ch->flarm_peak_best_start = sync_start;
+                    }
+                    ch->flarm_peak_countdown--;
 
-                    state->stats.packets_detected++;
-                    ch->flarm_collecting = 1;
-                    ch->flarm_polarity = (signed_ncc > 0) ? 1 : -1;
-                    ch->flarm_det_ncc = refined_ncc;
-                    // Compensate FIR group delay: filtered ring is delayed by (FIR_TAPS-1)/2 samples
-                    ch->flarm_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
-                    ch->flarm_samples_needed = state->payload_samples;
-                    ch->lockout_remaining = state->sync_lockout;
+                    // End search when countdown expires or NCC drops well below peak
+                    if (ch->flarm_peak_countdown <= 0 ||
+                        (abs_ncc < SYNC_NCC_THRESHOLD * 0.8f &&
+                         abs_ncc < ch->flarm_peak_best_ncc * 0.7f)) {
+
+                        // Refine peak to single-sample accuracy
+                        float refined_ncc;
+                        uint32_t best_start = refine_sync(ch->fm_ring,
+                                                         ch->flarm_peak_best_start,
+                                                         flarm_sync_template,
+                                                         flarm_template_energy, stl,
+                                                         &refined_ncc);
+                        float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
+                                                           flarm_sync_template,
+                                                           flarm_template_energy, stl);
+
+                        state->stats.packets_detected++;
+                        ch->flarm_polarity = (signed_ncc > 0) ? 1 : -1;
+                        ch->flarm_det_ncc = refined_ncc;
+                        ch->flarm_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
+                        ch->lockout_remaining = state->sync_lockout;
+                        ch->flarm_peak_searching = 0;
+
+                        // Compute remaining samples (ring_wr advanced during peak search)
+                        // Add margin for sync realignment offset search (+3 pre-Manchester bytes)
+                        uint32_t offset_margin = 3 * 16 * (uint32_t)state->samples_per_bit;
+                        uint32_t payload_end = (ch->flarm_payload_start +
+                                               (uint32_t)state->payload_samples +
+                                               offset_margin) & FM_RING_MASK;
+                        uint32_t remaining = (payload_end - ch->ring_wr) & FM_RING_MASK;
+                        if (remaining == 0 ||
+                            remaining > (uint32_t)(state->payload_samples + stl + offset_margin)) {
+                            // ring_wr already past payload end — process immediately
+                            try_decode_flarm(state, ch);
+                        } else {
+                            ch->flarm_collecting = 1;
+                            ch->flarm_samples_needed = remaining;
+                        }
+                    }
+                } else if (abs_ncc >= SYNC_NCC_THRESHOLD) {
+                    // First threshold crossing — start peak search
+                    ch->flarm_peak_searching = 1;
+                    ch->flarm_peak_best_ncc = abs_ncc;
+                    ch->flarm_peak_best_start = sync_start;
+                    // Search for one full sync template length (128 coarse checks)
+                    ch->flarm_peak_countdown = stl / CORR_CHECK_INTERVAL;
                 }
             }
 
@@ -939,20 +1075,58 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
                 if (abs_ancc > ch->diag_best_adsl_ncc)
                     ch->diag_best_adsl_ncc = abs_ancc;
 
-                if (abs_ancc >= SYNC_NCC_THRESHOLD) {
-                    float refined_ncc;
-                    uint32_t best_start = refine_sync(ch->fm_ring, sync_start,
-                                                     adsl_sync_template,
-                                                     adsl_template_energy, stl, &refined_ncc);
-                    float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
-                                                       adsl_sync_template,
-                                                       adsl_template_energy, stl);
+                if (ch->adsl_peak_searching) {
+                    // Continue peak search — track maximum NCC position
+                    if (abs_ancc > ch->adsl_peak_best_ncc) {
+                        ch->adsl_peak_best_ncc = abs_ancc;
+                        ch->adsl_peak_best_start = sync_start;
+                    }
+                    ch->adsl_peak_countdown--;
 
-                    state->stats.adsl_packets_detected++;
-                    ch->adsl_collecting = 1;
-                    ch->adsl_polarity = (signed_ncc > 0) ? 1 : -1;
-                    ch->adsl_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
-                    ch->adsl_samples_needed = state->adsl_payload_samples;
+                    // End search when countdown expires or NCC drops well below peak
+                    if (ch->adsl_peak_countdown <= 0 ||
+                        (abs_ancc < SYNC_NCC_THRESHOLD * 0.8f &&
+                         abs_ancc < ch->adsl_peak_best_ncc * 0.7f)) {
+
+                        // Refine peak to single-sample accuracy
+                        float refined_ncc;
+                        uint32_t best_start = refine_sync(ch->fm_ring,
+                                                         ch->adsl_peak_best_start,
+                                                         adsl_sync_template,
+                                                         adsl_template_energy, stl,
+                                                         &refined_ncc);
+                        float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
+                                                           adsl_sync_template,
+                                                           adsl_template_energy, stl);
+
+                        fprintf(stderr, "ADSL-DBG peak ch=%d coarse=%.3f refined=%.3f start=%u\n",
+                                ch_idx, ch->adsl_peak_best_ncc, refined_ncc, best_start);
+
+                        state->stats.adsl_packets_detected++;
+                        ch->adsl_polarity = (signed_ncc > 0) ? 1 : -1;
+                        ch->adsl_payload_start = (best_start + stl + (FIR_TAPS-1)/2) & FM_RING_MASK;
+                        ch->adsl_peak_searching = 0;
+
+                        // Compute remaining samples for payload
+                        uint32_t payload_end = (ch->adsl_payload_start +
+                                               (uint32_t)state->adsl_payload_samples) & FM_RING_MASK;
+                        uint32_t remaining = (payload_end - ch->ring_wr) & FM_RING_MASK;
+                        if (remaining == 0 ||
+                            remaining > (uint32_t)(state->adsl_payload_samples + stl)) {
+                            // ring_wr already past payload end — process immediately
+                            try_decode_adsl(state, ch);
+                        } else {
+                            ch->adsl_collecting = 1;
+                            ch->adsl_samples_needed = remaining;
+                        }
+                    }
+                } else if (abs_ancc >= SYNC_NCC_THRESHOLD) {
+                    // First threshold crossing — start peak search
+                    ch->adsl_peak_searching = 1;
+                    ch->adsl_peak_best_ncc = abs_ancc;
+                    ch->adsl_peak_best_start = sync_start;
+                    // Search for one full sync template length
+                    ch->adsl_peak_countdown = stl / CORR_CHECK_INTERVAL;
                 }
             }
         }

@@ -16,6 +16,7 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "flarm_demod.h"
 
 // FLARM reader configuration (set before calling flarmReaderInit)
 typedef struct {
@@ -79,8 +80,9 @@ struct sdr_receiver;  // forward decl
 // decoder_ops callbacks (registered via decoderOpsForRole(SDR_ROLE_FLARM))
 bool flarmDecoderInit(struct sdr_receiver *rx);
 void flarmDecoderProcess(struct sdr_receiver *rx, const uint8_t *iq, uint32_t len);
-void flarmDecoderDrain(struct sdr_receiver *rx);
+bool flarmDecoderDrain(struct sdr_receiver *rx);
 void flarmDecoderStop(struct sdr_receiver *rx);
+bool flarmDecoderGetStats(struct sdr_receiver *rx, flarm_demod_stats_t *stats);
 
 #ifdef __cplusplus
 }

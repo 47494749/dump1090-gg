@@ -50,6 +50,8 @@ struct net_service {
     int *listener_fds;   // listening FDs
 
     int connections;     // number of active clients
+    uint64_t bytes_in_total;
+    uint64_t bytes_out_total;
 
     struct net_writer *writer; // shared writer state
 

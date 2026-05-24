@@ -13,6 +13,7 @@
 
 #include "dump1090.h"
 #include "mlat_client.h"
+#include "feeder_thread.h"
 #include "crc.h"
 
 #include <sys/socket.h>
@@ -81,6 +82,56 @@ static int mlat_buf_printf(struct mlat_server *s, const char *fmt, ...) __attrib
 // ECEF to LLH conversion
 static void ecef_to_llh(double x, double y, double z, double *lat, double *lon, double *alt);
 
+// ============================= Backoff helpers ============================
+
+static uint64_t mlat_reconnect_delay_ms(int reconnect_count) {
+    uint64_t delay = MLAT_RECONNECT_INITIAL_MS;
+    if (reconnect_count <= 1) return delay;
+    for (int i = 1; i < reconnect_count; i++) {
+        if (delay >= MLAT_RECONNECT_MAX_MS / 2) { delay = MLAT_RECONNECT_MAX_MS; break; }
+        delay *= 2;
+    }
+    return delay;
+}
+
+static void mlat_format_delay(uint64_t delay_ms, char *buf, size_t buf_len) {
+    if (delay_ms >= 60ULL * 60ULL * 1000ULL && delay_ms % (60ULL * 60ULL * 1000ULL) == 0)
+        snprintf(buf, buf_len, "%lluh", (unsigned long long)(delay_ms / (60ULL * 60ULL * 1000ULL)));
+    else if (delay_ms >= 60ULL * 1000ULL && delay_ms % (60ULL * 1000ULL) == 0)
+        snprintf(buf, buf_len, "%llum", (unsigned long long)(delay_ms / (60ULL * 1000ULL)));
+    else
+        snprintf(buf, buf_len, "%llus", (unsigned long long)(delay_ms / 1000ULL));
+}
+
+static void mlat_reset_backoff(struct mlat_server *s) {
+    s->reconnect_count = 0;
+    s->max_backoff_count = 0;
+}
+
+static uint64_t mlat_schedule_reconnect(struct mlat_server *s) {
+    s->reconnect_count++;
+    uint64_t delay = mlat_reconnect_delay_ms(s->reconnect_count);
+
+    if (delay >= MLAT_RECONNECT_MAX_MS) {
+        s->max_backoff_count++;
+        if (s->max_backoff_count >= MLAT_MAX_48H_RETRIES) {
+            s->disabled_by_backoff = true;
+            s->next_reconnect = 0;
+            fprintf(stderr, "MLAT[%s:%d]: disabled after %d retries at 48h backoff\n",
+                    s->host, s->port, s->max_backoff_count);
+            if (PanelState.enabled)
+                panelLog("MLAT[%s:%d]: disabled after %d retries at 48h backoff",
+                         s->host, s->port, s->max_backoff_count);
+            return 0;
+        }
+    } else {
+        s->max_backoff_count = 0;
+    }
+
+    s->next_reconnect = mstime() + delay;
+    return delay;
+}
+
 // ============================= Initialization ============================
 
 void mlatClientInit(void)
@@ -124,6 +175,9 @@ void mlatClientInit(void)
         s->writebuf_len = 0;
         s->next_reconnect = mstime();  // connect immediately
         s->report_counter = 0;
+        s->reconnect_count = 0;
+        s->max_backoff_count = 0;
+        s->disabled_by_backoff = false;
     }
 
     // Detect mutual-exclusive MLAT server pairs (shared backend)
@@ -225,6 +279,8 @@ void mlatClientPeriodicWork(void)
     for (int i = 0; i < MlatConfig.server_count; i++) {
         struct mlat_server *s = &MlatConfig.servers[i];
 
+        if (s->disabled_by_backoff) continue;
+
         switch (s->state) {
         case MLAT_DISCONNECTED:
             if (now >= s->next_reconnect) {
@@ -310,8 +366,12 @@ static void mlat_server_connect(struct mlat_server *s)
 
     int gai = getaddrinfo(s->host, portstr.c_str(), &hints, &res);
     if (gai != 0) {
-        fprintf(stderr, "MLAT[%s:%d]: DNS resolve failed: %s\n", s->host, s->port, gai_strerror(gai));
-        s->next_reconnect = mstime() + MLAT_RECONNECT_INTERVAL;
+        uint64_t delay = mlat_schedule_reconnect(s);
+        if (delay > 0) {
+            char dbuf[32];
+            mlat_format_delay(delay, dbuf, sizeof(dbuf));
+            fprintf(stderr, "MLAT[%s:%d]: DNS resolve failed: %s, retry in %s\n", s->host, s->port, gai_strerror(gai), dbuf);
+        }
         return;
     }
 
@@ -336,8 +396,12 @@ static void mlat_server_connect(struct mlat_server *s)
     freeaddrinfo(res);
 
     if (fd < 0) {
-        fprintf(stderr, "MLAT[%s:%d]: connect failed\n", s->host, s->port);
-        s->next_reconnect = mstime() + MLAT_RECONNECT_INTERVAL;
+        uint64_t delay = mlat_schedule_reconnect(s);
+        if (delay > 0) {
+            char dbuf[32];
+            mlat_format_delay(delay, dbuf, sizeof(dbuf));
+            fprintf(stderr, "MLAT[%s:%d]: connect failed, retry in %s\n", s->host, s->port, dbuf);
+        }
         return;
     }
 
@@ -376,7 +440,15 @@ static void mlat_server_disconnect(struct mlat_server *s, const char *reason)
     s->state = MLAT_DISCONNECTED;
     s->readbuf_len = 0;
     s->writebuf_len = 0;
-    s->next_reconnect = mstime() + MLAT_RECONNECT_INTERVAL;
+
+    {
+        uint64_t delay = mlat_schedule_reconnect(s);
+        if (delay > 0) {
+            char dbuf[32];
+            mlat_format_delay(delay, dbuf, sizeof(dbuf));
+            fprintf(stderr, "MLAT[%s:%d]: retry in %s\n", s->host, s->port, dbuf);
+        }
+    }
 
     // If we have a mutual-exclusive peer that is disconnected, wake it up
     // so it can try to reconnect now that we're gone.
@@ -566,6 +638,7 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
 
     // Handshake complete
     s->state = MLAT_READY;
+    mlat_reset_backoff(s);
     s->next_heartbeat = mstime() + MLAT_HEARTBEAT_INTERVAL;
     s->next_aircraft_update = mstime() + MLAT_UPDATE_INTERVAL;
 
@@ -692,6 +765,7 @@ static void mlat_server_update_aircraft(struct mlat_server *s)
     (void)s;  // used indirectly via mask in mlat_send_seen
 
     // Update ADS-B good status and message counts from dump1090's tracker
+    pthread_rwlock_rdlock(&aircraft_lock);
     for (struct aircraft *a = Modes.aircrafts; a; a = a->next) {
         if (!a->reliable) continue;
 
@@ -717,6 +791,7 @@ static void mlat_server_update_aircraft(struct mlat_server *s)
                           (now - mac->last_even_time) < MLAT_POSITION_EXPIRY &&
                           (now - mac->last_odd_time) < MLAT_POSITION_EXPIRY);
     }
+    pthread_rwlock_unlock(&aircraft_lock);
 
     // Increment report counter
     s->report_counter++;

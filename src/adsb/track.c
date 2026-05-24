@@ -1119,6 +1119,10 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
         ++a->reliableDF17;
     }
 
+    if (mm->msgtype == 19) {
+        a->seen_df19 = 1;
+    }
+
     if (a->reliableDF11 >= TRACK_RELIABLE_DF11_MESSAGES || a->reliableDF17 >= TRACK_RELIABLE_DF17_MESSAGES || a->messages >= TRACK_RELIABLE_ANY_MESSAGES) {
         a->reliable = 1;
     }
@@ -2068,6 +2072,18 @@ struct aircraft *trackUpdateFromDecoder(const aircraft_update_t *upd)
         a->fanet_thermal.wind_heading = upd->thermal.wind_heading_deg;
         a->fanet_thermal.confidence = upd->thermal.confidence;
         a->fanet_thermal.valid = 1;
+    }
+
+    // Radiosonde metadata
+    if (upd->sonde.valid) {
+        memcpy(a->sonde_info.serial, upd->sonde.serial, sizeof(a->sonde_info.serial));
+        memcpy(a->sonde_info.sonde_type, upd->sonde.sonde_type, sizeof(a->sonde_info.sonde_type));
+        a->sonde_info.frame_num = upd->sonde.frame_num;
+        a->sonde_info.rs_errors = upd->sonde.rs_errors;
+        a->sonde_info.satellites = upd->sonde.satellites;
+        a->sonde_info.vel_v = upd->sonde.vel_v;
+        a->sonde_info.freq_mhz = upd->sonde.freq_mhz;
+        a->sonde_info.valid = 1;
     }
 
     // Magnetic declination

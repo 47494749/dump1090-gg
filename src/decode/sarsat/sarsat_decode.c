@@ -431,8 +431,9 @@ static void sarsat_try_decode(struct sarsat_state *st)
         }
     }
 
-    if (n_bits < SARSAT_PREAMBLE_LEN + SARSAT_FRAMESYNC_LEN + 82)
+    if (n_bits < SARSAT_PREAMBLE_LEN + SARSAT_FRAMESYNC_LEN + 82) {
         return;  // Not enough bits for even a short message
+    }
 
     // Search for frame sync pattern after preamble
     // Preamble length varies: 20-64+ bits in the buffer after burst detection

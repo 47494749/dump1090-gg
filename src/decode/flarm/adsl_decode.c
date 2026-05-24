@@ -53,28 +53,29 @@ bool adsl_check_crc(const uint8_t *data24)
 // ======================== XXTEA zero-key descramble ========================
 
 // XXTEA decrypt with all-zero key, n=5 words, 6 rounds.
-// This undoes the whitening applied by the transmitter.
+// Standard btea decrypt: y carries from previous iteration (initial = v[0]).
 static void xxtea_decrypt_key0(uint32_t *data, int n, int rounds)
 {
     const uint32_t delta = 0x9E3779B9;
     uint32_t sum = (uint32_t)rounds * delta;
+    uint32_t y = data[0];
 
     for (int cycle = 0; cycle < rounds; cycle++) {
         uint32_t e = (sum >> 2) & 3;
-        uint32_t y, z;
+        uint32_t z;
 
         for (int p = n - 1; p > 0; p--) {
             z = data[p - 1];
-            y = data[p];
             uint32_t mx = ((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4))
                         ^ ((sum ^ y) + z);
             data[p] -= mx;
+            y = data[p];
         }
         z = data[n - 1];
-        y = data[0];
         uint32_t mx = ((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4))
                     ^ ((sum ^ y) + z);
         data[0] -= mx;
+        y = data[0];
 
         sum -= delta;
         (void)e;  // key index (unused with zero key)
@@ -164,8 +165,7 @@ bool adsl_decode_packet(const uint8_t *data24,
 
     uint8_t type = pkt[0];
     if (type != 0x02) {
-        // Not a position packet (could be telemetry 0x42, info, etc.)
-        // For now only decode position packets
+        fprintf(stderr, "ADSL-DBG decode: type=0x%02X (expected 0x02)\n", type);
         return false;
     }
 
@@ -175,8 +175,10 @@ bool adsl_decode_packet(const uint8_t *data24,
     uint8_t addr_table = pkt[1] & 0x3F;
 
     // Address sanity
-    if (addr == 0x000000 || addr == 0xFFFFFF)
+    if (addr == 0x000000 || addr == 0xFFFFFF) {
+        fprintf(stderr, "ADSL-DBG decode: invalid addr=0x%06X\n", addr);
         return false;
+    }
     // Reject repeating-byte addresses
     if ((addr & 0xFF) == ((addr >> 8) & 0xFF) &&
         (addr & 0xFF) == ((addr >> 16) & 0xFF))
@@ -247,21 +249,32 @@ bool adsl_decode_packet(const uint8_t *data24,
     if (course >= 360.0f) course -= 360.0f;
 
     // ---- Sanity checks ----
-    if (latitude < -90.0 || latitude > 90.0)
+    if (latitude < -90.0 || latitude > 90.0) {
+        fprintf(stderr, "ADSL-DBG decode: bad lat=%.4f addr=0x%06X\n", latitude, addr);
         return false;
-    if (longitude < -180.0 || longitude > 180.0)
+    }
+    if (longitude < -180.0 || longitude > 180.0) {
+        fprintf(stderr, "ADSL-DBG decode: bad lon=%.4f addr=0x%06X\n", longitude, addr);
         return false;
-    if (altitude < -500 || altitude > 20000)
+    }
+    if (altitude < -500 || altitude > 20000) {
+        fprintf(stderr, "ADSL-DBG decode: bad alt=%d addr=0x%06X\n", altitude, addr);
         return false;
-    if (speed < 0.0f || speed > 200.0f)
+    }
+    if (speed < 0.0f || speed > 200.0f) {
+        fprintf(stderr, "ADSL-DBG decode: bad speed=%.1f addr=0x%06X\n", speed, addr);
         return false;
+    }
 
     // Distance check: max ~3° from receiver
     {
         double dlat = latitude - ref_lat;
         double dlon = longitude - ref_lon;
-        if (sqrt(dlat * dlat + dlon * dlon) > 3.0)
+        if (sqrt(dlat * dlat + dlon * dlon) > 3.0) {
+            fprintf(stderr, "ADSL-DBG decode: too far addr=0x%06X lat=%.4f lon=%.4f (ref=%.4f,%.4f)\n",
+                    addr, latitude, longitude, ref_lat, ref_lon);
             return false;
+        }
     }
 
     // ---- Fill output ----

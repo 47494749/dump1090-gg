@@ -34,7 +34,10 @@ struct modesMessage;
 #define MLAT_HASH_MASK          (MLAT_HASH_SIZE - 1)
 
 // Timing intervals (milliseconds)
-#define MLAT_RECONNECT_INTERVAL     10000    // 10s between reconnect attempts
+#define MLAT_RECONNECT_INITIAL_MS       60000ULL     // 60s initial reconnect delay
+#define MLAT_RECONNECT_MAX_MS           (48ULL * 60ULL * 60ULL * 1000ULL)  // 48h max
+#define MLAT_MAX_48H_RETRIES            3            // disable after 3 retries at 48h cap
+#define MLAT_RECONNECT_INTERVAL         10000    // legacy (unused, kept for reference)
 #define MLAT_HEARTBEAT_INTERVAL     120000   // 120s heartbeat to server
 #define MLAT_INACTIVITY_TIMEOUT     300000   // 300s (5 min) no data = disconnect
 #define MLAT_UPDATE_INTERVAL        4500     // 4.5s between aircraft list updates
@@ -106,6 +109,11 @@ struct mlat_server {
 
     // --- Server index (0..MAX_MLAT_SERVERS-1) ---
     int      index;
+
+    // --- Exponential backoff ---
+    int      reconnect_count;        // number of consecutive reconnect attempts
+    int      max_backoff_count;      // number of retries at 48h cap
+    bool     disabled_by_backoff;    // true if disabled by backoff logic
 
     // --- Mutual exclusion: peer server that shares the same backend ---
     int      peer_index;             // index of peer server (-1 = none)

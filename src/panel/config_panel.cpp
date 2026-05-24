@@ -45,6 +45,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <limits.h>
+#include <dirent.h>
 
 #include <string>
 #include <string_view>
@@ -72,6 +73,431 @@ panel_state_t PanelState;
 // Sonde feed config (radiosondy.info and wettersonde.net — no C client yet, UI-only)
 static bool RadiosondyEnabled = false;
 static bool WettersondeEnabled = false;
+
+// Forward declarations for helpers defined later
+static void http_send(int fd, int code, const char *content_type, const char *body, int body_len);
+static void http_send_json(int fd, const char *json, int len);
+
+// ============================= Stats History =============================
+
+#define STATS_HISTORY_MAX_ENTRIES  129600 // 90 days at 60s interval (~12 MB)
+#define STATS_HISTORY_FILE        "/etc/dump1090-gg/stats_history.dat"
+#define STATS_HISTORY_MAGIC       0x53483031  // "SH01"
+#define STATS_HISTORY_VERSION     1
+#define STATS_HISTORY_SAVE_INTERVAL 10  // save every N snapshots
+
+struct stats_snapshot {
+    uint64_t ts;           // epoch milliseconds
+    // System
+    float cpu_u;           // cumulative user CPU seconds
+    float cpu_s;           // cumulative system CPU seconds
+    uint32_t rss;          // process RSS in KB
+    uint32_t mem_avail;    // system available memory in KB
+    // ADS-B
+    uint32_t adsb_msg;     // cumulative total messages
+    uint32_t adsb_trk;     // current unique aircraft
+    float adsb_noise;      // noise floor dBFS
+    float adsb_signal;     // avg signal dBFS
+    int16_t adsb_gain;     // current gain dB
+    // FLARM
+    uint32_t flarm_det;    // cumulative detected
+    uint32_t flarm_dec;    // cumulative decoded
+    // ACARS
+    uint32_t acars_dec;
+    // VDL2
+    uint32_t vdl2_dec;
+    // Sonde
+    uint32_t sonde_dec;
+    // POCSAG
+    uint32_t pocsag_dec;
+    // GSM
+    uint32_t gsm_bcch;
+    // LTE
+    uint32_t lte_mib;
+    // FANET
+    uint32_t fanet_dec;
+    // SARSAT
+    uint32_t sarsat_frm;
+    // Panel port traffic (cumulative KB in the dominant direction for each service)
+    uint32_t raw_out_kb;
+    uint32_t beast_cooked_out_kb;
+    uint32_t beast_verbatim_out_kb;
+    uint32_t beast_verbatim_local_out_kb;
+    uint32_t basestation_out_kb;
+    uint32_t stratux_out_kb;
+    uint32_t raw_in_kb;
+    uint32_t beast_in_kb;
+};
+
+struct stats_file_header {
+    uint32_t magic;
+    uint32_t version;
+    int32_t  interval_s;
+    int32_t  retention_hours;
+    int32_t  count;
+    int32_t  reserved;
+};
+
+static struct {
+    bool enabled;
+    int retention_hours;       // configured retention
+    int interval_s;            // user-configured sampling interval
+    int max_entries;           // ring buffer capacity
+    struct stats_snapshot *ring;
+    int head;                  // next write position
+    int count;                 // valid entries
+    uint64_t last_sample_ms;   // last snapshot time
+    int unsaved_count;         // snapshots since last save
+    pthread_mutex_t mutex;
+} StatsHistory = { false, 24, 60, 1440, NULL, 0, 0, 0, 0, PTHREAD_MUTEX_INITIALIZER };
+
+static void statsHistoryReconfigure(void)
+{
+    int h = StatsHistory.retention_hours;
+    int interval = StatsHistory.interval_s;
+    if (interval < 10) interval = 10;
+    if (interval > 3600) interval = 3600;
+
+    int entries = (h * 3600) / interval;
+    if (entries > STATS_HISTORY_MAX_ENTRIES) entries = STATS_HISTORY_MAX_ENTRIES;
+    if (entries < 60) entries = 60;
+
+    pthread_mutex_lock(&StatsHistory.mutex);
+    StatsHistory.interval_s = interval;
+    StatsHistory.max_entries = entries;
+
+    // (Re)allocate ring buffer
+    free(StatsHistory.ring);
+    StatsHistory.ring = (struct stats_snapshot *)calloc((size_t)entries, sizeof(struct stats_snapshot));
+    StatsHistory.head = 0;
+    StatsHistory.count = 0;
+    StatsHistory.last_sample_ms = 0;
+    pthread_mutex_unlock(&StatsHistory.mutex);
+}
+
+// Save stats history to disk (caller must hold mutex or be safe context)
+static void statsHistorySaveLocked(void)
+{
+    if (!StatsHistory.ring || StatsHistory.count == 0) return;
+
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s.tmp", STATS_HISTORY_FILE);
+    FILE *f = fopen(tmppath, "wb");
+    if (!f) return;
+
+    // Write snapshots in chronological order
+    int max_e = StatsHistory.max_entries;
+    int count = StatsHistory.count;
+    int start = (count < max_e) ? 0 : StatsHistory.head;
+
+    struct stats_file_header hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = STATS_HISTORY_MAGIC;
+    hdr.version = STATS_HISTORY_VERSION;
+    hdr.interval_s = StatsHistory.interval_s;
+    hdr.retention_hours = StatsHistory.retention_hours;
+    hdr.count = count;
+
+    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); unlink(tmppath); return; }
+
+    for (int i = 0; i < count; i++) {
+        int idx = (start + i) % max_e;
+        if (fwrite(&StatsHistory.ring[idx], sizeof(struct stats_snapshot), 1, f) != 1) {
+            fclose(f); unlink(tmppath); return;
+        }
+    }
+
+    fclose(f);
+    rename(tmppath, STATS_HISTORY_FILE);
+    StatsHistory.unsaved_count = 0;
+}
+
+// Public save (takes lock)
+static void statsHistorySave(void)
+{
+    pthread_mutex_lock(&StatsHistory.mutex);
+    statsHistorySaveLocked();
+    pthread_mutex_unlock(&StatsHistory.mutex);
+}
+
+// Load stats history from disk into ring buffer.
+// Must be called AFTER statsHistoryReconfigure() has allocated the ring buffer.
+static void statsHistoryLoad(void)
+{
+    FILE *f = fopen(STATS_HISTORY_FILE, "rb");
+    if (!f) return;
+
+    struct stats_file_header hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 ||
+        hdr.magic != STATS_HISTORY_MAGIC ||
+        hdr.version != STATS_HISTORY_VERSION ||
+        hdr.count <= 0) {
+        fclose(f);
+        return;
+    }
+
+    // Read all snapshots from file
+    int file_count = hdr.count;
+    if (file_count > STATS_HISTORY_MAX_ENTRIES) file_count = STATS_HISTORY_MAX_ENTRIES;
+
+    struct stats_snapshot *tmp = (struct stats_snapshot *)malloc((size_t)file_count * sizeof(struct stats_snapshot));
+    if (!tmp) { fclose(f); return; }
+
+    int actually_read = (int)fread(tmp, sizeof(struct stats_snapshot), (size_t)file_count, f);
+    fclose(f);
+
+    if (actually_read <= 0) { free(tmp); return; }
+
+    // Filter by retention period: keep only snapshots within retention window
+    struct timespec now_ts;
+    clock_gettime(CLOCK_REALTIME, &now_ts);
+    uint64_t now_ms = (uint64_t)now_ts.tv_sec * 1000 + (uint64_t)now_ts.tv_nsec / 1000000;
+    uint64_t cutoff_ms = now_ms - (uint64_t)StatsHistory.retention_hours * 3600ULL * 1000ULL;
+
+    pthread_mutex_lock(&StatsHistory.mutex);
+    StatsHistory.head = 0;
+    StatsHistory.count = 0;
+    StatsHistory.last_sample_ms = 0;
+
+    for (int i = 0; i < actually_read; i++) {
+        if (tmp[i].ts < cutoff_ms) continue;  // too old
+        if (tmp[i].ts > now_ms + 60000ULL) continue;  // future timestamp (clock drift guard)
+
+        if (StatsHistory.count < StatsHistory.max_entries) {
+            StatsHistory.ring[StatsHistory.count] = tmp[i];
+            StatsHistory.count++;
+            StatsHistory.head = StatsHistory.count % StatsHistory.max_entries;
+        } else {
+            // Ring is full: overwrite oldest
+            StatsHistory.ring[StatsHistory.head] = tmp[i];
+            StatsHistory.head = (StatsHistory.head + 1) % StatsHistory.max_entries;
+        }
+        StatsHistory.last_sample_ms = tmp[i].ts;
+    }
+
+    pthread_mutex_unlock(&StatsHistory.mutex);
+    free(tmp);
+
+    fprintf(stderr, "Panel: Loaded %d stats snapshots from disk (retained %d within %d hours)\n",
+            actually_read, StatsHistory.count, StatsHistory.retention_hours);
+}
+
+static void statsHistoryTakeSnapshot(void)
+{
+    if (!StatsHistory.enabled || !StatsHistory.ring) return;
+
+    struct timespec now_ts;
+    clock_gettime(CLOCK_REALTIME, &now_ts);
+    uint64_t now_ms = (uint64_t)now_ts.tv_sec * 1000 + (uint64_t)now_ts.tv_nsec / 1000000;
+
+    if (StatsHistory.last_sample_ms > 0 &&
+        (now_ms - StatsHistory.last_sample_ms) < (uint64_t)StatsHistory.interval_s * 1000)
+        return;
+
+    struct stats_snapshot snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.ts = now_ms;
+
+    // --- System CPU from /proc/self/stat ---
+    {
+        FILE *fp = fopen("/proc/self/stat", "r");
+        if (fp) {
+            char sbuf[1024];
+            if (fgets(sbuf, sizeof(sbuf), fp)) {
+                char *cp = strrchr(sbuf, ')');
+                if (cp) {
+                    cp += 2;
+                    for (int f = 0; f < 11 && *cp; f++) {
+                        while (*cp && *cp != ' ') cp++;
+                        while (*cp == ' ') cp++;
+                    }
+                    unsigned long u = 0, s = 0;
+                    sscanf(cp, "%lu %lu", &u, &s);
+                    long ticks = sysconf(_SC_CLK_TCK);
+                    snap.cpu_u = (float)u / (float)ticks;
+                    snap.cpu_s = (float)s / (float)ticks;
+                }
+            }
+            fclose(fp);
+        }
+    }
+
+    // --- Memory from /proc ---
+    {
+        FILE *fp = fopen("/proc/self/status", "r");
+        if (fp) {
+            char line[128];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strncmp(line, "VmRSS:", 6) == 0)
+                    snap.rss = (uint32_t)strtoull(line + 6, NULL, 10);
+            }
+            fclose(fp);
+        }
+        fp = fopen("/proc/meminfo", "r");
+        if (fp) {
+            char line[128];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strncmp(line, "MemAvailable:", 13) == 0)
+                    snap.mem_avail = (uint32_t)strtoull(line + 13, NULL, 10);
+            }
+            fclose(fp);
+        }
+    }
+
+    // --- Decoder stats via rxGetStatsSnapshot ---
+    {
+        rx_stats_snapshot_t ds;
+        rxGetStatsSnapshot(&ds);
+        snap.adsb_msg    = ds.adsb_messages;
+        snap.adsb_trk    = ds.adsb_tracks;
+        snap.adsb_noise  = ds.adsb_noise_dbfs;
+        snap.adsb_signal = ds.adsb_signal_dbfs;
+        snap.adsb_gain   = ds.adsb_gain_db;
+        snap.flarm_det   = ds.flarm_detected;
+        snap.flarm_dec   = ds.flarm_decoded;
+        snap.acars_dec   = ds.acars_decoded;
+        snap.vdl2_dec    = ds.vdl2_decoded;
+        snap.sonde_dec   = ds.sonde_decoded;
+        snap.pocsag_dec  = ds.pocsag_decoded;
+        snap.gsm_bcch    = ds.gsm_bcch;
+        snap.lte_mib     = ds.lte_mib;
+        snap.fanet_dec   = ds.fanet_decoded;
+        snap.sarsat_frm  = ds.sarsat_frames;
+    }
+
+    // --- Panel port traffic from network services ---
+    for (struct net_service *svc = Modes.services; svc; svc = svc->next) {
+        uint32_t in_kb = (uint32_t)(__atomic_load_n(&svc->bytes_in_total, __ATOMIC_RELAXED) / 1024ULL);
+        uint32_t out_kb = (uint32_t)(__atomic_load_n(&svc->bytes_out_total, __ATOMIC_RELAXED) / 1024ULL);
+
+        if (strcmp(svc->descr, "Raw TCP output") == 0)
+            snap.raw_out_kb = out_kb;
+        else if (strcmp(svc->descr, "Beast TCP output (cooked mode)") == 0)
+            snap.beast_cooked_out_kb = out_kb;
+        else if (strcmp(svc->descr, "Beast TCP output (verbatim mode)") == 0)
+            snap.beast_verbatim_out_kb = out_kb;
+        else if (strcmp(svc->descr, "Beast TCP output (verbatim+local mode)") == 0)
+            snap.beast_verbatim_local_out_kb = out_kb;
+        else if (strcmp(svc->descr, "Basestation TCP output") == 0)
+            snap.basestation_out_kb = out_kb;
+        else if (strcmp(svc->descr, "Stratux TCP output") == 0)
+            snap.stratux_out_kb = out_kb;
+        else if (strcmp(svc->descr, "Raw TCP input") == 0)
+            snap.raw_in_kb = in_kb;
+        else if (strcmp(svc->descr, "Beast TCP input") == 0)
+            snap.beast_in_kb = in_kb;
+    }
+
+    pthread_mutex_lock(&StatsHistory.mutex);
+    StatsHistory.ring[StatsHistory.head] = snap;
+    StatsHistory.head = (StatsHistory.head + 1) % StatsHistory.max_entries;
+    if (StatsHistory.count < StatsHistory.max_entries)
+        StatsHistory.count++;
+    StatsHistory.last_sample_ms = now_ms;
+    StatsHistory.unsaved_count++;
+
+    // Periodic save to disk
+    if (StatsHistory.unsaved_count >= STATS_HISTORY_SAVE_INTERVAL) {
+        statsHistorySaveLocked();
+    }
+    pthread_mutex_unlock(&StatsHistory.mutex);
+}
+
+static void api_get_stats_history(int fd)
+{
+    // Take a snapshot now if due
+    statsHistoryTakeSnapshot();
+
+    pthread_mutex_lock(&StatsHistory.mutex);
+
+    int count = StatsHistory.count;
+    int max_e = StatsHistory.max_entries;
+
+    // Pre-calculate buffer size for serialized snapshots.
+    size_t buf_cap = (size_t)count * 320 + 1024;
+    char *buf = (char *)malloc(buf_cap);
+    if (!buf) {
+        pthread_mutex_unlock(&StatsHistory.mutex);
+        http_send_json(fd, "{\"error\":\"oom\"}", 15);
+        return;
+    }
+
+    int pos = 0;
+    pos += snprintf(buf + pos, buf_cap - (size_t)pos,
+        "{\"config\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_s\":%d,\"entries\":%d},\"snapshots\":[",
+        StatsHistory.enabled ? "true" : "false",
+        StatsHistory.retention_hours,
+        StatsHistory.interval_s,
+        count);
+
+    // Read ring buffer in chronological order
+    int start = (count < max_e) ? 0 : StatsHistory.head;
+    for (int i = 0; i < count && (size_t)pos < buf_cap - 256; i++) {
+        int idx = (start + i) % max_e;
+        struct stats_snapshot *s = &StatsHistory.ring[idx];
+        if (i > 0) buf[pos++] = ',';
+        pos += snprintf(buf + pos, buf_cap - (size_t)pos,
+            "{\"t\":%" PRIu64
+            ",\"cu\":%.1f,\"cs\":%.1f"
+            ",\"rss\":%" PRIu32 ",\"ma\":%" PRIu32
+            ",\"am\":%" PRIu32 ",\"at\":%" PRIu32
+            ",\"an\":%.1f,\"as\":%.1f,\"ag\":%d"
+            ",\"fd\":%" PRIu32 ",\"fc\":%" PRIu32
+            ",\"ad\":%" PRIu32 ",\"vd\":%" PRIu32
+            ",\"sd\":%" PRIu32 ",\"pd\":%" PRIu32
+            ",\"gb\":%" PRIu32 ",\"lm\":%" PRIu32
+            ",\"nd\":%" PRIu32 ",\"sf\":%" PRIu32
+            ",\"tro\":%" PRIu32 ",\"tbc\":%" PRIu32
+            ",\"tbv\":%" PRIu32 ",\"tbl\":%" PRIu32
+            ",\"tbs\":%" PRIu32 ",\"tst\":%" PRIu32
+            ",\"tri\":%" PRIu32 ",\"tbi\":%" PRIu32 "}",
+            s->ts,
+            s->cpu_u, s->cpu_s,
+            s->rss, s->mem_avail,
+            s->adsb_msg, s->adsb_trk,
+            s->adsb_noise, s->adsb_signal, (int)s->adsb_gain,
+            s->flarm_det, s->flarm_dec,
+            s->acars_dec, s->vdl2_dec,
+            s->sonde_dec, s->pocsag_dec,
+            s->gsm_bcch, s->lte_mib,
+            s->fanet_dec, s->sarsat_frm,
+            s->raw_out_kb, s->beast_cooked_out_kb,
+            s->beast_verbatim_out_kb, s->beast_verbatim_local_out_kb,
+            s->basestation_out_kb, s->stratux_out_kb,
+            s->raw_in_kb, s->beast_in_kb);
+    }
+
+    pos += snprintf(buf + pos, buf_cap - (size_t)pos, "]}");
+
+    pthread_mutex_unlock(&StatsHistory.mutex);
+
+    http_send_json(fd, buf, pos);
+    free(buf);
+}
+
+// ============================= API: GET /api/warnings =====================
+
+static void api_get_warnings(int fd)
+{
+    std::string buf;
+    buf.reserve(512);
+    buf += "{\"warnings\":[";
+    int count = 0;
+
+    if (DvbDriverWarning) {
+        if (count > 0) buf += ",";
+        buf += "{\"level\":\"critical\",\"code\":\"dvb_driver\","
+               "\"title\":\"Kernel DVB driver loaded\","
+               "\"message\":\"The kernel module 'dvb_usb_rtl28xxu' is loaded and conflicts with SDR reception. "
+               "The R820T tuner will NOT receive any signal. "
+               "Fix: create /etc/modprobe.d/rtlsdr-blacklist.conf with 'blacklist dvb_usb_rtl28xxu' and reboot, "
+               "or run 'sudo rmmod dvb_usb_rtl28xxu' now.\"}";
+        count++;
+    }
+
+    buf += "]}";
+    http_send_json(fd, buf.c_str(), (int)buf.size());
+}
 
 // ============================= SDR Diagnostics ============================
 
@@ -452,6 +878,7 @@ void panelInitConfig(void)
     snprintf(PanelState.html_dir, sizeof(PanelState.html_dir), "%s", PANEL_HTML_DIR);
     pthread_mutex_init(&PanelState.log_mutex, NULL);
     pthread_mutex_init(&PanelState.msg_mutex, NULL);
+    pthread_mutex_init(&PanelState.ws_mutex, NULL);
     pthread_mutex_init(&DiagState.mutex, NULL);
 }
 
@@ -576,6 +1003,640 @@ static int base64_decode(const char *in, char *out, int outlen)
     return o;
 }
 
+// ============================= WebSocket =================================
+
+static void ws_remove_client(int fd) {
+    pthread_mutex_lock(&PanelState.ws_mutex);
+    for (int i = 0; i < PanelState.ws_count; i++) {
+        if (PanelState.ws_fds[i] == fd) {
+            close(fd);
+            PanelState.ws_fds[i] = PanelState.ws_fds[--PanelState.ws_count];
+            panelLog("Panel: WebSocket client disconnected (fd=%d, remaining=%d)", fd, PanelState.ws_count);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&PanelState.ws_mutex);
+}
+
+static void ws_handle_read(int fd) {
+    uint8_t buf[256];
+    ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+    if (n <= 0) { ws_remove_client(fd); return; }
+    if (n < 2) return;
+    uint8_t opcode = buf[0] & 0x0F;
+    if (opcode == 0x08) {
+        uint8_t close_resp[2] = {0x88, 0x00};
+        send(fd, close_resp, 2, MSG_NOSIGNAL);
+        ws_remove_client(fd);
+    } else if (opcode == 0x09) {
+        uint8_t pong[2] = {0x8A, 0x00};
+        send(fd, pong, 2, MSG_NOSIGNAL);
+    }
+}
+
+// ============================= Waterfall Spectrum =========================
+
+#include <openssl/sha.h>
+#include <math.h>
+
+// Base64 encode (for WebSocket handshake)
+static int base64_encode(const uint8_t *in, int inlen, char *out, int outlen) {
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int o = 0;
+    for (int i = 0; i < inlen && o < outlen - 4; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        if (i + 1 < inlen) v |= (uint32_t)in[i+1] << 8;
+        if (i + 2 < inlen) v |= (uint32_t)in[i+2];
+        out[o++] = b64[(v >> 18) & 0x3F];
+        out[o++] = b64[(v >> 12) & 0x3F];
+        out[o++] = (i + 1 < inlen) ? b64[(v >> 6) & 0x3F] : '=';
+        out[o++] = (i + 2 < inlen) ? b64[v & 0x3F] : '=';
+    }
+    out[o] = '\0';
+    return o;
+}
+
+// WebSocket handshake
+static bool ws_handshake(int fd, const char *request) {
+    const char *key_hdr = strstr(request, "Sec-WebSocket-Key:");
+    if (!key_hdr) return false;
+    key_hdr += 18;
+    while (*key_hdr == ' ') key_hdr++;
+    char key[64] = {0};
+    int ki = 0;
+    while (key_hdr[ki] && key_hdr[ki] != '\r' && key_hdr[ki] != '\n' && ki < 63)
+        { key[ki] = key_hdr[ki]; ki++; }
+    key[ki] = '\0';
+    // Trim trailing spaces
+    while (ki > 0 && key[ki-1] == ' ') key[--ki] = '\0';
+
+    // SHA-1(key + magic)
+    char concat[128];
+    snprintf(concat, sizeof(concat), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
+    uint8_t sha[20];
+    SHA1((uint8_t*)concat, strlen(concat), sha);
+    char accept_b64[64];
+    base64_encode(sha, 20, accept_b64, sizeof(accept_b64));
+
+    char resp[512];
+    int rlen = snprintf(resp, sizeof(resp),
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: %s\r\n"
+        "\r\n", accept_b64);
+    ssize_t w __attribute__((unused)) = write(fd, resp, rlen);
+    return true;
+}
+
+// Send a WebSocket binary frame
+static bool ws_send_binary(int fd, const uint8_t *data, int len) {
+    uint8_t hdr[10];
+    int hlen = 0;
+    hdr[0] = 0x82; // FIN + binary opcode
+    if (len < 126) {
+        hdr[1] = (uint8_t)len;
+        hlen = 2;
+    } else if (len < 65536) {
+        hdr[1] = 126;
+        hdr[2] = (uint8_t)(len >> 8);
+        hdr[3] = (uint8_t)(len & 0xFF);
+        hlen = 4;
+    } else {
+        return false; // frames >64K not needed
+    }
+    if (send(fd, hdr, hlen, MSG_NOSIGNAL) != hlen) return false;
+    if (send(fd, data, len, MSG_NOSIGNAL) != len) return false;
+    return true;
+}
+
+// Send a WebSocket text frame
+static bool ws_send_text(int fd, const char *text, int len) {
+    uint8_t hdr[10];
+    int hlen = 0;
+    hdr[0] = 0x81; // FIN + text opcode
+    if (len < 126) {
+        hdr[1] = (uint8_t)len;
+        hlen = 2;
+    } else if (len < 65536) {
+        hdr[1] = 126;
+        hdr[2] = (uint8_t)(len >> 8);
+        hdr[3] = (uint8_t)(len & 0xFF);
+        hlen = 4;
+    } else {
+        return false;
+    }
+    if (send(fd, hdr, hlen, MSG_NOSIGNAL) != hlen) return false;
+    if (send(fd, text, len, MSG_NOSIGNAL) != len) return false;
+    return true;
+}
+
+// Read and decode a WebSocket frame (client-to-server, masked)
+// Returns payload length or -1 on error/close. Writes opcode to *op.
+static int ws_read_frame(int fd, uint8_t *out, int max_out, uint8_t *op) {
+    uint8_t hdr[2];
+    ssize_t n = recv(fd, hdr, 2, MSG_DONTWAIT);
+    if (n <= 0) return -1;
+    if (n < 2) return -1;
+    *op = hdr[0] & 0x0F;
+    bool masked = (hdr[1] & 0x80) != 0;
+    int plen = hdr[1] & 0x7F;
+    if (plen == 126) {
+        uint8_t ext[2];
+        if (recv(fd, ext, 2, 0) != 2) return -1;
+        plen = (ext[0] << 8) | ext[1];
+    }
+    if (plen > max_out) return -1;
+    uint8_t mask[4] = {0};
+    if (masked) { if (recv(fd, mask, 4, 0) != 4) return -1; }
+    int rd = 0;
+    while (rd < plen) {
+        ssize_t r = recv(fd, out + rd, plen - rd, 0);
+        if (r <= 0) return -1;
+        rd += (int)r;
+    }
+    if (masked) { for (int i = 0; i < plen; i++) out[i] ^= mask[i & 3]; }
+    return plen;
+}
+
+// FFT: 256-point radix-2 DIT (in-place, complex float)
+#define WF_FFT_SIZE 256
+
+static float wf_sin_table[WF_FFT_SIZE];
+static float wf_cos_table[WF_FFT_SIZE];
+static float wf_window[WF_FFT_SIZE];  // Hann window
+static bool wf_tables_init = false;
+
+static void wf_init_tables(void) {
+    if (wf_tables_init) return;
+    for (int i = 0; i < WF_FFT_SIZE; i++) {
+        double angle = -2.0 * M_PI * i / WF_FFT_SIZE;
+        wf_sin_table[i] = (float)sin(angle);
+        wf_cos_table[i] = (float)cos(angle);
+        wf_window[i] = 0.5f * (1.0f - (float)cos(2.0 * M_PI * i / (WF_FFT_SIZE - 1)));
+    }
+    wf_tables_init = true;
+}
+
+static void wf_fft256(float *re, float *im) {
+    // Bit-reversal permutation
+    for (int i = 1, j = 0; i < WF_FFT_SIZE; i++) {
+        int bit = WF_FFT_SIZE >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float t = re[i]; re[i] = re[j]; re[j] = t;
+            t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+    }
+    // Butterfly stages
+    for (int size = 2; size <= WF_FFT_SIZE; size <<= 1) {
+        int half = size >> 1;
+        int step = WF_FFT_SIZE / size;
+        for (int i = 0; i < WF_FFT_SIZE; i += size) {
+            for (int k = 0; k < half; k++) {
+                int idx = k * step;
+                float wr = wf_cos_table[idx];
+                float wi = wf_sin_table[idx];
+                float tr = wr * re[i+k+half] - wi * im[i+k+half];
+                float ti = wr * im[i+k+half] + wi * re[i+k+half];
+                re[i+k+half] = re[i+k] - tr;
+                im[i+k+half] = im[i+k] - ti;
+                re[i+k] += tr;
+                im[i+k] += ti;
+            }
+        }
+    }
+}
+
+// Waterfall state
+#define WF_TAP_BUF_SIZE  (1024 * 1024) // 1 MB ring buffer for IQ tap (must be > callback chunk size)
+#define WF_MAX_FPS       20
+
+struct wf_state {
+    int      ws_fd;          // WebSocket client fd (-1 = none)
+    int      rx_id;          // receiver being tapped (-1 = none)
+    bool     owned;          // true = we took ownership (decoder disabled)
+    sdr_role_t saved_role;   // original role before take ownership
+    uint32_t saved_freq;     // original frequency
+    double   saved_gain;     // original gain
+    double   saved_sample_rate; // original sample rate
+    uint32_t tap_rd;         // read offset into tap ring buffer
+    uint64_t last_frame_ms;  // timestamp of last sent frame
+    uint8_t *tap_buf;        // allocated tap buffer
+};
+
+static struct wf_state WF = { .ws_fd = -1, .rx_id = -1, .owned = false, .tap_buf = NULL };
+
+static void wf_stop_tap(void) {
+    if (WF.rx_id >= 0 && WF.rx_id < SdrManager.count) {
+        sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
+        rx->wf_tap_active = 0;
+        rx->wf_tap_buf = NULL;
+        rx->wf_tap_size = 0;
+    }
+    WF.rx_id = -1;
+}
+
+static void wf_release_ownership(void) {
+    if (!WF.owned || WF.rx_id < 0) return;
+    int saved_rx_id = WF.rx_id;
+    sdr_receiver_t *rx = &SdrManager.receivers[saved_rx_id];
+    sdr_role_t saved_role = WF.saved_role;
+    double saved_gain = WF.saved_gain;
+    uint32_t saved_freq = WF.saved_freq;
+    double saved_sr = WF.saved_sample_rate;
+
+    wf_stop_tap();
+    // Always clear ownership so we don't get stuck
+    WF.owned = false;
+
+    // Restore original decoder
+    pthread_mutex_lock(&SdrManager.lock);
+    bool ok = rxReconfigure(rx, saved_role, saved_gain, rx->config.ppm_error,
+                            saved_freq, saved_sr);
+    if (!ok) {
+        // Hard recovery: close and reopen the device
+        panelLog("Panel: Waterfall rxReconfigure failed for rx[%d], attempting hard recovery",
+                 saved_rx_id);
+        rxClose(rx);
+        if (rxOpen(rx)) {
+            ok = rxReconfigure(rx, saved_role, saved_gain, rx->config.ppm_error,
+                               saved_freq, saved_sr);
+            if (ok) ok = rxStart(rx);
+        }
+    } else {
+        ok = rxStart(rx);
+        if (!ok) {
+            // rxStart failed after successful reconfigure — try close/reopen
+            panelLog("Panel: Waterfall rxStart failed for rx[%d], attempting hard recovery",
+                     saved_rx_id);
+            rxClose(rx);
+            if (rxOpen(rx)) {
+                ok = rxReconfigure(rx, saved_role, saved_gain, rx->config.ppm_error,
+                                   saved_freq, saved_sr);
+                if (ok) ok = rxStart(rx);
+            }
+        }
+    }
+    pthread_mutex_unlock(&SdrManager.lock);
+
+    if (!ok) {
+        panelLog("Panel: Waterfall failed to restore rx[%d] to %s (device may need manual restart)",
+                 saved_rx_id, sdrRoleName(saved_role));
+    } else {
+        panelLog("Panel: Waterfall released ownership of rx[%d], restored %s",
+                 saved_rx_id, sdrRoleName(saved_role));
+    }
+}
+
+static void wf_disconnect(void) {
+    if (WF.owned) wf_release_ownership();
+    wf_stop_tap();
+    if (WF.ws_fd >= 0) {
+        close(WF.ws_fd);
+        WF.ws_fd = -1;
+    }
+    free(WF.tap_buf);
+    WF.tap_buf = NULL;
+}
+
+// Start tapping a receiver (observe mode - decoder keeps running)
+static bool wf_start_tap(int rx_id) {
+    if (rx_id < 0 || rx_id >= SdrManager.count) return false;
+    sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
+    if (rx->state != RX_STATE_RUNNING) return false;
+    // Only allow sdrgg backend
+    if (!rx->backend_ops || rx->backend_ops->type != SDR_BACKEND_SDRGG) return false;
+
+    wf_stop_tap(); // stop any existing tap
+
+    if (!WF.tap_buf) {
+        WF.tap_buf = (uint8_t *)malloc(WF_TAP_BUF_SIZE);
+        if (!WF.tap_buf) return false;
+    }
+    memset(WF.tap_buf, 128, WF_TAP_BUF_SIZE);
+
+    rx->wf_tap_buf = WF.tap_buf;
+    rx->wf_tap_size = WF_TAP_BUF_SIZE;
+    rx->wf_tap_wr = 0;
+    WF.tap_rd = 0;
+    WF.rx_id = rx_id;
+    __atomic_store_n(&rx->wf_tap_active, 1, __ATOMIC_RELEASE);
+
+    panelLog("Panel: Waterfall tapping rx[%d] (%s)", rx_id, sdrRoleName(rx->config.role));
+    return true;
+}
+
+static bool wf_restart_owned_stream(sdr_receiver_t *rx, double gain_db,
+                                    uint32_t freq_hz, uint32_t rate_hz) {
+    if (!WF.tap_buf) return false;
+
+    __atomic_store_n(&rx->pending_freq, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&rx->wf_tap_active, 0, __ATOMIC_RELEASE);
+    rx->wf_tap_wr = 0;
+    WF.tap_rd = 0;
+
+    pthread_mutex_lock(&SdrManager.lock);
+    bool ok = rxReconfigure(rx, SDR_ROLE_NONE, gain_db, rx->config.ppm_error,
+                            freq_hz, rate_hz);
+    if (!ok) {
+        // Hard recovery: close and reopen
+        panelLog("Panel: wf_restart rxReconfigure failed for rx[%d], hard recovery", rx->id);
+        rxClose(rx);
+        if (rxOpen(rx)) {
+            ok = rxReconfigure(rx, SDR_ROLE_NONE, gain_db, rx->config.ppm_error,
+                               freq_hz, rate_hz);
+        }
+    }
+    if (ok) ok = rxStart(rx);
+    pthread_mutex_unlock(&SdrManager.lock);
+
+    if (!ok) {
+        panelLog("Panel: wf_restart failed for rx[%d] — device may need manual restart", rx->id);
+        return false;
+    }
+
+    memset(WF.tap_buf, 128, WF_TAP_BUF_SIZE);
+    rx->wf_tap_buf = WF.tap_buf;
+    rx->wf_tap_size = WF_TAP_BUF_SIZE;
+    rx->wf_tap_wr = 0;
+    WF.tap_rd = 0;
+    WF.rx_id = rx->id;
+    __atomic_store_n(&rx->wf_tap_active, 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+// Take ownership: stop decoder, switch to waterfall-only mode
+static bool wf_take_ownership(int rx_id) {
+    if (rx_id < 0 || rx_id >= SdrManager.count) return false;
+    sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
+    if (rx->state != RX_STATE_RUNNING) return false;
+    if (!rx->backend_ops || rx->backend_ops->type != SDR_BACKEND_SDRGG) return false;
+
+    // Save original config
+    WF.saved_role = rx->config.role;
+    WF.saved_freq = rx->config.freq;
+    WF.saved_gain = rx->config.gain;
+    WF.saved_sample_rate = rx->config.sample_rate;
+
+    if (!WF.tap_buf) {
+        WF.tap_buf = (uint8_t *)malloc(WF_TAP_BUF_SIZE);
+        if (!WF.tap_buf) return false;
+    }
+
+    // Stop the decoder by reconfiguring to ROLE_NONE
+    wf_stop_tap();
+    if (!wf_restart_owned_stream(rx, rx->config.gain,
+                                 rx->config.freq, (uint32_t)rx->config.sample_rate)) {
+        return false;
+    }
+
+    WF.owned = true;
+    panelLog("Panel: Waterfall took ownership of rx[%d] (was %s)",
+             rx_id, sdrRoleName(WF.saved_role));
+    return true;
+}
+
+// Tune frequency (only in owned mode)
+static bool wf_tune(uint32_t freq_hz) {
+    if (!WF.owned || WF.rx_id < 0) return false;
+    sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
+    if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
+
+    __atomic_store_n(&rx->pending_freq, freq_hz, __ATOMIC_RELEASE);
+    for (int attempt = 0; attempt < 250; attempt++) {
+        uint32_t pending = __atomic_load_n(&rx->pending_freq, __ATOMIC_ACQUIRE);
+        int applied = __atomic_load_n(&rx->config.freq, __ATOMIC_ACQUIRE);
+        if (pending == 0 && applied == (int)freq_hz) {
+            return true;
+        }
+        usleep(1000);
+    }
+
+    return false;
+}
+
+// Set gain — works in both owned and observe mode
+static bool wf_set_gain(int gain_tenth_db) {
+    if (WF.rx_id < 0) return false;
+    sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
+    if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
+
+    if (WF.owned) {
+        // Owned mode: full restart with new gain
+        return wf_restart_owned_stream(rx, gain_tenth_db / 10.0,
+                                       (uint32_t)rx->config.freq,
+                                       (uint32_t)rx->config.sample_rate);
+    } else {
+        // Observe mode: live gain change without stopping decoder
+        if (!rx->rtl.gains || rx->rtl.gain_steps < 2) return false;
+        int best = 0;
+        for (int i = 0; i < rx->rtl.gain_steps; i++) {
+            if (abs(rx->rtl.gains[i] - gain_tenth_db) <
+                abs(rx->rtl.gains[best] - gain_tenth_db))
+                best = i;
+        }
+        int result = rxSetGain(rx, best);
+        if (result < 0) return false;
+        rx->config.gain = rx->rtl.gains[result] / 10.0;
+        return true;
+    }
+}
+
+// Set sample rate (only in owned mode)
+static bool wf_set_sample_rate(uint32_t rate_hz) {
+    if (!WF.owned || WF.rx_id < 0) return false;
+    sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
+    if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
+    return wf_restart_owned_stream(rx, rx->config.gain,
+                                   (uint32_t)rx->config.freq, rate_hz);
+}
+
+// Process tap buffer → compute FFT → send spectrum frame via WebSocket
+static void wf_process_and_send(void) {
+    if (WF.ws_fd < 0 || WF.rx_id < 0) return;
+
+    // Rate limit
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (now_ms - WF.last_frame_ms < (1000 / WF_MAX_FPS)) return;
+
+    sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
+    uint32_t wr = __atomic_load_n(&rx->wf_tap_wr, __ATOMIC_ACQUIRE);
+    uint32_t rd = WF.tap_rd;
+    uint32_t sz = WF_TAP_BUF_SIZE;
+
+    // Need at least FFT_SIZE*2 bytes (IQ pairs)
+    uint32_t avail = (wr >= rd) ? (wr - rd) : (sz - rd + wr);
+    if (avail < WF_FFT_SIZE * 2) return;
+
+    // Read the latest FFT_SIZE IQ pairs from the buffer
+    // Skip ahead if too much data accumulated
+    if (avail > WF_FFT_SIZE * 2 * 4) {
+        // Jump to latest data
+        rd = (wr + sz - WF_FFT_SIZE * 2) % sz;
+    }
+
+    wf_init_tables();
+    float re[WF_FFT_SIZE], im[WF_FFT_SIZE];
+    for (int i = 0; i < WF_FFT_SIZE; i++) {
+        uint32_t idx = (rd + i * 2) % sz;
+        float I = ((float)WF.tap_buf[idx] - 127.5f) / 128.0f;
+        float Q = ((float)WF.tap_buf[(idx + 1) % sz] - 127.5f) / 128.0f;
+        re[i] = I * wf_window[i];
+        im[i] = Q * wf_window[i];
+    }
+    WF.tap_rd = (rd + WF_FFT_SIZE * 2) % sz;
+
+    // FFT
+    wf_fft256(re, im);
+
+    // Compute power spectrum in dB, reorder (DC in center)
+    uint8_t spectrum[WF_FFT_SIZE];
+    for (int i = 0; i < WF_FFT_SIZE; i++) {
+        // Reorder: move DC to center
+        int fi = (i + WF_FFT_SIZE / 2) % WF_FFT_SIZE;
+        float pwr = re[fi] * re[fi] + im[fi] * im[fi];
+        float db = 10.0f * log10f(pwr + 1e-10f);
+        // Map dB range [-60, 0] to [0, 255]
+        float val = (db + 60.0f) * (255.0f / 60.0f);
+        if (val < 0.0f) val = 0.0f;
+        if (val > 255.0f) val = 255.0f;
+        spectrum[i] = (uint8_t)val;
+    }
+
+    // Send as binary WebSocket frame
+    if (!ws_send_binary(WF.ws_fd, spectrum, WF_FFT_SIZE)) {
+        // Client disconnected
+        wf_disconnect();
+        return;
+    }
+    WF.last_frame_ms = now_ms;
+}
+
+// Handle incoming WebSocket message from waterfall client
+static void wf_handle_message(const char *msg, int len) {
+    // Parse JSON commands: {"cmd":"start","rx":0}, {"cmd":"stop"}, {"cmd":"take","rx":0},
+    //                      {"cmd":"release"}, {"cmd":"tune","freq":1090000000},
+    //                      {"cmd":"gain","value":350}, {"cmd":"rate","value":2400000}
+    (void)len;
+    char cmd[32] = {0};
+    const char *p;
+
+    p = strstr(msg, "\"cmd\":\"");
+    if (!p) return;
+    p += 7;
+    int ci = 0;
+    while (*p && *p != '"' && ci < 30) cmd[ci++] = *p++;
+    cmd[ci] = '\0';
+
+    if (strcmp(cmd, "start") == 0) {
+        int rx_id = 0;
+        const char *r = strstr(msg, "\"rx\":");
+        if (r) rx_id = atoi(r + 5);
+        if (wf_start_tap(rx_id)) {
+            sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
+            char resp[512];
+            int rlen = snprintf(resp, sizeof(resp),
+                "{\"status\":\"ok\",\"freq\":%d,\"rate\":%.0f,\"gain\":%.1f,\"role\":\"%s\",\"gain_list\":[",
+                rx->config.freq, rx->config.sample_rate, rx->config.gain,
+                sdrRoleName(rx->config.role));
+            if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
+                for (int g = 0; g < rx->rtl.gain_steps && rlen < 480; g++) {
+                    rlen += snprintf(resp + rlen, sizeof(resp) - rlen,
+                        "%s%.1f", g ? "," : "", rx->rtl.gains[g] / 10.0);
+                }
+            }
+            rlen += snprintf(resp + rlen, sizeof(resp) - rlen, "]}");
+            ws_send_text(WF.ws_fd, resp, rlen);
+        } else {
+            const char *e = "{\"status\":\"error\",\"msg\":\"Cannot tap receiver (not sdrgg or not running)\"}";
+            ws_send_text(WF.ws_fd, e, (int)strlen(e));
+        }
+    } else if (strcmp(cmd, "stop") == 0) {
+        wf_stop_tap();
+        const char *e = "{\"status\":\"stopped\"}";
+        ws_send_text(WF.ws_fd, e, (int)strlen(e));
+    } else if (strcmp(cmd, "take") == 0) {
+        int rx_id = WF.rx_id;
+        const char *r = strstr(msg, "\"rx\":");
+        if (r) rx_id = atoi(r + 5);
+        if (wf_take_ownership(rx_id)) {
+            sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
+            char resp[256];
+            int rlen = snprintf(resp, sizeof(resp),
+                "{\"status\":\"owned\",\"freq\":%d,\"rate\":%.0f,\"gain\":%.1f}",
+                rx->config.freq, rx->config.sample_rate, rx->config.gain);
+            ws_send_text(WF.ws_fd, resp, rlen);
+        } else {
+            const char *e = "{\"status\":\"error\",\"msg\":\"Cannot take ownership\"}";
+            ws_send_text(WF.ws_fd, e, (int)strlen(e));
+        }
+    } else if (strcmp(cmd, "release") == 0) {
+        wf_release_ownership();
+        const char *e = "{\"status\":\"released\"}";
+        ws_send_text(WF.ws_fd, e, (int)strlen(e));
+    } else if (strcmp(cmd, "tune") == 0) {
+        const char *f = strstr(msg, "\"freq\":");
+        if (f) {
+            uint32_t freq = (uint32_t)strtoul(f + 7, NULL, 10);
+            bool ok = wf_tune(freq);
+            char resp[128];
+            int rlen = snprintf(resp, sizeof(resp),
+                "{\"status\":\"%s\",\"freq\":%u}", ok?"ok":"error", freq);
+            ws_send_text(WF.ws_fd, resp, rlen);
+        }
+    } else if (strcmp(cmd, "gain") == 0) {
+        const char *v = strstr(msg, "\"value\":");
+        if (v) {
+            int g = atoi(v + 8);
+            bool ok = wf_set_gain(g);
+            sdr_receiver_t *rx = (WF.rx_id >= 0) ? &SdrManager.receivers[WF.rx_id] : NULL;
+            double actual_db = rx ? rx->config.gain : g / 10.0;
+            char resp[128];
+            int rlen = snprintf(resp, sizeof(resp),
+                "{\"status\":\"%s\",\"gain_tenth_db\":%d,\"gain_db\":%.1f}",
+                ok?"ok":"error", g, actual_db);
+            ws_send_text(WF.ws_fd, resp, rlen);
+        }
+    } else if (strcmp(cmd, "rate") == 0) {
+        const char *v = strstr(msg, "\"value\":");
+        if (v) {
+            uint32_t rate = (uint32_t)strtoul(v + 8, NULL, 10);
+            bool ok = wf_set_sample_rate(rate);
+            char resp[128];
+            int rlen = snprintf(resp, sizeof(resp),
+                "{\"status\":\"%s\",\"rate\":%u}", ok?"ok":"error", rate);
+            ws_send_text(WF.ws_fd, resp, rlen);
+        }
+    }
+}
+
+// Handle WebSocket read for waterfall client
+static void wf_handle_ws_read(void) {
+    if (WF.ws_fd < 0) return;
+    uint8_t buf[1024];
+    uint8_t opcode;
+    int plen = ws_read_frame(WF.ws_fd, buf, sizeof(buf) - 1, &opcode);
+    if (plen < 0) {
+        wf_disconnect();
+        return;
+    }
+    if (opcode == 0x08) { // close
+        uint8_t close_resp[2] = {0x88, 0x00};
+        send(WF.ws_fd, close_resp, 2, MSG_NOSIGNAL);
+        wf_disconnect();
+    } else if (opcode == 0x09) { // ping
+        uint8_t pong[2] = {0x8A, 0x00};
+        send(WF.ws_fd, pong, 2, MSG_NOSIGNAL);
+    } else if (opcode == 0x01) { // text
+        buf[plen] = '\0';
+        wf_handle_message((const char*)buf, plen);
+    }
+}
+
 // ============================= HTTP Helpers ===============================
 
 static void http_send(int fd, int code, const char *content_type, const char *body, int body_len)
@@ -642,6 +1703,22 @@ static bool check_auth(const char *request)
     int exp_len = snprintf(expected, sizeof(expected), "admin:%s", PanelState.password);
     if (dec_len != exp_len) return false;
     return timing_safe_equal(decoded, expected, (size_t)exp_len);
+}
+
+// ============================= Pointer Validation =========================
+
+// Check if a pointer is readable without risking SIGSEGV.
+// Uses write() to a pipe: kernel returns EFAULT for invalid addresses.
+static bool ptr_readable(const void *p) {
+    if (!p) return false;
+    int pfd[2];
+    if (pipe(pfd) < 0) return false;
+    ssize_t r = write(pfd[1], p, 1);
+    int saved_errno = errno;
+    close(pfd[0]);
+    close(pfd[1]);
+    if (r < 0 && saved_errno == EFAULT) return false;
+    return (r == 1);
 }
 
 // ============================= JSON Escape ================================
@@ -958,6 +2035,31 @@ static void panelApplyConfig(const char *body)
         }
     }
 
+    // Stats History config
+    const char *shist = json_find_obj(body, "stats_history");
+    if (shist) {
+        bool was_enabled = StatsHistory.enabled;
+        StatsHistory.enabled = json_get_bool(shist, "enabled", StatsHistory.enabled);
+        int hours = json_get_int(shist, "retention_hours", StatsHistory.retention_hours);
+        if (hours < 1) hours = 1;
+        if (hours > 2160) hours = 2160;  // max 90 days
+        int interval_min = json_get_int(shist, "interval_minutes", StatsHistory.interval_s / 60);
+        if (interval_min < 1) interval_min = 1;
+        if (interval_min > 60) interval_min = 60;
+        int new_interval_s = interval_min * 60;
+        bool need_reconfig = (hours != StatsHistory.retention_hours) || (new_interval_s != StatsHistory.interval_s) || (!was_enabled && StatsHistory.enabled);
+        StatsHistory.retention_hours = hours;
+        StatsHistory.interval_s = new_interval_s;
+        if (need_reconfig && StatsHistory.enabled) {
+            // Save existing data before reconfigure wipes the ring buffer
+            if (StatsHistory.count > 0) statsHistorySave();
+            statsHistoryReconfigure();
+            statsHistoryLoad();
+        }
+        panelLog("Panel: Stats history %s (retention: %d hours, interval: %d min)",
+                 StatsHistory.enabled ? "enabled" : "disabled", StatsHistory.retention_hours, interval_min);
+    }
+
     panelLog("Panel: configuration applied at runtime (no restart)");
 }
 
@@ -985,16 +2087,16 @@ static int panelAddBeastFeed(const char *name, const char *host, int port, int f
 void panelEnsureDefaultBeastFeeds(void)
 {
     static const struct { const char *name; const char *host; int port; int format; } defaults[] = {
-        { "ADSBx",          "feed.adsbexchange.com",   30005, FEED_FORMAT_BEAST },
-        { "adsb.fi",        "feed.adsb.fi",            30004, FEED_FORMAT_BEAST },
-        { "FlyItaly",       "dati.flyitalyadsb.com",   4905,  FEED_FORMAT_BEAST },
-        { "PlaneWatch",     "atc.plane.watch",         30004, FEED_FORMAT_BEAST },
-        { "adsb.one",       "feed.adsb.one",           64004, FEED_FORMAT_BEAST },
-        { "adsb.lol",       "feed.adsb.lol",           30004, FEED_FORMAT_BEAST },
-        { "airplanes.live", "feed.airplanes.live",     30004, FEED_FORMAT_BEAST },
-        { "Planespotters",  "feed.planespotters.net",  30004, FEED_FORMAT_BEAST },
-        { "TheAirTraffic",  "feed.theairtraffic.com",  30004, FEED_FORMAT_BEAST },
-        { "AVDelphi",       "data.avdelphi.com",       24999, FEED_FORMAT_BEAST },
+        { "ADSBx",          "feed.adsbexchange.com",   30005, FEED_FORMAT_BEAST_REDUCE },
+        { "adsb.fi",        "feed.adsb.fi",            30004, FEED_FORMAT_BEAST_REDUCE },
+        { "FlyItaly",       "dati.flyitalyadsb.com",   4905,  FEED_FORMAT_BEAST_REDUCE },
+        { "PlaneWatch",     "atc.plane.watch",         30004, FEED_FORMAT_BEAST_REDUCE },
+        { "adsb.one",       "feed.adsb.one",           64004, FEED_FORMAT_BEAST_REDUCE },
+        { "adsb.lol",       "feed.adsb.lol",           30004, FEED_FORMAT_BEAST_REDUCE },
+        { "airplanes.live", "feed.airplanes.live",     30004, FEED_FORMAT_BEAST_REDUCE },
+        { "Planespotters",  "feed.planespotters.net",  30004, FEED_FORMAT_BEAST_REDUCE },
+        { "TheAirTraffic",  "feed.theairtraffic.com",  30004, FEED_FORMAT_BEAST_REDUCE },
+        { "AVDelphi",       "data.avdelphi.com",       24999, FEED_FORMAT_BEAST_REDUCE },
         { "ADSBHub",        "data.adsbhub.org",        5001,  FEED_FORMAT_RAW   },
     };
     for (int i = 0; i < (int)(sizeof(defaults)/sizeof(defaults[0])); i++) {
@@ -1140,6 +2242,26 @@ void panelLoadBeastFeedState(void)
             Modes.airframes_vdl2_feed.enabled = json_get_bool(af_vdl2, "enabled", false) ? 1 : 0;
             fprintf(stderr, "Panel: Airframes VDL2 %s by saved config\n",
                     Modes.airframes_vdl2_feed.enabled ? "enabled" : "disabled");
+        }
+    }
+
+    // Restore stats history config
+    const char *shist = json_find_obj(data, "stats_history");
+    if (shist) {
+        StatsHistory.enabled = json_get_bool(shist, "enabled", false);
+        int hours = json_get_int(shist, "retention_hours", 24);
+        if (hours < 1) hours = 1;
+        if (hours > 2160) hours = 2160;
+        StatsHistory.retention_hours = hours;
+        int interval_min = json_get_int(shist, "interval_minutes", StatsHistory.interval_s / 60);
+        if (interval_min < 1) interval_min = 1;
+        if (interval_min > 60) interval_min = 60;
+        StatsHistory.interval_s = interval_min * 60;
+        if (StatsHistory.enabled) {
+            statsHistoryReconfigure();
+            statsHistoryLoad();
+            fprintf(stderr, "Panel: Stats history enabled (retention: %d hours, interval: %ds, loaded: %d snapshots)\n",
+                    StatsHistory.retention_hours, StatsHistory.interval_s, StatsHistory.count);
         }
     }
 
@@ -1338,11 +2460,14 @@ static void api_get_config(int fd)
 
     // MLAT
     buf += "\"mlat\":{\"servers\":[\n";
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    int mlat_count = MlatConfig.server_count;
+    if (mlat_count < 0 || mlat_count > MAX_MLAT_SERVERS) mlat_count = 0;
+    for (int i = 0; i < mlat_count; i++) {
+        const char *host = MlatConfig.servers[i].host;
         buf += sfmt(
             "%s{\"host\":\"%s\",\"port\":%d,\"state\":%d}",
             i ? "," : "",
-            MlatConfig.servers[i].host ? json_escape(esc, sizeof(esc), MlatConfig.servers[i].host) : "",
+            (host && ptr_readable(host)) ? json_escape(esc, sizeof(esc), host) : "",
             MlatConfig.servers[i].port,
             (int)MlatConfig.servers[i].state);
     }
@@ -1403,9 +2528,16 @@ static void api_get_config(int fd)
 
     // Panel
     buf += sfmt(
-        "\"panel\":{\"port\":%d,\"has_password\":%s}\n",
+        "\"panel\":{\"port\":%d,\"has_password\":%s},\n",
         PanelState.port,
         PanelState.password[0] ? "true" : "false");
+
+    // Stats History
+    buf += sfmt(
+        "\"stats_history\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_minutes\":%d}\n",
+        StatsHistory.enabled ? "true" : "false",
+        StatsHistory.retention_hours,
+        StatsHistory.interval_s / 60);
 
     buf += "}\n";
 
@@ -1468,16 +2600,20 @@ static void api_get_status(int fd)
     }
 
     // MLAT servers
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    int mlat_count2 = MlatConfig.server_count;
+    if (mlat_count2 < 0 || mlat_count2 > MAX_MLAT_SERVERS) mlat_count2 = 0;
+    for (int i = 0; i < mlat_count2; i++) {
         const char *ml_states[] = {"disconnected","connecting","handshaking","ready"};
         int mi = (int)MlatConfig.servers[i].state;
         if (mi < 0 || mi > 3) mi = 0;
+        const char *host = MlatConfig.servers[i].host;
+        bool host_ok = (host && ptr_readable(host));
         buf += sfmt(
             "%s{\"name\":\"MLAT:%s\",\"type\":\"mlat\",\"enabled\":true,"
             "\"host\":\"%s\",\"port\":%d,\"state\":\"%s\"}",
             need_comma ? "," : "",
-            MlatConfig.servers[i].host ? json_escape(esc, sizeof(esc), MlatConfig.servers[i].host) : "?",
-            MlatConfig.servers[i].host ? json_escape(esc2, sizeof(esc2), MlatConfig.servers[i].host) : "",
+            host_ok ? json_escape(esc, sizeof(esc), host) : "?",
+            host_ok ? json_escape(esc2, sizeof(esc2), host) : "",
             MlatConfig.servers[i].port,
             ml_states[mi]);
         need_comma = 1;
@@ -1627,10 +2763,79 @@ static void fanet_ground_json_cb(const fanet_ground_entry_t *e, void *ctx)
     c->count++;
 }
 
+// Callback for name serialization
+struct fanet_name_json_ctx { std::string *buf; int count; };
+static void fanet_name_json_cb(const fanet_name_entry_t *e, void *ctx)
+{
+    struct fanet_name_json_ctx *c = (struct fanet_name_json_ctx *)ctx;
+    int age = (int)((mstime() - e->last_seen) / 1000);
+    char esc[64];
+    *c->buf += sfmt("%s{\"addr\":\"%06X\",\"name\":\"%s\",\"age\":%d}",
+        c->count ? "," : "", e->addr, json_escape(esc, sizeof(esc), e->name), age);
+    c->count++;
+}
+
+// Callback for message serialization
+struct fanet_msg_json_ctx { std::string *buf; int count; };
+static void fanet_msg_json_cb(const fanet_msg_entry_t *e, void *ctx)
+{
+    struct fanet_msg_json_ctx *c = (struct fanet_msg_json_ctx *)ctx;
+    int age = (int)((mstime() - e->last_seen) / 1000);
+    char esc[256];
+    *c->buf += sfmt("%s{\"addr\":\"%06X\",\"subtype\":%u,\"text\":\"%s\",\"age\":%d}",
+        c->count ? "," : "", e->addr, (uint32_t)e->subtype,
+        json_escape(esc, sizeof(esc), e->text), age);
+    c->count++;
+}
+
+// Callback for weather serialization
+struct fanet_wx_json_ctx { std::string *buf; int count; };
+static void fanet_wx_json_cb(const fanet_wx_entry_t *e, void *ctx)
+{
+    struct fanet_wx_json_ctx *c = (struct fanet_wx_json_ctx *)ctx;
+    int age = (int)((mstime() - e->last_seen) / 1000);
+    char esc[64];
+    *c->buf += sfmt("%s{\"addr\":\"%06X\",\"name\":\"%s\",\"age\":%d",
+        c->count ? "," : "", e->addr, json_escape(esc, sizeof(esc), e->name), age);
+    if (e->has_pos) *c->buf += sfmt(",\"lat\":%.5f,\"lon\":%.5f", e->latitude, e->longitude);
+    if (e->has_temp) *c->buf += sfmt(",\"temp\":%.1f", e->temperature);
+    if (e->has_wind) *c->buf += sfmt(",\"wind\":%.1f,\"gust\":%.1f,\"wdir\":%.0f",
+        e->wind_speed, e->wind_gust, e->wind_heading);
+    if (e->has_humidity) *c->buf += sfmt(",\"hum\":%.0f", e->humidity);
+    if (e->has_pressure) *c->buf += sfmt(",\"press\":%.1f", e->pressure);
+    if (e->has_soc) *c->buf += sfmt(",\"soc\":%.0f", e->state_of_charge);
+    *c->buf += "}";
+    c->count++;
+}
+
+// Callback for thermal serialization
+struct fanet_thermal_json_ctx { std::string *buf; int count; };
+static void fanet_thermal_json_cb(const fanet_thermal_entry_t *e, void *ctx)
+{
+    struct fanet_thermal_json_ctx *c = (struct fanet_thermal_json_ctx *)ctx;
+    int age = (int)((mstime() - e->last_seen) / 1000);
+    *c->buf += sfmt("%s{\"addr\":\"%06X\",\"lat\":%.5f,\"lon\":%.5f,\"alt\":%d,"
+        "\"climb\":%.1f,\"wind\":%.1f,\"wdir\":%.0f,\"conf\":%u,\"age\":%d}",
+        c->count ? "," : "", e->addr, e->latitude, e->longitude, e->altitude,
+        e->climb, e->wind_speed, e->wind_heading, (uint32_t)e->confidence, age);
+    c->count++;
+}
+
+// Callback for ACK serialization
+struct fanet_ack_json_ctx { std::string *buf; int count; };
+static void fanet_ack_json_cb(const fanet_ack_entry_t *e, void *ctx)
+{
+    struct fanet_ack_json_ctx *c = (struct fanet_ack_json_ctx *)ctx;
+    int age = (int)((mstime() - e->timestamp) / 1000);
+    *c->buf += sfmt("%s{\"src\":\"%06X\",\"dst\":\"%06X\",\"age\":%d}",
+        c->count ? "," : "", e->src_addr, e->dst_addr, age);
+    c->count++;
+}
+
 static void api_get_fanet(int fd)
 {
     std::string buf;
-    buf.reserve(4096);
+    buf.reserve(8192);
     fanet_stats_t stats = {0};
 
     // Find the FANET receiver and get stats
@@ -1671,10 +2876,34 @@ static void api_get_fanet(int fd)
         (uint64_t)stats.type_counts[9],
         (uint64_t)stats.type_counts[10]);
 
-    // Append ground tracking entries
+    // Ground tracks
     buf += ",\"ground_tracks\":[";
-    struct fanet_ground_json_ctx ctx = { &buf, 0 };
-    fanetGetGroundTracks(fanet_ground_json_cb, &ctx);
+    { struct fanet_ground_json_ctx c = { &buf, 0 }; fanetGetGroundTracks(fanet_ground_json_cb, &c); }
+    buf += "]";
+
+    // Names (type 2)
+    buf += ",\"names\":[";
+    { struct fanet_name_json_ctx c = { &buf, 0 }; fanetGetNames(fanet_name_json_cb, &c); }
+    buf += "]";
+
+    // Messages (type 3)
+    buf += ",\"messages\":[";
+    { struct fanet_msg_json_ctx c = { &buf, 0 }; fanetGetMessages(fanet_msg_json_cb, &c); }
+    buf += "]";
+
+    // Weather (type 4)
+    buf += ",\"weather\":[";
+    { struct fanet_wx_json_ctx c = { &buf, 0 }; fanetGetWeather(fanet_wx_json_cb, &c); }
+    buf += "]";
+
+    // Thermals (type 9)
+    buf += ",\"thermals\":[";
+    { struct fanet_thermal_json_ctx c = { &buf, 0 }; fanetGetThermals(fanet_thermal_json_cb, &c); }
+    buf += "]";
+
+    // ACKs (type 0)
+    buf += ",\"acks\":[";
+    { struct fanet_ack_json_ctx c = { &buf, 0 }; fanetGetAcks(fanet_ack_json_cb, &c); }
     buf += "]}";
 
     http_send_json(fd, buf.c_str(), (int)buf.size());
@@ -2268,6 +3497,156 @@ static void api_get_stats_quick(int fd)
 
     p += snprintf(p, (size_t)(end - p), "]}");
     http_send_json(fd, buf, (int)(p - buf));
+}
+
+// ============================= API: GET /api/system-stats =================
+// Reads /proc to provide native system and process statistics.
+static void api_get_system_stats(int fd)
+{
+    char buf[8192];
+    char *p = buf;
+    char *end = buf + sizeof(buf);
+    char line[256];
+    FILE *fp;
+
+    p += snprintf(p, (size_t)(end - p), "{");
+
+    // --- Process memory from /proc/self/status ---
+    uint64_t vm_rss = 0, vm_size = 0, vm_peak = 0;
+    int threads = 0;
+    fp = fopen("/proc/self/status", "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            if      (strncmp(line, "VmRSS:", 6) == 0) vm_rss = strtoull(line + 6, NULL, 10);
+            else if (strncmp(line, "VmSize:", 7) == 0) vm_size = strtoull(line + 7, NULL, 10);
+            else if (strncmp(line, "VmPeak:", 7) == 0) vm_peak = strtoull(line + 7, NULL, 10);
+            else if (strncmp(line, "Threads:", 8) == 0) threads = atoi(line + 8);
+        }
+        fclose(fp);
+    }
+    p += snprintf(p, (size_t)(end - p),
+        "\"process\":{\"vm_rss_kb\":%" PRIu64 ",\"vm_size_kb\":%" PRIu64
+        ",\"vm_peak_kb\":%" PRIu64 ",\"threads\":%d}", vm_rss, vm_size, vm_peak, threads);
+
+    // --- System memory from /proc/meminfo ---
+    uint64_t mem_total = 0, mem_free = 0, mem_available = 0;
+    fp = fopen("/proc/meminfo", "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            if      (strncmp(line, "MemTotal:", 9) == 0) mem_total = strtoull(line + 9, NULL, 10);
+            else if (strncmp(line, "MemFree:", 8) == 0) mem_free = strtoull(line + 8, NULL, 10);
+            else if (strncmp(line, "MemAvailable:", 13) == 0) mem_available = strtoull(line + 13, NULL, 10);
+        }
+        fclose(fp);
+    }
+    p += snprintf(p, (size_t)(end - p),
+        ",\"system\":{\"mem_total_kb\":%" PRIu64 ",\"mem_free_kb\":%" PRIu64
+        ",\"mem_available_kb\":%" PRIu64 "}", mem_total, mem_free, mem_available);
+
+    // --- Process CPU from /proc/self/stat ---
+    unsigned long proc_utime = 0, proc_stime = 0;
+    long clock_ticks = sysconf(_SC_CLK_TCK);
+    fp = fopen("/proc/self/stat", "r");
+    if (fp) {
+        // Fields: pid (comm) state ppid ... field14=utime field15=stime
+        char stat_buf[1024];
+        if (fgets(stat_buf, sizeof(stat_buf), fp)) {
+            // Skip past "(comm)" to find the fields after it
+            char *cp = strrchr(stat_buf, ')');
+            if (cp) {
+                cp += 2; // skip ") "
+                // Now skip 11 fields (state, ppid, pgrp, session, tty_nr, tpgid, flags, minflt, cminflt, majflt, cmajflt)
+                for (int f = 0; f < 11 && *cp; f++) {
+                    while (*cp && *cp != ' ') cp++;
+                    while (*cp == ' ') cp++;
+                }
+                sscanf(cp, "%lu %lu", &proc_utime, &proc_stime);
+            }
+        }
+        fclose(fp);
+    }
+    double proc_utime_s = (double)proc_utime / clock_ticks;
+    double proc_stime_s = (double)proc_stime / clock_ticks;
+    p += snprintf(p, (size_t)(end - p),
+        ",\"cpu\":{\"utime_s\":%.2f,\"stime_s\":%.2f,\"clock_ticks\":%ld}",
+        proc_utime_s, proc_stime_s, clock_ticks);
+
+    // --- Per-thread CPU from /proc/self/task/ ---
+    p += snprintf(p, (size_t)(end - p), ",\"threads_detail\":[");
+    DIR *taskdir = opendir("/proc/self/task");
+    int first_thread = 1;
+    if (taskdir) {
+        struct dirent *de;
+        while ((de = readdir(taskdir)) != NULL && p < end - 256) {
+            if (de->d_name[0] == '.') continue;
+
+            // Read thread name
+            char tpath[300];
+            char tname[32] = "?";
+            snprintf(tpath, sizeof(tpath), "/proc/self/task/%s/comm", de->d_name);
+            fp = fopen(tpath, "r");
+            if (fp) {
+                if (fgets(tname, sizeof(tname), fp)) {
+                    char *nl = strchr(tname, '\n');
+                    if (nl) *nl = '\0';
+                }
+                fclose(fp);
+            }
+
+            // Read thread CPU
+            unsigned long t_utime = 0, t_stime = 0;
+            snprintf(tpath, sizeof(tpath), "/proc/self/task/%s/stat", de->d_name);
+            fp = fopen(tpath, "r");
+            if (fp) {
+                char tbuf[1024];
+                if (fgets(tbuf, sizeof(tbuf), fp)) {
+                    char *cp = strrchr(tbuf, ')');
+                    if (cp) {
+                        cp += 2;
+                        for (int f = 0; f < 11 && *cp; f++) {
+                            while (*cp && *cp != ' ') cp++;
+                            while (*cp == ' ') cp++;
+                        }
+                        sscanf(cp, "%lu %lu", &t_utime, &t_stime);
+                    }
+                }
+                fclose(fp);
+            }
+
+            if (!first_thread) p += snprintf(p, (size_t)(end - p), ",");
+            first_thread = 0;
+            p += snprintf(p, (size_t)(end - p),
+                "{\"tid\":%s,\"name\":\"%s\",\"utime_s\":%.2f,\"stime_s\":%.2f}",
+                de->d_name, tname,
+                (double)t_utime / clock_ticks,
+                (double)t_stime / clock_ticks);
+        }
+        closedir(taskdir);
+    }
+    p += snprintf(p, (size_t)(end - p), "]");
+
+    // --- Uptime ---
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    double uptime = (now_ms > Modes.stats_alltime.start)
+                  ? (now_ms - Modes.stats_alltime.start) / 1000.0 : 0;
+    p += snprintf(p, (size_t)(end - p), ",\"uptime_s\":%.1f", uptime);
+
+    p += snprintf(p, (size_t)(end - p), "}");
+    http_send_json(fd, buf, (int)(p - buf));
+}
+
+// ============================= API: GET /api/decoder-stats ================
+static void api_get_decoder_stats(int fd)
+{
+    char *json = rxGetDecoderStatsJSON();
+    if (json) {
+        http_send_json(fd, json, (int)strlen(json));
+        free(json);
+    } else {
+        http_send_json(fd, "{}", 2);
+    }
 }
 
 // ============================= API: POST /api/receivers/setgain ==========
@@ -2955,12 +4334,10 @@ static void serve_gsm_page(int fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
-        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
-        "</nav>"
-        "<div class='main'>"
-        "<h2>&#x1f4f6; GSM Cell Monitor</h2>"
         "<div class='toolbar'>"
         "<span id='cell-count' style='font-size:16px;font-weight:600;color:var(--accent)'></span>"
         "<span id='update-time' style='color:var(--dim);margin-left:16px;font-size:12px'></span>"
@@ -3080,7 +4457,7 @@ static void serve_gsm_page(int fd)
         "  var v=document.getElementById('ver-badge');"
         "  if(v&&s.version) v.textContent='v'+s.version;"
         "}).catch(()=>{});"
-        "</script></div></body></html>";
+        "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html", html, (int)strlen(html));
 }
@@ -3135,6 +4512,8 @@ static void serve_lte_page(int fd)
         "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3264,7 +4643,7 @@ static void serve_lte_page(int fd)
         "  var v=document.getElementById('ver-badge');"
         "  if(v&&s.version) v.textContent='v'+s.version;"
         "}).catch(()=>{});"
-        "</script></div></body></html>";
+        "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html", html, (int)strlen(html));
 }
@@ -3319,6 +4698,8 @@ static void serve_iot868_page(int fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a class='active' href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3443,7 +4824,7 @@ static void serve_iot868_page(int fd)
         "  var v=document.getElementById('ver-badge');"
         "  if(v&&s.version) v.textContent='v'+s.version;"
         "}).catch(()=>{});"
-        "</script></div></body></html>";
+        "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html", html, (int)strlen(html));
 }
@@ -3492,6 +4873,8 @@ static void serve_fanet_page(int fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a class='active' href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3559,16 +4942,67 @@ static void serve_fanet_page(int fd)
         "    html+='<div class=\"no-data\"><h3>Scanning...</h3><p>FANET decoder is active but no packets decoded yet.</p>'"
         "      +'<p style=\"color:var(--dim);font-size:12px;margin-top:8px\">Listening on 868.2 MHz for LoRa FANET+ signals from paragliders, drones, and weather stations.</p></div>';"
         "  }"
+
+        // --- Names (Type 2) ---
+        "  if(data.names && data.names.length>0){"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f4db; Names (Type 2)</h3>';"
+        "    html+='<table><thead><tr><th>Address</th><th>Name</th><th>Age</th></tr></thead><tbody>';"
+        "    for(var i=0;i<data.names.length;i++){"
+        "      var n=data.names[i];"
+        "      var age=n.age<60?n.age+'s':Math.floor(n.age/60)+'m';"
+        "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+n.addr+'</td>';"
+        "      html+='<td><strong>'+n.name+'</strong></td>';"
+        "      html+='<td>'+age+'</td></tr>';"
+        "    }"
+        "    html+='</tbody></table></div>';"
+        "  }"
+
+        // --- Messages (Type 3) ---
+        "  if(data.messages && data.messages.length>0){"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f4ac; Messages (Type 3)</h3>';"
+        "    html+='<table><thead><tr><th>Address</th><th>Text</th><th>Age</th></tr></thead><tbody>';"
+        "    for(var i=0;i<data.messages.length;i++){"
+        "      var m=data.messages[i];"
+        "      var age=m.age<60?m.age+'s':Math.floor(m.age/60)+'m';"
+        "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+m.addr+'</td>';"
+        "      html+='<td>'+m.text+'</td>';"
+        "      html+='<td>'+age+'</td></tr>';"
+        "    }"
+        "    html+='</tbody></table></div>';"
+        "  }"
+
+        // --- Weather (Type 4) ---
+        "  if(data.weather && data.weather.length>0){"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f326;&#xfe0f; Weather / Service (Type 4)</h3>';"
+        "    html+='<table><thead><tr><th>Address</th><th>Name</th><th>Temp</th><th>Wind</th><th>Gust</th><th>Dir</th><th>Hum</th><th>Press</th><th>SoC</th><th>Age</th></tr></thead><tbody>';"
+        "    for(var i=0;i<data.weather.length;i++){"
+        "      var w=data.weather[i];"
+        "      var age=w.age<60?w.age+'s':Math.floor(w.age/60)+'m';"
+        "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+w.addr+'</td>';"
+        "      html+='<td>'+(w.name||'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.temp!=null?w.temp.toFixed(1)+'\\u00b0C':'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.wind!=null?w.wind.toFixed(1)+' km/h':'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.gust!=null?w.gust.toFixed(1)+' km/h':'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.wdir!=null?w.wdir.toFixed(0)+'\\u00b0':'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.hum!=null?w.hum.toFixed(0)+'%':'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.press!=null?w.press.toFixed(1)+' hPa':'\\u2014')+'</td>';"
+        "      html+='<td>'+(w.soc!=null?w.soc.toFixed(0)+'%':'\\u2014')+'</td>';"
+        "      html+='<td>'+age+'</td></tr>';"
+        "    }"
+        "    html+='</tbody></table></div>';"
+        "  }"
+
+        // --- Ground Tracking (Type 7) ---
         "  if(data.ground_tracks && data.ground_tracks.length>0){"
         "    var gtypes=['Other','Walking','Vehicle','Bike','Boot','Need ride','Landed OK','Need tech','Need medical','DISTRESS','DISTRESS AUTO'];"
-        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f6b6; Ground Tracking</h3>';"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f6b6; Ground Tracking (Type 7)</h3>';"
         "    html+='<table><thead><tr><th>Address</th><th>Name</th><th>Type</th><th>Lat</th><th>Lon</th><th>Age</th></tr></thead><tbody>';"
         "    for(var i=0;i<data.ground_tracks.length;i++){"
         "      var g=data.ground_tracks[i];"
         "      var tname=gtypes[g.type]||('Type '+g.type);"
         "      var age=g.age<60?g.age+'s':Math.floor(g.age/60)+'m';"
         "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+g.addr+'</td>';"
-        "      html+='<td><strong>'+(g.name||'—')+'</strong></td>';"
+        "      html+='<td><strong>'+(g.name||'\\u2014')+'</strong></td>';"
         "      html+='<td>'+tname+'</td>';"
         "      html+='<td>'+g.lat.toFixed(5)+'</td>';"
         "      html+='<td>'+g.lon.toFixed(5)+'</td>';"
@@ -3576,6 +5010,43 @@ static void serve_fanet_page(int fd)
         "    }"
         "    html+='</tbody></table></div>';"
         "  }"
+
+        // --- Thermals (Type 9) ---
+        "  if(data.thermals && data.thermals.length>0){"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x1f321;&#xfe0f; Thermals (Type 9)</h3>';"
+        "    html+='<table><thead><tr><th>Address</th><th>Lat</th><th>Lon</th><th>Alt (m)</th><th>Climb (m/s)</th><th>Wind</th><th>Conf</th><th>Age</th></tr></thead><tbody>';"
+        "    for(var i=0;i<data.thermals.length;i++){"
+        "      var t=data.thermals[i];"
+        "      var age=t.age<60?t.age+'s':Math.floor(t.age/60)+'m';"
+        "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+t.addr+'</td>';"
+        "      html+='<td>'+t.lat.toFixed(5)+'</td>';"
+        "      html+='<td>'+t.lon.toFixed(5)+'</td>';"
+        "      html+='<td>'+t.alt+'</td>';"
+        "      html+='<td>'+t.climb.toFixed(1)+'</td>';"
+        "      html+='<td>'+t.wind.toFixed(1)+' km/h @'+t.wdir.toFixed(0)+'\\u00b0</td>';"
+        "      html+='<td>'+t.conf+'/7</td>';"
+        "      html+='<td>'+age+'</td></tr>';"
+        "    }"
+        "    html+='</tbody></table></div>';"
+        "  }"
+
+        // --- ACKs (Type 0) ---
+        "  if(data.acks && data.acks.length>0){"
+        "    html+='<div class=\"card\"><h3 style=\"color:var(--accent);margin-top:0\">&#x2705; ACKs (Type 0)</h3>';"
+        "    html+='<table><thead><tr><th>Source</th><th>Destination</th><th>Age</th></tr></thead><tbody>';"
+        "    for(var i=0;i<data.acks.length;i++){"
+        "      var a=data.acks[i];"
+        "      var age=a.age<60?a.age+'s':Math.floor(a.age/60)+'m';"
+        "      html+='<tr><td style=\"font-family:monospace;color:var(--accent)\">'+a.src+'</td>';"
+        "      html+='<td style=\"font-family:monospace\">'+a.dst+'</td>';"
+        "      html+='<td>'+age+'</td></tr>';"
+        "    }"
+        "    html+='</tbody></table></div>';"
+        "  }"
+
+        // --- Note about Type 1 ---
+        "  html+='<div class=\"card\" style=\"border-color:#b44dff30\"><p style=\"margin:0;color:var(--dim);font-size:12px\">&#x2708;&#xfe0f; Type 1 (Air Tracking) packets are shown in the <a href=\"/aircraft.html\">Aircraft</a> page.</p></div>';"
+
         "  document.getElementById('content').innerHTML=html;"
         "}"
         ""
@@ -3586,7 +5057,7 @@ static void serve_fanet_page(int fd)
         "  var v=document.getElementById('ver-badge');"
         "  if(v&&s.version) v.textContent='v'+s.version;"
         "}).catch(()=>{});"
-        "</script></div></body></html>";
+        "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html", html, (int)strlen(html));
 }
@@ -3662,6 +5133,8 @@ static void serve_devices_page(int fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -3853,7 +5326,7 @@ static void serve_devices_page(int fd)
         "if(d.sdr_devices.length==0){"
         "h+='<p style=\"color:#f44336\">No RTL-SDR devices detected. Connect a dongle and click Refresh.</p>';"
         "}else{"
-        "h+='<table><tr><th>#</th><th>Device</th><th>Serial</th><th>Tuner</th>';"
+        "h+='<table><tr><th>Rx</th><th>Device</th><th>Serial</th><th>Tuner</th>';"
         "h+='<th>Library</th>';"
         "var multiBackend=(rxData&&rxData.backends_available&&(rxData.backends_available&(rxData.backends_available-1))!=0);"
         "h+='<th>Assign Role</th><th>Gain (dB)</th><th>PPM</th><th>Action</th><th>Status</th></tr>';"
@@ -3873,7 +5346,7 @@ static void serve_devices_page(int fd)
         "var selId='sel_'+s.serial;"
         "var gainId='gain_'+s.serial;"
         "h+='<tr>';"
-        "h+='<td>'+s.index+'</td>';"
+        "h+='<td>'+(rx?rx.id:'—')+'</td>';"
         "h+='<td>'+s.name+'<br><small style=color:#888>'+s.vendor+'</small></td>';"
         "h+='<td><code>'+s.serial+'</code></td>';"
         "h+='<td>'+s.tuner+'<br><small class=freq>'+s.freq_range+'</small></td>';"
@@ -3989,7 +5462,7 @@ static void serve_devices_page(int fd)
         "}"
         "fetch('/api/status').then(r=>r.json()).then(d=>{var vb=document.getElementById('ver-badge');if(vb&&d.version)vb.textContent='v'+d.version;}).catch(function(){});"
         "load();"
-        "</script></div></body></html>";
+        "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html; charset=utf-8", html, (int)strlen(html));
 }
@@ -4048,6 +5521,8 @@ static void serve_diagnostics_page(int fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a class='active' style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
         "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
@@ -4310,7 +5785,7 @@ static void serve_diagnostics_page(int fd)
         "document.getElementById('status-text').textContent='Running...';"
         "document.getElementById('status-text').className='status-run';}"
         "}).catch(function(){});"
-        "</script></div></body></html>";
+        "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html; charset=utf-8", html, (int)strlen(html));
 }
@@ -4499,6 +5974,14 @@ static void handle_request(int fd, const char *request, int reqlen)
             api_get_diagnostics(fd);
         } else if (path_sv == "/api/stats/quick") {
             api_get_stats_quick(fd);
+        } else if (path_sv == "/api/system-stats") {
+            api_get_system_stats(fd);
+        } else if (path_sv == "/api/decoder-stats") {
+            api_get_decoder_stats(fd);
+        } else if (path_sv == "/api/stats-history") {
+            api_get_stats_history(fd);
+        } else if (path_sv == "/api/warnings") {
+            api_get_warnings(fd);
         } else if (path[0] == '/') {
             serve_file(fd, path + 1);
         } else {
@@ -4576,10 +6059,64 @@ static void *panel_thread_entry(void *arg)
     panelLog("Panel: HTTP server started on port %d", PanelState.port);
 
     while (PanelState.running) {
-        // Use poll() to avoid blocking indefinitely on accept
-        struct pollfd pfd = { .fd = PanelState.listen_fd, .events = POLLIN };
-        int pret = poll(&pfd, 1, 1000);  // 1 second timeout
-        if (pret <= 0) continue;  // timeout or error, re-check running flag
+        // Build poll set: listen_fd + all WebSocket clients + waterfall WS
+        struct pollfd fds[PANEL_WS_MAX_CLIENTS + 2];
+        fds[0].fd = PanelState.listen_fd;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        int n_ws = 0;
+
+        pthread_mutex_lock(&PanelState.ws_mutex);
+        n_ws = PanelState.ws_count;
+        for (int i = 0; i < n_ws; i++) {
+            fds[1 + i].fd = PanelState.ws_fds[i];
+            fds[1 + i].events = POLLIN;
+            fds[1 + i].revents = 0;
+        }
+        pthread_mutex_unlock(&PanelState.ws_mutex);
+
+        // Waterfall WebSocket in the poll set
+        int wf_poll_idx = -1;
+        if (WF.ws_fd >= 0) {
+            wf_poll_idx = 1 + n_ws;
+            fds[wf_poll_idx].fd = WF.ws_fd;
+            fds[wf_poll_idx].events = POLLIN;
+            fds[wf_poll_idx].revents = 0;
+        }
+
+        int poll_count = 1 + n_ws + (wf_poll_idx >= 0 ? 1 : 0);
+        int poll_timeout = (WF.ws_fd >= 0 && WF.rx_id >= 0) ? 50 : 1000;
+        int pret = poll(fds, poll_count, poll_timeout);
+        if (pret <= 0) {
+            statsHistoryTakeSnapshot();
+            // Process waterfall frames even on timeout
+            if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();
+            continue;
+        }
+
+        // Handle waterfall WebSocket events
+        if (wf_poll_idx >= 0 && fds[wf_poll_idx].revents & (POLLHUP | POLLERR)) {
+            wf_disconnect();
+        } else if (wf_poll_idx >= 0 && fds[wf_poll_idx].revents & POLLIN) {
+            wf_handle_ws_read();
+        }
+
+        // Process waterfall spectrum frames
+        if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();
+
+        // Handle WebSocket client events (close, ping, disconnect)
+        for (int i = 0; i < n_ws; i++) {
+            if (fds[1 + i].revents & POLLNVAL) {
+                continue; // FD already closed by broadcast thread
+            } else if (fds[1 + i].revents & (POLLHUP | POLLERR)) {
+                ws_remove_client(fds[1 + i].fd);
+            } else if (fds[1 + i].revents & POLLIN) {
+                ws_handle_read(fds[1 + i].fd);
+            }
+        }
+
+        // Handle new connection on listen_fd
+        if (!(fds[0].revents & POLLIN)) continue;
 
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
@@ -4633,11 +6170,33 @@ static void *panel_thread_entry(void *arg)
                 }
             }
 
-            if (total > 0)
-                handle_request(client_fd, reqbuf.data(), total);
+            if (total > 0) {
+                // Check for WebSocket upgrade request
+                if (strstr(reqbuf.c_str(), "Upgrade: websocket") ||
+                    strstr(reqbuf.c_str(), "Upgrade: WebSocket")) {
+                    // Only accept /ws/waterfall endpoint
+                    if (strstr(reqbuf.c_str(), "GET /ws/waterfall")) {
+                        if (WF.ws_fd >= 0) {
+                            // Already have a waterfall client, reject
+                            http_send(client_fd, 409, "text/plain", "Busy", 4);
+                        } else if (ws_handshake(client_fd, reqbuf.c_str())) {
+                            WF.ws_fd = client_fd;
+                            WF.last_frame_ms = 0;
+                            client_fd = -1; // prevent close below
+                            panelLog("Panel: Waterfall WebSocket client connected");
+                        } else {
+                            http_send(client_fd, 400, "text/plain", "Bad handshake", 13);
+                        }
+                    } else {
+                        http_send(client_fd, 404, "text/plain", "Not found", 9);
+                    }
+                } else {
+                    handle_request(client_fd, reqbuf.data(), total);
+                }
+            }
         }
 
-        close(client_fd);
+        if (client_fd >= 0) close(client_fd);
     }
 
     return NULL;
@@ -4714,9 +6273,26 @@ void panelStart(void)
 
 void panelStop(void)
 {
+    // Save stats history to disk before shutting down
+    if (StatsHistory.enabled && StatsHistory.count > 0) {
+        statsHistorySave();
+        fprintf(stderr, "Panel: Stats history saved (%d snapshots)\n", StatsHistory.count);
+    }
+
     if (!PanelState.running) return;
 
     PanelState.running = 0;
+
+    // Disconnect waterfall client and release ownership
+    wf_disconnect();
+
+    // Close all WebSocket clients
+    pthread_mutex_lock(&PanelState.ws_mutex);
+    for (int i = 0; i < PanelState.ws_count; i++)
+        close(PanelState.ws_fds[i]);
+    PanelState.ws_count = 0;
+    pthread_mutex_unlock(&PanelState.ws_mutex);
+
     if (PanelState.listen_fd >= 0) {
         close(PanelState.listen_fd);
         PanelState.listen_fd = -1;

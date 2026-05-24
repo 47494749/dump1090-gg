@@ -35,6 +35,10 @@ static const int BAUD_RATES[] = { 512, 1200, 2400 };
 #define BCH_PARITY_BITS 10
 #define BCH_TOTAL_BITS  31  // +1 even parity = 32
 
+// Decimation factor: reduces sample rate before clock recovery
+// 2.4 MSPS / 50 = 48 kHz, giving 40 samples/bit at 1200 baud
+#define POCSAG_DECIMATION  50
+
 // ======================== Per-baud-rate state ========================
 
 typedef struct {
@@ -88,7 +92,11 @@ typedef struct {
     float    lpf_out;
     float    lpf_alpha;
 
-    // DC offset removal
+    // Decimation accumulator (integrate POCSAG_DECIMATION samples)
+    float    decim_acc;
+    int      decim_count;
+
+    // DC offset removal (operates on decimated stream)
     float    dc_avg;
 
     // 3 baud-rate decoders
@@ -185,7 +193,9 @@ static void baud_state_init(baud_state_t *bs, int baud, double sample_rate)
 {
     memset(bs, 0, sizeof(*bs));
     bs->baud_rate = baud;
-    bs->samples_per_bit = sample_rate / baud;
+    // Use decimated sample rate for clock recovery
+    double decimated_rate = sample_rate / POCSAG_DECIMATION;
+    bs->samples_per_bit = decimated_rate / baud;
     bs->clock_freq = bs->samples_per_bit;
     bs->clock_phase = 0;
 }
@@ -238,6 +248,30 @@ static void deliver_message(struct pocsag_state *st, baud_state_t *bs, float sig
     bs->errors_total = 0;
 }
 
+// ======================== PN9 de-whitening ========================
+
+// Some transmitters (e.g. SX1262-based) apply PN9 data whitening to the payload.
+// Polynomial: x^9 + x^5 + 1 (Fibonacci LFSR)
+// The whitening is applied after the sync word, with MSB-first bit packing.
+static void pn9_dewhiten_batch(uint32_t *codewords, int n_codewords, uint16_t seed) {
+    uint16_t state = seed & 0x1FF;
+    // Skip first 32 PN9 bits (they correspond to the sync word, which is not whitened)
+    for (int i = 0; i < 32; i++) {
+        uint8_t feedback = ((state >> 0) ^ (state >> 5)) & 1;
+        state = (state >> 1) | (feedback << 8);
+    }
+    for (int w = 0; w < n_codewords; w++) {
+        uint32_t mask = 0;
+        for (int b = 0; b < 32; b++) {
+            uint8_t out_bit = state & 1;
+            uint8_t feedback = ((state >> 0) ^ (state >> 5)) & 1;
+            state = (state >> 1) | (feedback << 8);
+            mask = (mask << 1) | out_bit;
+        }
+        codewords[w] ^= mask;
+    }
+}
+
 // ======================== Batch processing ========================
 
 // POCSAG numeric character set (BCD table)
@@ -246,6 +280,40 @@ static const char POCSAG_NUMERIC_CHARS[] = "0123456789*U -)( ";
 // Process a complete batch of 17 codewords (sync + 8 pairs of 2 codewords)
 static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, double channel_freq)
 {
+    int bch_ok = 0, bch_fail = 0, idle_cnt = 0, addr_cnt = 0, msg_cnt = 0;
+
+    // Adaptive realignment: check if batch has 1-bit clock/sync offset.
+    // Try BCH on word[1] as-is; if it fails, try right-shifted version.
+    uint32_t test_cw = bs->batch_words[1];
+    int need_realign = (bch_syndrome(test_cw) != 0);
+    if (need_realign) {
+        // Check if realigned word passes BCH
+        uint32_t sync_lsb = bs->batch_words[0] & 1;
+        uint32_t realigned = (test_cw >> 1) | (sync_lsb << 31);
+        if (bch_syndrome(realigned) == 0 || realigned == POCSAG_IDLE_WORD) {
+            // Apply realignment to all data words
+            for (int i = POCSAG_BATCH_WORDS - 1; i >= 1; i--) {
+                uint32_t msb_from_prev = bs->batch_words[i - 1] & 1;
+                bs->batch_words[i] = (bs->batch_words[i] >> 1) | (msb_from_prev << 31);
+            }
+        }
+    }
+
+    // Auto-detect PN9 whitening (e.g. SX1262-based transmitters)
+    // If first data word fails BCH raw, try PN9 de-whitening with known seeds
+    if (bch_syndrome(bs->batch_words[1]) != 0 && bs->batch_words[1] != POCSAG_IDLE_WORD) {
+        static const uint16_t pn9_seeds[] = { 0x02E, 0x1FF, 0x100 };
+        for (int s = 0; s < 3; s++) {
+            uint32_t test_copy[16];
+            memcpy(test_copy, &bs->batch_words[1], 16 * sizeof(uint32_t));
+            pn9_dewhiten_batch(test_copy, 16, pn9_seeds[s]);
+            if (bch_syndrome(test_copy[0]) == 0 || test_copy[0] == POCSAG_IDLE_WORD) {
+                memcpy(&bs->batch_words[1], test_copy, 16 * sizeof(uint32_t));
+                break;
+            }
+        }
+    }
+
     // Words 0 = sync word (already verified), words 1..16 = 8 pairs
     for (int i = 1; i < POCSAG_BATCH_WORDS; i++) {
         uint32_t cw = bs->batch_words[i];
@@ -253,6 +321,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
         // BCH error correction
         int corr = bch_correct(&cw);
         if (corr < 0) {
+            bch_fail++;
             st->stats.bch_failures++;
             // If we're in a message, terminate it
             if (bs->in_message) {
@@ -260,6 +329,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
             }
             continue;
         }
+        bch_ok++;
         if (corr > 0) {
             st->stats.bch_corrections++;
             bs->errors_total += corr;
@@ -267,6 +337,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
 
         // Check idle codeword
         if (cw == POCSAG_IDLE_WORD || (cw >> 1) == (POCSAG_IDLE_WORD >> 1)) {
+            idle_cnt++;
             if (bs->in_message) {
                 deliver_message(st, bs, sig, channel_freq);
             }
@@ -276,6 +347,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
         bool is_address = ((cw >> 31) & 1) == 0;
 
         if (is_address) {
+            addr_cnt++;
             // Deliver previous message if any
             if (bs->in_message) {
                 deliver_message(st, bs, sig, channel_freq);
@@ -301,6 +373,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
             }
         } else {
             // Message codeword
+            msg_cnt++;
             if (!bs->in_message)
                 continue;  // orphan data word, skip
 
@@ -335,9 +408,21 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
             }
         }
     }
+
+    (void)bch_ok; (void)bch_fail; (void)idle_cnt; (void)addr_cnt; (void)msg_cnt;
 }
 
 // ======================== Bit processing ========================
+
+// Count number of differing bits (Hamming distance)
+static inline int popcount32(uint32_t x) {
+    x = x - ((x >> 1) & 0x55555555u);
+    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
+    return (int)(((x + (x >> 4)) & 0x0F0F0F0Fu) * 0x01010101u >> 24);
+}
+
+// Maximum allowed bit errors in sync word detection
+#define POCSAG_SYNC_MAX_ERRORS  2
 
 static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, float sig, double channel_freq)
 {
@@ -349,6 +434,10 @@ static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, floa
 
         if (bit == expected || bs->preamble_count == 0) {
             bs->preamble_count++;
+            // Latch: once we've seen enough alternating bits, remember it
+            if (bs->preamble_count >= POCSAG_PREAMBLE_MIN && !bs->preamble_found) {
+                bs->preamble_found = true;
+            }
         } else {
             // Reset but keep this bit as potential start
             bs->preamble_count = 1;
@@ -357,34 +446,38 @@ static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, floa
         // Shift into sync search register
         bs->shift_reg = (bs->shift_reg << 1) | (bit & 1);
 
-        // Check for sync word (require minimum preamble per ITU-R M.584)
-        if (bs->shift_reg == POCSAG_SYNC_WORD && bs->preamble_count >= POCSAG_PREAMBLE_MIN) {
-            bs->synced = true;
-            bs->preamble_found = true;
-            bs->batch_bit_count = 0;
-            bs->batch_word_idx = 1;  // word 0 = sync (already matched)
-            bs->batch_words[0] = POCSAG_SYNC_WORD;
-            bs->inverted = false;
-            st->stats.syncs_detected++;
-            if (bs->preamble_count >= POCSAG_PREAMBLE_BITS)
-                st->stats.preambles_detected++;
-            bs->preamble_count = 0;
-            return;
-        }
+        // Check for sync word with fuzzy matching (require preamble seen earlier)
+        if (bs->preamble_found) {
+            int dist_normal = popcount32(bs->shift_reg ^ POCSAG_SYNC_WORD);
+            int dist_inv = popcount32(bs->shift_reg ^ ~POCSAG_SYNC_WORD);
 
-        // Also check inverted sync (polarity reversal)
-        if (bs->shift_reg == ~POCSAG_SYNC_WORD && bs->preamble_count >= POCSAG_PREAMBLE_MIN) {
-            bs->synced = true;
-            bs->preamble_found = true;
-            bs->batch_bit_count = 0;
-            bs->batch_word_idx = 1;
-            bs->batch_words[0] = POCSAG_SYNC_WORD;
-            bs->inverted = true;
-            st->stats.syncs_detected++;
-            if (bs->preamble_count >= POCSAG_PREAMBLE_BITS)
-                st->stats.preambles_detected++;
-            bs->preamble_count = 0;
-            return;
+            if (dist_normal <= POCSAG_SYNC_MAX_ERRORS) {
+                bs->synced = true;
+                bs->batch_bit_count = 0;
+                bs->batch_word_idx = 1;  // word 0 = sync (already matched)
+                bs->batch_words[0] = POCSAG_SYNC_WORD;
+                bs->inverted = false;
+                st->stats.syncs_detected++;
+                if (bs->preamble_count >= POCSAG_PREAMBLE_BITS)
+                    st->stats.preambles_detected++;
+                bs->preamble_count = 0;
+                bs->preamble_found = false;
+                return;
+            }
+
+            if (dist_inv <= POCSAG_SYNC_MAX_ERRORS) {
+                bs->synced = true;
+                bs->batch_bit_count = 0;
+                bs->batch_word_idx = 1;
+                bs->batch_words[0] = POCSAG_SYNC_WORD;
+                bs->inverted = true;
+                st->stats.syncs_detected++;
+                if (bs->preamble_count >= POCSAG_PREAMBLE_BITS)
+                    st->stats.preambles_detected++;
+                bs->preamble_count = 0;
+                bs->preamble_found = false;
+                return;
+            }
         }
 
         return;
@@ -393,6 +486,7 @@ static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, floa
     // --- Batch bit collection ---
     // We have sync, now collecting the 16 remaining codewords (16 × 32 = 512 bits)
     if (bs->inverted) bit = !bit;  // Correct inverted polarity
+
     int word_bit = bs->batch_bit_count % 32;
     int word_idx = bs->batch_word_idx;
 
@@ -413,12 +507,13 @@ static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, floa
         // Process this batch
         process_batch(st, bs, sig, channel_freq);
 
-        // Sync + batch reset
+        // Sync + batch reset (keep preamble_found for consecutive batches)
         bs->synced = false;
         bs->shift_reg = 0;
         bs->batch_bit_count = 0;
         bs->batch_word_idx = 0;
         bs->preamble_count = 0;
+        bs->preamble_found = true;  // Allow next sync without new preamble
         bs->inverted = false;
     }
 }
@@ -460,7 +555,7 @@ static void channel_state_init(channel_state_t *ch, double channel_freq, double 
     ch->lpf_out = 0;
     ch->dc_avg = 0;
 
-    // LPF cutoff ~= max baud rate * 1.5 = 3600 Hz
+    // LPF cutoff ~= max baud rate * 3 = 3600 Hz
     double fc = 3600.0;
     ch->lpf_alpha = (float)(1.0 - exp(-2.0 * M_PI * fc / sample_rate));
 
@@ -565,40 +660,48 @@ void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, uint32_t le
             ch->prev_i = i_val;
             ch->prev_q = q_val;
 
-            // Low-pass filter
+            // Low-pass filter (anti-aliasing before decimation)
             ch->lpf_out += ch->lpf_alpha * (fm - ch->lpf_out);
 
-            // DC offset removal (slow IIR)
-            ch->dc_avg += 0.0001f * (ch->lpf_out - ch->dc_avg);
-            float sample = ch->lpf_out - ch->dc_avg;
+            // Decimation: accumulate POCSAG_DECIMATION samples, then process
+            ch->decim_acc += ch->lpf_out;
+            ch->decim_count++;
 
-            // Feed to each baud-rate decoder
-            for (int b = 0; b < NUM_BAUD_RATES; b++) {
-                baud_state_t *bs = &ch->baud[b];
+            if (ch->decim_count >= POCSAG_DECIMATION) {
+                float decimated = ch->decim_acc / POCSAG_DECIMATION;
+                ch->decim_acc = 0;
+                ch->decim_count = 0;
 
-                bs->clock_phase += 1.0;
+                // DC offset removal on decimated stream
+                ch->dc_avg += 0.001f * (decimated - ch->dc_avg);
+                float sample = decimated - ch->dc_avg;
 
-                if (bs->clock_phase >= bs->clock_freq) {
-                    bs->clock_phase -= bs->clock_freq;
+                // Feed to each baud-rate decoder (now at decimated rate)
+                for (int b = 0; b < NUM_BAUD_RATES; b++) {
+                    baud_state_t *bs = &ch->baud[b];
 
-                    // Bit decision: FSK — positive = 1, negative = 0
-                    int bit = (sample > 0.0f) ? 1 : 0;
+                    bs->clock_phase += 1.0;
 
-                    float sig = (ch->sample_count > 0) ?
-                        10.0f * log10f(ch->signal_acc / ch->sample_count + 1e-10f) : -40.0f;
+                    if (bs->clock_phase >= bs->clock_freq) {
+                        bs->clock_phase -= bs->clock_freq;
 
-                    process_bit(st, bs, bit, sig, ch->channel_freq);
+                        // Bit decision: FSK — positive = 1, negative = 0
+                        int bit = (sample > 0.0f) ? 1 : 0;
+
+                        float sig = (ch->sample_count > 0) ?
+                            10.0f * log10f(ch->signal_acc / ch->sample_count + 1e-10f) : -40.0f;
+
+                        process_bit(st, bs, bit, sig, ch->channel_freq);
+                    }
+
+                    // Clock recovery: nudge phase based on zero crossings
+                    if ((ch->prev_sample[b] > 0 && sample < 0) ||
+                        (ch->prev_sample[b] < 0 && sample > 0)) {
+                        double phase_error = bs->clock_phase - (bs->clock_freq / 2.0);
+                        bs->clock_phase -= phase_error * 0.1;
+                    }
+                    ch->prev_sample[b] = sample;
                 }
-
-                // Simple clock recovery: nudge phase based on zero crossings
-                // (Gardner-like timing error detector)
-                if ((ch->prev_sample[b] > 0 && sample < 0) ||
-                    (ch->prev_sample[b] < 0 && sample > 0)) {
-                    // Zero crossing detected — adjust clock phase
-                    double phase_error = bs->clock_phase - (bs->clock_freq / 2.0);
-                    bs->clock_phase -= phase_error * 0.05;  // gentle correction
-                }
-                ch->prev_sample[b] = sample;
             }
         }
 

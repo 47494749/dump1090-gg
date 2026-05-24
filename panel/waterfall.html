@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — Waterfall</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+.controls{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.controls label{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+.controls select,.controls input[type=number]{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px}
+.controls select{min-width:140px}
+.controls input[type=number]{width:120px}
+.btn{padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;font-size:13px;transition:.2s}
+.btn:hover{background:var(--hover)}
+.btn-accent{background:var(--accent);color:#000;border-color:var(--accent);font-weight:600}
+.btn-accent:hover{background:#2aa8d8}
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{background:#cc3333}
+.btn-warn{background:var(--warn);color:#000;border-color:var(--warn);font-weight:600}
+.btn-warn:hover{background:#cc8800}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.status-bar{display:flex;gap:16px;align-items:center;margin-bottom:8px;font-size:12px}
+.status-bar .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.dot-green{background:var(--ok)}
+.dot-red{background:var(--danger)}
+.dot-yellow{background:var(--warn)}
+.canvas-wrap{position:relative;width:100%;background:#000;border:1px solid var(--border);border-radius:4px;overflow:hidden}
+#waterfall-canvas{width:100%;height:400px;display:block;image-rendering:pixelated}
+#spectrum-canvas{width:100%;height:120px;display:block;border-bottom:1px solid var(--border)}
+.freq-axis{display:flex;justify-content:space-between;padding:2px 8px;font-size:10px;color:var(--dim);background:#0a0a1a}
+.gain-section{display:flex;align-items:center;gap:8px}
+.gain-section input[type=range]{width:160px;accent-color:var(--accent)}
+.gain-val{font-size:13px;min-width:50px;color:var(--accent)}
+#status-msg{color:var(--dim);font-size:12px}
+.owned-indicator{color:var(--warn);font-weight:600;font-size:12px}
+.ctrl-group{display:flex;align-items:center;gap:6px;padding:0 8px;border-left:1px solid var(--border)}
+.ctrl-group:first-child{border-left:none;padding-left:0}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs">
+<a href="/">⚙️ Config</a>
+<a href="/status.html">📡 Status</a>
+<a href="/connections.html">🔌 Connections</a>
+<a href="/logs.html">📋 Logs</a>
+<a href="/messages.html">📨 Messages</a>
+<a href="/aircraft.html">✈️ Aircraft</a>
+<a href="/devices.html">📻 Devices</a>
+<a href="/gsm.html">📶 GSM</a>
+<a href="/lte.html">📶 LTE</a>
+<a href="/iot868.html">🌡️ IoT 868</a>
+<a href="/fanet.html">🚩 FANET</a>
+<a href="/stats.html">📊 Stats</a>
+<a class="active" href="/waterfall.html">🌊 Waterfall</a>
+<a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
+</div>
+</nav>
+
+<div class="main">
+<div class="status-bar">
+    <span id="ws-status"><span class="dot dot-red"></span>Disconnected</span>
+    <span id="status-msg">Select a device and click Start</span>
+    <span id="owned-label" class="owned-indicator" style="display:none">⚠ OWNED — decoder disabled</span>
+</div>
+
+<div class="controls">
+    <div class="ctrl-group">
+        <label>Device</label>
+        <select id="rx-select"><option value="-1">Loading...</option></select>
+        <button class="btn btn-accent" id="btn-start">▶ Start</button>
+        <button class="btn" id="btn-stop" disabled>⏹ Stop</button>
+    </div>
+    <div class="ctrl-group">
+        <button class="btn btn-warn" id="btn-take" disabled>🔒 Take Ownership</button>
+        <button class="btn btn-danger" id="btn-release" style="display:none">🔓 Release</button>
+    </div>
+    <div class="ctrl-group" id="tune-group" style="display:none">
+        <label>Freq (MHz)</label>
+        <input type="number" id="freq-input" step="0.1" min="24" max="1800" value="1090">
+        <button class="btn" id="btn-tune">Tune</button>
+    </div>
+    <div class="ctrl-group" id="rate-group" style="display:none">
+        <label>Rate</label>
+        <select id="rate-select">
+            <option value="1000000">1.0 Msps</option>
+            <option value="1600000">1.6 Msps</option>
+            <option value="2000000">2.0 Msps</option>
+            <option value="2400000" selected>2.4 Msps</option>
+        </select>
+    </div>
+</div>
+
+<div class="controls gain-section">
+    <label>Gain</label>
+    <input type="range" id="gain-slider" min="0" max="500" value="400" step="1">
+    <span class="gain-val" id="gain-val">40.0 dB</span>
+    <select id="gain-select" style="display:none"></select>
+</div>
+
+<canvas id="spectrum-canvas" width="1024" height="120"></canvas>
+<div class="canvas-wrap">
+    <canvas id="waterfall-canvas" width="256" height="400"></canvas>
+</div>
+<div class="freq-axis" id="freq-axis">
+    <span id="freq-lo">—</span>
+    <span id="freq-mid">—</span>
+    <span id="freq-hi">—</span>
+</div>
+</div>
+
+<script>
+var ws = null;
+var running = false;
+var owned = false;
+var currentRxId = -1;
+var currentFreq = 0;
+var currentRate = 2400000;
+var gainList = [];
+var initialGainDb = -1;  // gain at start (for save prompt)
+var gainChanged = false;  // true if user changed gain
+var currentSerial = '';   // serial of current rx
+
+// Waterfall canvas state
+var wfCanvas = document.getElementById('waterfall-canvas');
+var wfCtx = wfCanvas.getContext('2d');
+var spCanvas = document.getElementById('spectrum-canvas');
+var spCtx = spCanvas.getContext('2d');
+
+// Color map: blue → cyan → green → yellow → red → white
+function dbToColor(v) {
+    // v is 0-255
+    var r, g, b;
+    if (v < 64) { r=0; g=0; b=v*2; }
+    else if (v < 128) { var t=v-64; r=0; g=t*4; b=128+t*2; }
+    else if (v < 192) { var t=v-128; r=t*4; g=255; b=255-t*4; }
+    else { var t=v-192; r=255; g=255-t*2; b=t*4; }
+    return [r,g,b];
+}
+
+// Build color LUT
+var colorLUT = new Uint8Array(256 * 3);
+for (var i = 0; i < 256; i++) {
+    var c = dbToColor(i);
+    colorLUT[i*3] = c[0];
+    colorLUT[i*3+1] = c[1];
+    colorLUT[i*3+2] = c[2];
+}
+
+// Draw a single spectrum line and scroll the waterfall
+function drawSpectrum(data) {
+    var N = data.length; // 256
+    var W = wfCanvas.width;
+    var H = wfCanvas.height;
+
+    // Scroll waterfall down by 1 pixel
+    var imgData = wfCtx.getImageData(0, 0, W, H - 1);
+    wfCtx.putImageData(imgData, 0, 1);
+
+    // Draw new line at top
+    var lineData = wfCtx.createImageData(W, 1);
+    for (var i = 0; i < N; i++) {
+        var v = data[i];
+        lineData.data[i*4]   = colorLUT[v*3];
+        lineData.data[i*4+1] = colorLUT[v*3+1];
+        lineData.data[i*4+2] = colorLUT[v*3+2];
+        lineData.data[i*4+3] = 255;
+    }
+    wfCtx.putImageData(lineData, 0, 0);
+
+    // Draw spectrum plot
+    var SW = spCanvas.width;
+    var SH = spCanvas.height;
+    spCtx.fillStyle = '#0a0a1a';
+    spCtx.fillRect(0, 0, SW, SH);
+    spCtx.strokeStyle = '#4fc3f7';
+    spCtx.lineWidth = 1;
+    spCtx.beginPath();
+    for (var i = 0; i < N; i++) {
+        var x = (i / N) * SW;
+        var y = SH - (data[i] / 255.0) * SH;
+        if (i === 0) spCtx.moveTo(x, y);
+        else spCtx.lineTo(x, y);
+    }
+    spCtx.stroke();
+
+    // Grid lines
+    spCtx.strokeStyle = '#1a1a2e';
+    spCtx.lineWidth = 0.5;
+    for (var db = -50; db <= 0; db += 10) {
+        var y = SH - ((db + 60) / 60.0) * SH;
+        spCtx.beginPath();
+        spCtx.moveTo(0, y);
+        spCtx.lineTo(SW, y);
+        spCtx.stroke();
+    }
+}
+
+function updateFreqAxis() {
+    if (!currentFreq || !currentRate) return;
+    var lo = (currentFreq - currentRate/2) / 1e6;
+    var hi = (currentFreq + currentRate/2) / 1e6;
+    var mid = currentFreq / 1e6;
+    document.getElementById('freq-lo').textContent = lo.toFixed(3) + ' MHz';
+    document.getElementById('freq-mid').textContent = mid.toFixed(3) + ' MHz';
+    document.getElementById('freq-hi').textContent = hi.toFixed(3) + ' MHz';
+}
+
+function syncFreqAxisFromControls() {
+    var mhz = parseFloat(document.getElementById('freq-input').value);
+    var rate = parseInt(document.getElementById('rate-select').value, 10);
+    if (isNaN(mhz) || isNaN(rate) || rate <= 0) return;
+    currentFreq = Math.round(mhz * 1e6);
+    currentRate = rate;
+    updateFreqAxis();
+}
+
+function setStatus(dotClass, text) {
+    document.getElementById('ws-status').innerHTML =
+        '<span class="dot ' + dotClass + '"></span>' + text;
+}
+
+function setMsg(text) {
+    document.getElementById('status-msg').textContent = text;
+}
+
+// Load receiver list
+function loadReceivers() {
+    fetch('/api/receivers').then(function(r){return r.json();}).then(function(data){
+        var sel = document.getElementById('rx-select');
+        sel.innerHTML = '';
+        data.receivers.forEach(function(rx){
+            if (rx.backend !== 'sdrgg') return; // Only show sdrgg devices
+            var opt = document.createElement('option');
+            opt.value = rx.id;
+            opt.textContent = 'rx' + rx.id + ': ' + rx.role + ' (' + rx.serial_actual + ') — ' +
+                             (rx.freq/1e6).toFixed(3) + ' MHz';
+            opt.dataset.serial = rx.serial_actual;
+            sel.appendChild(opt);
+            // Store gain list
+            if (rx.gain_list && rx.gain_list.length > 0) {
+                opt.dataset.gains = JSON.stringify(rx.gain_list);
+            }
+        });
+        if (sel.options.length === 0) {
+            sel.innerHTML = '<option value="-1">No sdrgg devices found</option>';
+        }
+    }).catch(function(e){
+        console.error('Failed to load receivers:', e);
+    });
+}
+
+function updateGainSlider(gains) {
+    gainList = gains || [];
+    var slider = document.getElementById('gain-slider');
+    if (gainList.length > 0) {
+        slider.min = 0;
+        slider.max = Math.round(gainList[gainList.length - 1] * 10);
+        slider.step = 1;
+    } else {
+        slider.min = 0;
+        slider.max = 500;
+    }
+}
+
+function connectWS() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws/waterfall');
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function() {
+        setStatus('dot-green', 'Connected');
+    };
+
+    ws.onmessage = function(evt) {
+        if (evt.data instanceof ArrayBuffer) {
+            // Binary = spectrum data
+            var arr = new Uint8Array(evt.data);
+            drawSpectrum(arr);
+        } else {
+            // Text = JSON response
+            try {
+                var msg = JSON.parse(evt.data);
+                handleResponse(msg);
+            } catch(e) {}
+        }
+    };
+
+    ws.onclose = function() {
+        setStatus('dot-red', 'Disconnected');
+        ws = null;
+        running = false;
+        updateUI();
+        // Reconnect after 2s
+        setTimeout(connectWS, 2000);
+    };
+
+    ws.onerror = function() {
+        setStatus('dot-red', 'Error');
+    };
+}
+
+function handleResponse(msg) {
+    if (msg.status === 'ok' && msg.freq && msg.role) {
+        currentFreq = msg.freq;
+        currentRate = msg.rate || currentRate;
+        running = true;
+        setMsg('Streaming — ' + msg.role + ' @ ' + (msg.freq/1e6).toFixed(3) + ' MHz');
+        document.getElementById('freq-input').value = (msg.freq / 1e6).toFixed(3);
+        if (msg.rate) {
+            document.getElementById('rate-select').value = String(Math.round(msg.rate));
+        }
+        // Set gain slider to actual device gain
+        if (msg.gain !== undefined) {
+            var gTenth = Math.round(msg.gain * 10);
+            document.getElementById('gain-slider').value = gTenth;
+            document.getElementById('gain-val').textContent = msg.gain.toFixed(1) + ' dB';
+            initialGainDb = msg.gain;
+            gainChanged = false;
+        }
+        if (msg.gain_list && msg.gain_list.length > 0) {
+            updateGainSlider(msg.gain_list);
+            // Re-set slider value after updating range
+            if (msg.gain !== undefined) {
+                document.getElementById('gain-slider').value = Math.round(msg.gain * 10);
+            }
+        }
+        updateFreqAxis();
+    } else if (msg.status === 'owned') {
+        owned = true;
+        currentFreq = msg.freq;
+        currentRate = msg.rate || currentRate;
+        running = true;
+        setMsg('OWNED — Full control, decoder stopped');
+        document.getElementById('freq-input').value = (msg.freq / 1e6).toFixed(3);
+        if (msg.rate) {
+            document.getElementById('rate-select').value = String(Math.round(msg.rate));
+        }
+        updateFreqAxis();
+    } else if (msg.status === 'released') {
+        owned = false;
+        running = false;
+        setMsg('Released — decoder resumed');
+    } else if (msg.status === 'stopped') {
+        running = false;
+        setMsg('Stopped');
+    } else if (msg.status === 'error') {
+        setMsg('Error: ' + (msg.msg || 'unknown'));
+    } else if (msg.gain_db !== undefined) {
+        // Gain change response
+        document.getElementById('gain-val').textContent = msg.gain_db.toFixed(1) + ' dB';
+        document.getElementById('gain-slider').value = Math.round(msg.gain_db * 10);
+        if (Math.abs(msg.gain_db - initialGainDb) > 0.05) gainChanged = true;
+    } else if (msg.freq) {
+        currentFreq = msg.freq;
+        updateFreqAxis();
+    } else if (msg.rate) {
+        currentRate = msg.rate;
+        updateFreqAxis();
+    }
+    updateUI();
+}
+
+function updateUI() {
+    document.getElementById('btn-start').disabled = running;
+    document.getElementById('btn-stop').disabled = !running;
+    document.getElementById('btn-take').disabled = !running || owned;
+    document.getElementById('btn-take').style.display = owned ? 'none' : '';
+    document.getElementById('btn-release').style.display = owned ? '' : 'none';
+    document.getElementById('tune-group').style.display = owned ? '' : 'none';
+    document.getElementById('rate-group').style.display = owned ? '' : 'none';
+    document.getElementById('owned-label').style.display = owned ? '' : 'none';
+    document.getElementById('rx-select').disabled = running;
+}
+
+function sendCmd(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+    }
+}
+
+// Button handlers
+document.getElementById('btn-start').addEventListener('click', function() {
+    var rxId = parseInt(document.getElementById('rx-select').value);
+    if (rxId < 0) return;
+    currentRxId = rxId;
+    // Get gain list and serial from selected option
+    var opt = document.getElementById('rx-select').selectedOptions[0];
+    if (opt && opt.dataset.gains) {
+        updateGainSlider(JSON.parse(opt.dataset.gains));
+    }
+    if (opt && opt.dataset.serial) {
+        currentSerial = opt.dataset.serial;
+    }
+    sendCmd({cmd:'start', rx: rxId});
+});
+
+document.getElementById('btn-stop').addEventListener('click', function() {
+    sendCmd({cmd:'stop'});
+    running = false;
+    owned = false;
+    updateUI();
+});
+
+document.getElementById('btn-take').addEventListener('click', function() {
+    sendCmd({cmd:'take', rx: currentRxId});
+});
+
+document.getElementById('btn-release').addEventListener('click', function() {
+    sendCmd({cmd:'release'});
+    owned = false;
+    running = false;
+    updateUI();
+    setMsg('Releasing...');
+});
+
+document.getElementById('btn-tune').addEventListener('click', function() {
+    var mhz = parseFloat(document.getElementById('freq-input').value);
+    if (isNaN(mhz) || mhz < 24 || mhz > 1800) return;
+    syncFreqAxisFromControls();
+    sendCmd({cmd:'tune', freq: Math.round(mhz * 1e6)});
+});
+
+document.getElementById('freq-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') document.getElementById('btn-tune').click();
+});
+
+document.getElementById('rate-select').addEventListener('change', function() {
+    var rate = parseInt(this.value);
+    sendCmd({cmd:'rate', value: rate});
+    currentRate = rate;
+    updateFreqAxis();
+});
+
+// Gain slider
+var gainSlider = document.getElementById('gain-slider');
+var gainDebounce = null;
+gainSlider.addEventListener('input', function() {
+    document.getElementById('gain-val').textContent = (this.value / 10).toFixed(1) + ' dB';
+    if (gainDebounce) clearTimeout(gainDebounce);
+    gainDebounce = setTimeout(function() {
+        sendCmd({cmd:'gain', value: parseInt(gainSlider.value)});
+    }, 200);
+});
+
+// Save gain via assign API
+function saveGain() {
+    if (!currentSerial || gainList.length === 0) return;
+    var gainDb = parseFloat(document.getElementById('gain-val').textContent);
+    // Find nearest step
+    var bestStep = 0;
+    for (var i = 1; i < gainList.length; i++) {
+        if (Math.abs(gainList[i] - gainDb) < Math.abs(gainList[bestStep] - gainDb))
+            bestStep = i;
+    }
+    fetch('/api/receivers/setgain', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({serial: currentSerial, step: bestStep})
+    }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) {
+            initialGainDb = d.gain_db;
+            gainChanged = false;
+        }
+    }).catch(function(){});
+}
+
+// Prompt to save gain on page leave
+window.addEventListener('beforeunload', function(e) {
+    if (gainChanged) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
+
+// Intercept navigation links to offer save
+document.querySelectorAll('nav .tabs a').forEach(function(link) {
+    link.addEventListener('click', function(e) {
+        if (!gainChanged) return;
+        e.preventDefault();
+        var href = this.href;
+        if (confirm('Il guadagno è stato modificato (' + document.getElementById('gain-val').textContent + '). Salvare?')) {
+            saveGain();
+        }
+        gainChanged = false;
+        window.location.href = href;
+    });
+});
+
+// Initialize
+loadReceivers();
+connectWS();
+updateUI();
+</script>
+<script src="/warnings.js"></script>
+</body>
+</html>

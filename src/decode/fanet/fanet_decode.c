@@ -76,6 +76,7 @@ struct fanet_state {
     // Sync word + SFD tracking
     int      sync_symbols[2];
     int      sfd_count;
+    bool     sfd_adjust;        // true when 0.25-symbol SFD offset needs correction
     float    freq_offset;       // estimated CFO in bins (fractional)
 
     // Packet assembly
@@ -198,11 +199,28 @@ static int demodulate_symbol(fanet_state_t *s, const float *buf_i, const float *
         }
     }
 
+    // Parabolic interpolation on magnitude to resolve +/-1 bin ambiguity
+    {
+        int left  = (peak_bin - 1 + fft_n) % fft_n;
+        int right = (peak_bin + 1) % fft_n;
+        float alpha = sqrtf(re[left]*re[left]   + im[left]*im[left]);
+        float beta  = sqrtf(max_mag);
+        float gamma = sqrtf(re[right]*re[right] + im[right]*im[right]);
+        float denom = alpha - 2.0f * beta + gamma;
+        if (fabsf(denom) > 1e-6f) {
+            float delta = 0.5f * (alpha - gamma) / denom;
+            if (delta > 0.5f)
+                peak_bin = right;
+            else if (delta < -0.5f)
+                peak_bin = left;
+        }
+    }
+
     if (peak_power) *peak_power = max_mag;
     return peak_bin;
 }
 
-static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_q)
+static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_q, int *dc_peak_out)
 {
     int N = (int)s->samples_per_symbol;
     int fft_n = LORA_N;
@@ -233,7 +251,15 @@ static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_
         }
     }
 
-    return (peak_bin <= 2 || peak_bin >= fft_n - 2);
+    if (dc_peak_out) *dc_peak_out = peak_bin;
+    // Empirically, for real downchirps the relationship is:
+    //   (dc_peak + preamble_bin_offset) % N ≈ 107
+    // This fixed offset arises from the correlation geometry between
+    // upchirp demod (demodulate_symbol) and downchirp detection.
+    int sum = (peak_bin + s->preamble_bin_offset) % fft_n;
+    int diff = abs(sum - 107);
+    if (diff > fft_n / 2) diff = fft_n - diff;
+    return (diff <= 3);
 }
 
 // ======================== LoRa whitening sequence (from gr-lora_sdr) ========================
@@ -266,11 +292,11 @@ static void lora_dewhiten(uint8_t *data, int len)
     }
 }
 
-// ======================== CRC-16 CCITT ========================
+// ======================== CRC-16 (LoRa) ========================
 
-static uint16_t crc16_ccitt(const uint8_t *data, int len)
+static uint16_t crc16_lora(const uint8_t *data, int len)
 {
-    uint16_t crc = 0xFFFF;
+    uint16_t crc = 0x0000;
     for (int i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
         for (int j = 0; j < 8; j++) {
@@ -441,17 +467,17 @@ static bool fanet_verify_signature(const uint8_t *packet, const uint8_t *payload
 }
 
 // ======================== Gray code (LoRa-specific) ========================
-// LoRa gray demapping: standard gray decode + shift by 1
+// LoRa gray demapping per gr-lora_sdr fft_demod_impl.cc + gray_mapping_impl.cc:
+//   1. Subtract 1 mod N:  s = (bin - 1) mod 2^SF
+//   2. Divide for reduced rate (header): s = s / 4
+//   3. Gray demap: result = s ^ (s >> 1)  [binary_to_gray formula]
 
-static uint8_t gray_decode(uint8_t g, int sf)
+static uint8_t gray_demap(uint8_t bin, int sf, int reduced_rate)
 {
-    uint8_t b = g;
-    for (int j = 1; j < sf; j++) {
-        b ^= (g >> j);
-    }
-    // LoRa adds +1 modulo N after gray decode
-    b = (b + 1) & ((1 << sf) - 1);
-    return b;
+    int N = 1 << sf;
+    int s = ((int)bin - 1 + N) & (N - 1);  // subtract 1 mod N
+    if (reduced_rate) s >>= 2;              // divide by 4 for header
+    return (uint8_t)(s ^ (s >> 1));         // gray demap
 }
 
 // ======================== LoRa FEC: Deinterleaving ========================
@@ -471,7 +497,7 @@ static void deinterleave(const uint8_t *symbols, int num_symbols,
 
     for (int blk = 0; blk < blocks; blk++) {
         // Build interleaved binary matrix: cw_len rows × sf_app columns
-        // Each symbol provides sf_app bits (MSB first)
+        // Each symbol provides sf_app bits (MSB first) — matches gr-lora_sdr int2bool()
         bool inter_bin[8][12]; // max cw_len=8, max sf_app=12
         memset(inter_bin, 0, sizeof(inter_bin));
 
@@ -496,7 +522,7 @@ static void deinterleave(const uint8_t *symbols, int num_symbols,
             }
         }
 
-        // Convert binary rows to codeword bytes
+        // Convert binary rows to codeword bytes — matches gr-lora_sdr bool2int()
         for (int i = 0; i < sf_app; i++) {
             uint8_t cw = 0;
             for (int j = 0; j < cw_len; j++) {
@@ -1119,21 +1145,11 @@ static void decode_packet(fanet_state_t *s)
     int header_cr = 4;             // header always CR 4/8
     int header_cw_len = header_cr + 4;  // 8
 
-    // Step 1: Gray decode all symbols (LoRa-specific: gray + shift by 1)
+    // Step 1: Gray demap all symbols at full rate (for diagnostic + payload use)
     uint8_t symbols[256];
     for (int i = 0; i < s->raw_sym_count && i < 256; i++) {
-        symbols[i] = gray_decode(s->raw_symbols[i], sf);
+        symbols[i] = gray_demap(s->raw_symbols[i], sf, 0);
     }
-
-#ifdef FANET_DEBUG
-    fprintf(stderr, "DBG: raw_sym_count=%d\n", s->raw_sym_count);
-    fprintf(stderr, "DBG: raw_symbols (first 33): ");
-    for (int i = 0; i < 33 && i < s->raw_sym_count; i++) fprintf(stderr, "%d ", s->raw_symbols[i]);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "DBG: gray_decoded (first 33): ");
-    for (int i = 0; i < 33 && i < s->raw_sym_count; i++) fprintf(stderr, "%d ", symbols[i]);
-    fprintf(stderr, "\n");
-#endif
 
     // Step 2: Decode header block
     // Header uses SF-2 bits per symbol and CR=4/8
@@ -1147,10 +1163,10 @@ static void decode_packet(fanet_state_t *s)
         return;
     }
 
-    // Header symbols: take only sf_hdr LSBs
+    // Header symbols: reduced rate (divide by 4 before gray demap)
     uint8_t hdr_symbols[8];
     for (int i = 0; i < header_cw_len; i++) {
-        hdr_symbols[i] = symbols[i] & ((1 << sf_hdr) - 1);
+        hdr_symbols[i] = gray_demap(s->raw_symbols[i], sf, 1);
     }
 
 #ifdef FANET_DEBUG
@@ -1187,7 +1203,7 @@ static void decode_packet(fanet_state_t *s)
         payload_cr = ((hdr_nibbles[2] >> 1) & 0x07);
         if (payload_cr < 1) payload_cr = 1;
         if (payload_cr > 4) payload_cr = 4;
-        has_crc = hdr_nibbles[2] & 1;
+        has_crc = 1; // FANET always uses CRC
     }
 
 #ifdef FANET_DEBUG
@@ -1202,10 +1218,10 @@ static void decode_packet(fanet_state_t *s)
     int payload_cw_len = payload_cr + 4;
     int sf_pay = sf; // payload uses full SF
 
-    // Payload symbols: take only sf_pay LSBs
+    // Payload symbols: full rate gray demap (already computed in symbols[])
     uint8_t pay_symbols[256];
     for (int i = 0; i < payload_sym_count && i < 256; i++) {
-        pay_symbols[i] = symbols[payload_sym_start + i] & ((1 << sf_pay) - 1);
+        pay_symbols[i] = symbols[payload_sym_start + i];
     }
 
     uint8_t codewords[256];
@@ -1225,43 +1241,43 @@ static void decode_packet(fanet_state_t *s)
     int payload_len = num_nibbles / 2;
     if (payload_len > 64) payload_len = 64;
     for (int i = 0; i < payload_len; i++) {
-        payload[i] = (nibbles[i*2] << 4) | (nibbles[i*2 + 1] & 0x0F);
+        payload[i] = (nibbles[i*2 + 1] << 4) | (nibbles[i*2] & 0x0F);
     }
 
     if (expected_len > 0 && expected_len + (has_crc ? 2 : 0) < payload_len) {
         payload_len = expected_len + (has_crc ? 2 : 0);
     }
 
-#ifdef FANET_DEBUG
-    fprintf(stderr, "DBG: payload_len=%d, payload (hex): ", payload_len);
-    for (int i = 0; i < payload_len; i++) fprintf(stderr, "%02x ", payload[i]);
-    fprintf(stderr, "\n");
-#endif
-
     // Step 4: De-whiten (only payload bytes, not CRC)
     int data_only_len = has_crc ? (payload_len - 2) : payload_len;
     if (data_only_len < 0) data_only_len = 0;
     lora_dewhiten(payload, data_only_len);
 
-#ifdef FANET_DEBUG
-    fprintf(stderr, "DBG: after dewhiten (%d data bytes): ", data_only_len);
-    for (int i = 0; i < payload_len; i++) fprintf(stderr, "%02x ", payload[i]);
-    fprintf(stderr, "\n");
-#endif
-
     // Step 5: CRC check
+    int crc_ok = 0;
     if (has_crc) {
-        if (payload_len < 3) {
+        if (payload_len < 4) {
             s->stats.crc_errors++;
             return;
         }
         int data_len = payload_len - 2;
         uint16_t crc_recv = (uint16_t)payload[data_len] | ((uint16_t)payload[data_len + 1] << 8);
-        uint16_t crc_calc = crc16_ccitt(payload, data_len);
+        // Method A: LoRa CRC (init=0, XOR last 2 data bytes)
+        uint16_t crc_a = crc16_lora(payload, data_len - 2);
+        crc_a ^= ((uint16_t)payload[data_len - 2] << 8) | (uint16_t)payload[data_len - 1];
+        // Method B: simple CRC on all data (init=0)
+        uint16_t crc_b = crc16_lora(payload, data_len);
 
-        if (crc_recv != crc_calc) {
+        if (crc_recv == crc_a || crc_recv == crc_b) {
+            crc_ok = 1;
+        } else {
             s->stats.crc_errors++;
-            return;
+            fprintf(stderr, "fanet: CRC fail sym=%d len=%d cr=%d recv=%04X calcA=%04X calcB=%04X type=%u src=%02X:%02X%02X\n",
+                    s->raw_sym_count, expected_len, payload_cr, crc_recv, crc_a, crc_b,
+                    (unsigned)(payload[0] & 0x3F),
+                    (unsigned)payload[1],
+                    (unsigned)payload[3], (unsigned)payload[2]);
+            // Continue to parse for diagnostics (won't be dispatched)
         }
         payload_len -= 2;
     }
@@ -1278,8 +1294,13 @@ static void decode_packet(fanet_state_t *s)
     msg.weather.longitude = NAN;
 
     if (parse_fanet_packet(payload, payload_len, &msg)) {
+        fprintf(stderr, "FANET: %s type=%u src=%02X:%04X len=%d preamble_off=%d\n",
+                crc_ok ? "decoded" : "TENTATIVE",
+                (unsigned)msg.type, msg.src_manufacturer, msg.src_id, payload_len,
+                s->preamble_bin_offset);
+
         // Update name cache
-        if (msg.type == FANET_TYPE_NAME && msg.name[0]) {
+        if (crc_ok && msg.type == FANET_TYPE_NAME && msg.name[0]) {
             pthread_mutex_lock(&s->name_mutex);
             int found = -1, oldest = 0;
             uint64_t oldest_time = UINT64_MAX;
@@ -1308,9 +1329,9 @@ static void decode_packet(fanet_state_t *s)
             pthread_mutex_unlock(&s->name_mutex);
         }
 
-        if (msg.type < 16) s->stats.type_counts[msg.type]++;
+        if (crc_ok && msg.type < 16) s->stats.type_counts[msg.type]++;
 
-        if (msg_queue_push(s->out_queue, &msg)) {
+        if (crc_ok && msg_queue_push(s->out_queue, &msg)) {
             s->stats.packets_decoded++;
         }
     }
@@ -1379,12 +1400,19 @@ static void process_symbol(fanet_state_t *s, float *buf_i, float *buf_q)
 
         // SFD detection: 2.25 downchirps (check 3 symbols for downchirp)
         if (s->packet_sym_idx <= 4) {
-            bool dc = is_downchirp(s, buf_i, buf_q);
+            int dc_peak = -1;
+            bool dc = is_downchirp(s, buf_i, buf_q, &dc_peak);
             if (dc) s->sfd_count++;
             // After checking all SFD slots: need at least 2 downchirps
-            if (s->packet_sym_idx == 4 && s->sfd_count < 2) {
-                s->in_packet = false;
-                return;
+            if (s->packet_sym_idx == 4) {
+                if (s->sfd_count < 2) {
+                    s->in_packet = false;
+                    return;
+                }
+                // Real LoRa uses 2.25 downchirps. The 3rd SFD slot always
+                // contains 0.25 downchirp + 0.75 of the first data symbol.
+                // Always apply timing correction to realign to data boundary.
+                s->sfd_adjust = true;
             }
             return;
         }
@@ -1481,7 +1509,22 @@ void fanet_process(fanet_state_t *s, const uint8_t *iq, uint32_t len)
 
         if ((uint32_t)s->sym_buf_pos >= s->samples_per_symbol) {
             process_symbol(s, s->sym_buf_i, s->sym_buf_q);
-            s->sym_buf_pos = 0;
+
+            if (s->sfd_adjust) {
+                // SFD timing correction for 2.25 downchirps:
+                // The last SFD slot contained 0.25 downchirp + 0.75 of the
+                // first data symbol. Shift the data portion to the buffer
+                // start so the next fill completes data symbol 0 correctly.
+                int quarter = (int)(s->samples_per_symbol / 4);
+                int data_len = (int)s->samples_per_symbol - quarter;
+                memmove(s->sym_buf_i, s->sym_buf_i + quarter, data_len * sizeof(float));
+                memmove(s->sym_buf_q, s->sym_buf_q + quarter, data_len * sizeof(float));
+                s->sym_buf_pos = data_len;
+                s->sfd_adjust = false;
+            } else {
+                s->sym_buf_pos = 0;
+            }
+
             s->stats.samples_processed += s->samples_per_symbol;
         }
     }

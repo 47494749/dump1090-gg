@@ -404,6 +404,9 @@ struct aircraft {
     int           circling;                // 1 if aircraft is circling (>360° heading change in window)
     uint64_t      circling_updated;        // when circling was last evaluated
 
+    // DF19 (Military Extended Squitter) seen
+    int           seen_df19;               // 1 if DF19 was received from this aircraft
+
     // FLARM/FANET/OGN aircraft type (0 = not set / not FLARM)
     uint8_t       flarm_acft_type;         // enum flarm_aircraft_type value (1-15), 0=unset
     uint8_t       flarm_addr_type;         // FLARM address type (0=random,1=ICAO,2=FLARM,3=anon)
@@ -426,6 +429,18 @@ struct aircraft {
         uint8_t  confidence;       // 0-7
         uint8_t  valid;            // non-zero if thermal received
     } fanet_thermal;
+
+    // Radiosonde info
+    struct {
+        char     serial[16];       // sonde serial (e.g. "T1234567")
+        char     sonde_type[8];    // "RS41", "DFM", etc.
+        int      frame_num;        // frame counter
+        int      rs_errors;        // RS corrections (-1=uncorrectable)
+        int      satellites;       // GPS satellites
+        double   vel_v;            // vertical velocity m/s
+        float    freq_mhz;         // receive frequency
+        uint8_t  valid;            // non-zero if sonde data present
+    } sonde_info;
 
     struct aircraft *next;        // Next aircraft in our linked list
 };

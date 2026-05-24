@@ -82,9 +82,10 @@ struct _Modes {                             // Internal state
 
     // Beast feed outputs (ADSBx, OpenSky, adsb.fi, etc.)
     #define MAX_BEAST_FEEDS 16
-    #define FEED_FORMAT_BEAST 0
-    #define FEED_FORMAT_RAW   1
-    #define FEED_FORMAT_SBS   2
+    #define FEED_FORMAT_BEAST        0
+    #define FEED_FORMAT_RAW          1
+    #define FEED_FORMAT_SBS          2
+    #define FEED_FORMAT_BEAST_REDUCE 3
     struct {
         char  name[32];              // display name (e.g. "ADSBx", "OpenSky")
         char *host;                  // feed host
@@ -93,6 +94,7 @@ struct _Modes {                             // Internal state
         int   enabled;               // 1=active, 0=disabled by user
     } beast_feeds[MAX_BEAST_FEEDS];
     int beast_feed_count;
+    int beast_reduce_interval;       // BeastReduce min interval in ms (default 250)
     char *adsbhub_ckey;              // ADSBHub station ckey for dynamic IP update
 
     // Airframes.io ACARS/VDL2 UDP feed

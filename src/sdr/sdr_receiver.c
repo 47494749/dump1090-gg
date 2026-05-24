@@ -1,4 +1,4 @@
-// Part of dump1090, a Mode S message decoder for RTLSDR devices.
+﻿// Part of dump1090, a Mode S message decoder for RTLSDR devices.
 //
 // sdr_receiver.c: Multi-SDR dynamic receiver management
 //
@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <math.h>
+#include <ctype.h>
 #include "config_panel.h"
 #include "pocsag_demod.h"
 #include "gsm_decode.h"
@@ -43,6 +44,7 @@ int LteOutputEnabled = 1;     // toggled from panel; 1 = decode & show LTE cells
 int IotOutputEnabled = 1;     // toggled from panel; 1 = decode & show IoT devices
 int FanetOutputEnabled = 1;   // toggled from panel; 1 = decode & show FANET traffic
 int SarsatOutputEnabled = 1;  // toggled from panel; 1 = decode & show Sarsat beacons
+int DvbDriverWarning = 0;     // set to 1 if dvb_usb_rtl28xxu kernel module is loaded
 
 // Dispatcher aircraft queue for FANET (registered on first use)
 static aircraft_queue_handle_t fanet_aircraft_queue = NULL;
@@ -53,6 +55,34 @@ static aircraft_queue_handle_t fanet_aircraft_queue = NULL;
 static fanet_ground_entry_t fanet_ground_cache[FANET_GROUND_MAX];
 static int fanet_ground_count = 0;
 static pthread_mutex_t fanet_ground_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// FANET recent messages caches (for panel display)
+#define FANET_NAME_MAX 32
+#define FANET_MSG_MAX 32
+#define FANET_WX_MAX 16
+#define FANET_THERMAL_MAX 16
+#define FANET_ACK_MAX 32
+
+static fanet_name_entry_t fanet_name_cache[FANET_NAME_MAX];
+static int fanet_name_count = 0;
+static pthread_mutex_t fanet_name_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static fanet_msg_entry_t fanet_msg_cache[FANET_MSG_MAX];
+static int fanet_msg_count = 0;
+static pthread_mutex_t fanet_msg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static fanet_wx_entry_t fanet_wx_cache[FANET_WX_MAX];
+static int fanet_wx_count = 0;
+static pthread_mutex_t fanet_wx_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static fanet_thermal_entry_t fanet_thermal_cache[FANET_THERMAL_MAX];
+static int fanet_thermal_count = 0;
+static pthread_mutex_t fanet_thermal_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static fanet_ack_entry_t fanet_ack_cache[FANET_ACK_MAX];
+static int fanet_ack_count = 0;
+static int fanet_ack_write = 0;  // ring buffer index
+static pthread_mutex_t fanet_ack_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void fanetGetGroundTracks(void (*cb)(const fanet_ground_entry_t *e, void *ctx), void *ctx)
 {
@@ -99,6 +129,187 @@ static void fanet_ground_cache_update(uint32_t addr, double lat, double lon,
         snprintf(fanet_ground_cache[slot].name, sizeof(fanet_ground_cache[slot].name), "%s", name);
 
     pthread_mutex_unlock(&fanet_ground_mutex);
+}
+
+// ---- Name cache (type 2) ----
+void fanetGetNames(void (*cb)(const fanet_name_entry_t *e, void *ctx), void *ctx)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_name_mutex);
+    for (int i = 0; i < fanet_name_count; i++) {
+        if (fanet_name_cache[i].valid && (now - fanet_name_cache[i].last_seen) < 600000)
+            cb(&fanet_name_cache[i], ctx);
+    }
+    pthread_mutex_unlock(&fanet_name_mutex);
+}
+
+static void fanet_name_cache_update(uint32_t addr, const char *name)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_name_mutex);
+    int slot = -1, oldest = -1;
+    uint64_t oldest_time = UINT64_MAX;
+    for (int i = 0; i < fanet_name_count; i++) {
+        if (fanet_name_cache[i].addr == addr) { slot = i; break; }
+        if (fanet_name_cache[i].last_seen < oldest_time) { oldest_time = fanet_name_cache[i].last_seen; oldest = i; }
+    }
+    if (slot < 0) {
+        if (fanet_name_count < FANET_NAME_MAX) slot = fanet_name_count++;
+        else slot = oldest;
+    }
+    fanet_name_cache[slot].addr = addr;
+    fanet_name_cache[slot].last_seen = now;
+    fanet_name_cache[slot].valid = 1;
+    snprintf(fanet_name_cache[slot].name, sizeof(fanet_name_cache[slot].name), "%s", name ? name : "");
+    pthread_mutex_unlock(&fanet_name_mutex);
+}
+
+// ---- Message cache (type 3) ----
+void fanetGetMessages(void (*cb)(const fanet_msg_entry_t *e, void *ctx), void *ctx)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_msg_mutex);
+    for (int i = 0; i < fanet_msg_count; i++) {
+        if (fanet_msg_cache[i].valid && (now - fanet_msg_cache[i].last_seen) < 600000)
+            cb(&fanet_msg_cache[i], ctx);
+    }
+    pthread_mutex_unlock(&fanet_msg_mutex);
+}
+
+static void fanet_msg_cache_update(uint32_t addr, uint8_t subtype, const char *text)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_msg_mutex);
+    // Messages are appended as a ring (most recent wins per slot)
+    int slot = -1, oldest = -1;
+    uint64_t oldest_time = UINT64_MAX;
+    for (int i = 0; i < fanet_msg_count; i++) {
+        if (fanet_msg_cache[i].addr == addr && fanet_msg_cache[i].subtype == subtype) { slot = i; break; }
+        if (fanet_msg_cache[i].last_seen < oldest_time) { oldest_time = fanet_msg_cache[i].last_seen; oldest = i; }
+    }
+    if (slot < 0) {
+        if (fanet_msg_count < FANET_MSG_MAX) slot = fanet_msg_count++;
+        else slot = oldest;
+    }
+    fanet_msg_cache[slot].addr = addr;
+    fanet_msg_cache[slot].subtype = subtype;
+    fanet_msg_cache[slot].last_seen = now;
+    fanet_msg_cache[slot].valid = 1;
+    snprintf(fanet_msg_cache[slot].text, sizeof(fanet_msg_cache[slot].text), "%s", text ? text : "");
+    pthread_mutex_unlock(&fanet_msg_mutex);
+}
+
+// ---- Weather cache (type 4) ----
+void fanetGetWeather(void (*cb)(const fanet_wx_entry_t *e, void *ctx), void *ctx)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_wx_mutex);
+    for (int i = 0; i < fanet_wx_count; i++) {
+        if (fanet_wx_cache[i].valid && (now - fanet_wx_cache[i].last_seen) < 600000)
+            cb(&fanet_wx_cache[i], ctx);
+    }
+    pthread_mutex_unlock(&fanet_wx_mutex);
+}
+
+static void fanet_wx_cache_update(uint32_t addr, const char *name, const fanet_message_t *msg)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_wx_mutex);
+    int slot = -1, oldest = -1;
+    uint64_t oldest_time = UINT64_MAX;
+    for (int i = 0; i < fanet_wx_count; i++) {
+        if (fanet_wx_cache[i].addr == addr) { slot = i; break; }
+        if (fanet_wx_cache[i].last_seen < oldest_time) { oldest_time = fanet_wx_cache[i].last_seen; oldest = i; }
+    }
+    if (slot < 0) {
+        if (fanet_wx_count < FANET_WX_MAX) slot = fanet_wx_count++;
+        else slot = oldest;
+    }
+    fanet_wx_cache[slot].addr = addr;
+    fanet_wx_cache[slot].last_seen = now;
+    fanet_wx_cache[slot].valid = 1;
+    snprintf(fanet_wx_cache[slot].name, sizeof(fanet_wx_cache[slot].name), "%s", name ? name : "");
+    fanet_wx_cache[slot].latitude = msg->weather.latitude;
+    fanet_wx_cache[slot].longitude = msg->weather.longitude;
+    fanet_wx_cache[slot].temperature = msg->weather.temperature;
+    fanet_wx_cache[slot].wind_speed = msg->weather.wind_speed;
+    fanet_wx_cache[slot].wind_gust = msg->weather.wind_gust;
+    fanet_wx_cache[slot].wind_heading = msg->weather.wind_heading;
+    fanet_wx_cache[slot].humidity = msg->weather.humidity;
+    fanet_wx_cache[slot].pressure = msg->weather.pressure;
+    fanet_wx_cache[slot].state_of_charge = msg->weather.state_of_charge;
+    fanet_wx_cache[slot].has_pos = msg->weather.has_position ? 1 : 0;
+    fanet_wx_cache[slot].has_temp = msg->weather.has_temp ? 1 : 0;
+    fanet_wx_cache[slot].has_wind = msg->weather.has_wind ? 1 : 0;
+    fanet_wx_cache[slot].has_humidity = msg->weather.has_humidity ? 1 : 0;
+    fanet_wx_cache[slot].has_pressure = msg->weather.has_pressure ? 1 : 0;
+    fanet_wx_cache[slot].has_soc = msg->weather.has_soc ? 1 : 0;
+    pthread_mutex_unlock(&fanet_wx_mutex);
+}
+
+// ---- Thermal cache (type 9) ----
+void fanetGetThermals(void (*cb)(const fanet_thermal_entry_t *e, void *ctx), void *ctx)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_thermal_mutex);
+    for (int i = 0; i < fanet_thermal_count; i++) {
+        if (fanet_thermal_cache[i].valid && (now - fanet_thermal_cache[i].last_seen) < 600000)
+            cb(&fanet_thermal_cache[i], ctx);
+    }
+    pthread_mutex_unlock(&fanet_thermal_mutex);
+}
+
+static void fanet_thermal_cache_update(uint32_t addr, const fanet_message_t *msg)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_thermal_mutex);
+    int slot = -1, oldest = -1;
+    uint64_t oldest_time = UINT64_MAX;
+    for (int i = 0; i < fanet_thermal_count; i++) {
+        if (fanet_thermal_cache[i].addr == addr) { slot = i; break; }
+        if (fanet_thermal_cache[i].last_seen < oldest_time) { oldest_time = fanet_thermal_cache[i].last_seen; oldest = i; }
+    }
+    if (slot < 0) {
+        if (fanet_thermal_count < FANET_THERMAL_MAX) slot = fanet_thermal_count++;
+        else slot = oldest;
+    }
+    fanet_thermal_cache[slot].addr = addr;
+    fanet_thermal_cache[slot].last_seen = now;
+    fanet_thermal_cache[slot].valid = 1;
+    fanet_thermal_cache[slot].latitude = msg->thermal.latitude;
+    fanet_thermal_cache[slot].longitude = msg->thermal.longitude;
+    fanet_thermal_cache[slot].altitude = msg->thermal.altitude;
+    fanet_thermal_cache[slot].climb = msg->thermal.climb;
+    fanet_thermal_cache[slot].wind_speed = msg->thermal.wind_speed;
+    fanet_thermal_cache[slot].wind_heading = msg->thermal.wind_heading;
+    fanet_thermal_cache[slot].confidence = msg->thermal.confidence;
+    pthread_mutex_unlock(&fanet_thermal_mutex);
+}
+
+// ---- ACK cache (type 0) — ring buffer of recent ACKs ----
+void fanetGetAcks(void (*cb)(const fanet_ack_entry_t *e, void *ctx), void *ctx)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_ack_mutex);
+    for (int i = 0; i < fanet_ack_count; i++) {
+        if (fanet_ack_cache[i].valid && (now - fanet_ack_cache[i].timestamp) < 300000)
+            cb(&fanet_ack_cache[i], ctx);
+    }
+    pthread_mutex_unlock(&fanet_ack_mutex);
+}
+
+static void fanet_ack_cache_update(uint32_t src_addr, uint32_t dst_addr)
+{
+    uint64_t now = mstime();
+    pthread_mutex_lock(&fanet_ack_mutex);
+    int slot = fanet_ack_write;
+    fanet_ack_cache[slot].src_addr = src_addr;
+    fanet_ack_cache[slot].dst_addr = dst_addr;
+    fanet_ack_cache[slot].timestamp = now;
+    fanet_ack_cache[slot].valid = 1;
+    fanet_ack_write = (fanet_ack_write + 1) % FANET_ACK_MAX;
+    if (fanet_ack_count < FANET_ACK_MAX) fanet_ack_count++;
+    pthread_mutex_unlock(&fanet_ack_mutex);
 }
 
 // ======================== Utility ========================
@@ -577,6 +788,22 @@ static void rx_stream_callback(uint8_t *buf, uint32_t len, void *ctx)
 
     uint32_t samples_read = len / 2;
     if (!samples_read) return;
+
+    // Waterfall IQ tap: copy raw IQ into ring buffer for spectrum display
+    if (rx->wf_tap_active && rx->wf_tap_buf) {
+        uint32_t sz = rx->wf_tap_size;
+        uint32_t wr = rx->wf_tap_wr;
+        uint32_t to_copy = len;
+        if (to_copy > sz) to_copy = sz;  // cap at buffer size
+        uint32_t first = sz - wr;
+        if (first >= to_copy) {
+            memcpy(rx->wf_tap_buf + wr, buf, to_copy);
+        } else {
+            memcpy(rx->wf_tap_buf + wr, buf, first);
+            memcpy(rx->wf_tap_buf, buf + first, to_copy - first);
+        }
+        __atomic_store_n(&rx->wf_tap_wr, (wr + to_copy) % sz, __ATOMIC_RELEASE);
+    }
 
     // Dispatch to decoder_ops (all roles use this uniform path)
     if (rx->decoder_ops && rx->decoder_ops->process) {
@@ -1149,6 +1376,7 @@ typedef struct {
     struct sonde_state *inner;
     msg_queue_t         queue;
     sdr_receiver_t     *rx;
+    aircraft_queue_handle_t aircraft_queue;
 } sonde_ctx_t;
 
 typedef struct {
@@ -1186,8 +1414,6 @@ typedef struct {
     msg_queue_t          queue;
     sdr_receiver_t      *rx;
 } sarsat_ctx_t;
-
-// ---- Lightweight queue-push callbacks (called from reader thread) ----
 
 static void acars_queue_cb(const acars_msg_t *msg, void *ctx) {
     acars_ctx_t *c = (acars_ctx_t *)ctx;
@@ -1582,11 +1808,13 @@ void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, uint32_t len)
 
 static bool acarsDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void acarsDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void acarsDecoderDrain(sdr_receiver_t *rx) {
+static bool acarsDecoderDrain(sdr_receiver_t *rx) {
     acars_ctx_t *ctx = (acars_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
+    if (!ctx) return false;
     acars_msg_t msg;
+    bool had_data = false;
     while (msg_queue_pop(ctx->queue, &msg)) {
+        had_data = true;
         panelLogMessage("[ACARS rx%d] %.3f MHz %s %s (reg:%s) [%s%s%s]%s%s%s%s%s%s %s",
                         ctx->rx->dev_index, msg.freq / 1e6,
                         msg.flight[0] ? msg.flight : "???",
@@ -1604,6 +1832,7 @@ static void acarsDecoderDrain(sdr_receiver_t *rx) {
                         msg.text[0] ? msg.text : "(empty)");
         airframesFeedSendAcars(&msg);
     }
+    return had_data;
 }
 static void acarsDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -1619,11 +1848,13 @@ static const decoder_ops_t acars_decoder_ops = {
 
 static bool vdl2DecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void vdl2DecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void vdl2DecoderDrain(sdr_receiver_t *rx) {
+static bool vdl2DecoderDrain(sdr_receiver_t *rx) {
     vdl2_ctx_t *ctx = (vdl2_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
+    if (!ctx) return false;
     vdl2_msg_t msg;
+    bool had_data = false;
     while (msg_queue_pop(ctx->queue, &msg)) {
+        had_data = true;
         if (msg.has_acars) {
             panelLogMessage("[VDL2 rx%d] %.3f MHz %s %s (reg:%s) [%s%s%s] SNR=%.0fdB %s",
                             ctx->rx->dev_index, msg.freq / 1e6,
@@ -1650,6 +1881,7 @@ static void vdl2DecoderDrain(sdr_receiver_t *rx) {
         }
         airframesFeedSendVdl2(&msg);
     }
+    return had_data;
 }
 static void vdl2DecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -1665,22 +1897,82 @@ static const decoder_ops_t vdl2_decoder_ops = {
 
 static bool sondeDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void sondeDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void sondeDecoderDrain(sdr_receiver_t *rx) {
+static bool sondeDecoderDrain(sdr_receiver_t *rx) {
     sonde_ctx_t *ctx = (sonde_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
+    if (!ctx) return false;
     sonde_msg_t msg;
+    bool had_data = false;
     while (msg_queue_pop(ctx->queue, &msg)) {
+        had_data = true;
         if (msg.valid_pos) {
             panelLogMessage("[SONDE rx%d] %s %s pos=%.4f,%.4f alt=%.0fm vel=%.1fm/s frame=%d",
                             ctx->rx->dev_index, msg.type, msg.serial,
                             msg.lat, msg.lon, msg.alt,
                             msg.vel_h, msg.frame_num);
             sondehubClientSubmit(&msg);
+
+            // Inject into aircraft tracking list
+            if (!ctx->aircraft_queue)
+                ctx->aircraft_queue = dispatcher_register_aircraft_queue("sonde");
+            if (ctx->aircraft_queue) {
+                aircraft_update_t upd;
+                memset(&upd, 0, sizeof(upd));
+
+                // Generate pseudo-ICAO from serial hash (fd0000-fdFFFF range)
+                uint32_t hash = 0;
+                for (int i = 0; msg.serial[i]; i++)
+                    hash = hash * 31 + (uint8_t)msg.serial[i];
+                upd.addr = 0xFD0000 | (hash & 0xFFFF);
+                upd.timestamp_ms = mstime();
+                upd.signal_level = 0.01;
+                upd.source = DECODE_SOURCE_RADIOSONDE;
+
+                // Callsign = serial
+                snprintf(upd.callsign, sizeof(upd.callsign), "%.8s", msg.serial);
+                upd.callsign_valid = 1;
+
+                // Category B1 (meteorological balloon/radiosonde)
+                upd.category = 0xB1;
+                upd.category_valid = 1;
+
+                // Position
+                upd.lat = msg.lat;
+                upd.lon = msg.lon;
+                upd.position_valid = 1;
+
+                // Altitude (meters → feet, geometric/GPS)
+                upd.altitude_ft = (int)(msg.alt * 3.28084);
+                upd.altitude_valid = 1;
+                upd.altitude_is_baro = 0;
+
+                // Velocity
+                if (msg.vel_h > 0.1 || fabs(msg.vel_v) > 0.1) {
+                    upd.ground_speed_kt = (int)(msg.vel_h * 1.94384);
+                    upd.heading_deg = (int)msg.heading;
+                    upd.vert_rate_fpm = (int)(msg.vel_v * 196.85);
+                    upd.velocity_valid = 1;
+                }
+
+                upd.air_ground = DECODE_AG_AIRBORNE;
+
+                // Sonde metadata
+                upd.sonde.valid = true;
+                snprintf(upd.sonde.serial, sizeof(upd.sonde.serial), "%.15s", msg.serial);
+                snprintf(upd.sonde.sonde_type, sizeof(upd.sonde.sonde_type), "%.7s", msg.type);
+                upd.sonde.frame_num = msg.frame_num;
+                upd.sonde.rs_errors = msg.rs_errors;
+                upd.sonde.satellites = msg.satellites;
+                upd.sonde.vel_v = msg.vel_v;
+                upd.sonde.freq_mhz = msg.freq;
+
+                dispatcher_push_aircraft(ctx->aircraft_queue, &upd);
+            }
         } else {
             panelLogMessage("[SONDE rx%d] %s %s frame=%d (no GPS fix)",
                             ctx->rx->dev_index, msg.type, msg.serial, msg.frame_num);
         }
     }
+    return had_data;
 }
 static void sondeDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -1696,12 +1988,21 @@ static const decoder_ops_t sonde_decoder_ops = {
 
 static bool pocsagDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void pocsagDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void pocsagDecoderDrain(sdr_receiver_t *rx) {
+static bool pocsagDecoderDrain(sdr_receiver_t *rx) {
     pocsag_ctx_t *ctx = (pocsag_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
-    if (!PocsagOutputEnabled) return;
+    if (!ctx) return false;
+
+    // Keep watchdog alive: return true if the receiver has processed IQ data
+    // even when no POCSAG messages are decoded (quiet channel is normal)
+    static uint64_t last_sample_counter = 0;
+    bool receiver_active = (rx->sample_counter > last_sample_counter);
+    last_sample_counter = rx->sample_counter;
+
+    if (!PocsagOutputEnabled) return receiver_active;
     pocsag_msg_t msg;
+    bool had_data = false;
     while (msg_queue_pop(ctx->queue, &msg)) {
+        had_data = true;
         const char *freq_str = "";
         char freq_buf[32];
         if (msg.channel_freq > 0) {
@@ -1724,8 +2025,25 @@ static void pocsagDecoderDrain(sdr_receiver_t *rx) {
                             ctx->rx->dev_index, freq_str, msg.baud_rate, msg.address, msg.function);
         }
     }
+    return had_data || receiver_active;
 }
-static void pocsagDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+static void pocsagDecoderStop(sdr_receiver_t *rx)
+{
+    pocsag_ctx_t *ctx = (pocsag_ctx_t *)rx->decoder_state;
+    if (ctx && ctx->inner) {
+        pocsag_stats_t stats;
+        pocsag_get_stats(ctx->inner, &stats);
+        fprintf(stderr, "rx[%d]: POCSAG stats: samples=%" PRIu64 " preambles=%" PRIu64 " sync=%" PRIu64 " decoded=%" PRIu64 " bch_corr=%" PRIu64 " bch_fail=%" PRIu64 "\n",
+                rx->id,
+                (uint64_t)stats.samples_processed,
+                (uint64_t)stats.preambles_detected,
+                (uint64_t)stats.syncs_detected,
+                (uint64_t)stats.messages_decoded,
+                (uint64_t)stats.bch_corrections,
+                (uint64_t)stats.bch_failures);
+    }
+    rxDecoderDestroy(rx);
+}
 
 static const decoder_ops_t pocsag_decoder_ops = {
     .name    = "pocsag",
@@ -1739,9 +2057,9 @@ static const decoder_ops_t pocsag_decoder_ops = {
 
 static bool gsmDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void gsmDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void gsmDecoderDrain(sdr_receiver_t *rx) {
+static bool gsmDecoderDrain(sdr_receiver_t *rx) {
     gsm_ctx_t *ctx = (gsm_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
+    if (!ctx) return false;
 
     // Periodic FCCH-only tracker update (moved from process to drain for thread safety)
     {
@@ -1759,11 +2077,13 @@ static void gsmDecoderDrain(sdr_receiver_t *rx) {
         }
     }
 
-    if (!GsmOutputEnabled) return;
+    if (!GsmOutputEnabled) return false;
 
     // Drain regular GSM messages
+    bool had_data = false;
     gsm_msg_item_t item;
     while (msg_queue_pop(ctx->msg_queue, &item)) {
+        had_data = true;
         gsm_stats_t stats;
         gsm_get_stats(ctx->inner, &stats);
         gsm_sync_state_t sync = gsm_get_sync_state(ctx->inner);
@@ -1778,6 +2098,7 @@ static void gsmDecoderDrain(sdr_receiver_t *rx) {
     // Drain Cell Broadcast messages
     gsm_cb_item_t cb_item;
     while (msg_queue_pop(ctx->cb_queue, &cb_item)) {
+        had_data = true;
         gsmTrackerUpdateCB(&cb_item.cell, &cb_item.cb);
 
         panelLogMessage("[GSM-CB rx%d] MCC=%d MNC=%d LAC=%u CID=%u serial=%u id=%u \"%s\"",
@@ -1785,6 +2106,7 @@ static void gsmDecoderDrain(sdr_receiver_t *rx) {
                         cb_item.cell.si3.lac, cb_item.cell.si3.cell_id,
                         cb_item.cb.serial_nr, cb_item.cb.msg_id, cb_item.cb.text);
     }
+    return had_data;
 }
 static void gsmDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -1800,12 +2122,14 @@ static const decoder_ops_t gsm_decoder_ops = {
 
 static bool lteDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void lteDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void lteDecoderDrain(sdr_receiver_t *rx) {
+static bool lteDecoderDrain(sdr_receiver_t *rx) {
     lte_ctx_t *ctx = (lte_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
-    if (!LteOutputEnabled) return;
+    if (!ctx) return false;
+    if (!LteOutputEnabled) return false;
     lte_cell_info_t cell;
+    bool had_data = false;
     while (msg_queue_pop(ctx->queue, &cell)) {
+        had_data = true;
         lteTrackerUpdate(&cell);
 
         int rxid = ctx->rx->dev_index;
@@ -1835,6 +2159,7 @@ static void lteDecoderDrain(sdr_receiver_t *rx) {
             }
         }
     }
+    return had_data;
 }
 static void lteDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -1850,14 +2175,17 @@ static const decoder_ops_t lte_decoder_ops = {
 
 static bool iot868_decoder_init(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void iot868_decoder_process(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void iot868_decoder_drain(sdr_receiver_t *rx) {
+static bool iot868_decoder_drain(sdr_receiver_t *rx) {
     iot_decoder_state_t *state = (iot_decoder_state_t *)rx->decoder_state;
-    if (!state) return;
-    if (!IotOutputEnabled) return;
+    if (!state) return false;
+    if (!IotOutputEnabled) return false;
+    bool had_data = false;
     iot_device_msg_t msg;
     while (iotDecoderDequeue(state, &msg)) {
+        had_data = true;
         iotTrackerUpdate(&msg);
     }
+    return had_data;
 }
 static void iot868_decoder_stop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -1911,15 +2239,17 @@ static const char *fanet_aircraft_type_str(fanet_aircraft_type_t t)
     }
 }
 
-static void fanetDecoderDrain(sdr_receiver_t *rx)
+static bool fanetDecoderDrain(sdr_receiver_t *rx)
 {
-    if (!FanetOutputEnabled) return;
+    if (!FanetOutputEnabled) { return false; }
     fanet_state_t *st = (fanet_state_t *)rx->decoder_state;
-    if (!st) return;
+    if (!st) { return false; }
 
+    bool had_data = false;
     fanet_message_t msg;
     while (fanet_dequeue(st, &msg)) {
         if (!msg.valid) continue;
+        had_data = true;
 
         uint32_t addr = fanet_addr24(msg.src_manufacturer, msg.src_id);
         double signal = msg.signal_level;
@@ -2027,11 +2357,13 @@ static void fanetDecoderDrain(sdr_receiver_t *rx)
         }
 
         case FANET_TYPE_NAME:
+            fanet_name_cache_update(addr, msg.name);
             panelLogMessage("[FANET rx%d] Name %02X:%04X \"%s\"",
                             rx->dev_index, msg.src_manufacturer, msg.src_id, msg.name);
             break;
 
         case FANET_TYPE_MESSAGE:
+            fanet_msg_cache_update(addr, msg.message.subtype, msg.message.text);
             panelLogMessage("[FANET rx%d] Msg %02X:%04X [sub=%d] %s",
                             rx->dev_index, msg.src_manufacturer, msg.src_id,
                             msg.message.subtype, msg.message.text);
@@ -2054,12 +2386,14 @@ static void fanetDecoderDrain(sdr_receiver_t *rx)
                 pos += snprintf(buf + pos, sizeof(buf) - pos, " P=%.1fhPa", msg.weather.pressure);
             if (msg.weather.has_soc)
                 pos += snprintf(buf + pos, sizeof(buf) - pos, " SoC=%.0f%%", msg.weather.state_of_charge);
+            fanet_wx_cache_update(addr, cached_name, &msg);
             panelLogMessage("%s", buf);
             break;
         }
 
         case FANET_TYPE_THERMAL:
             if (msg.thermal.valid) {
+                fanet_thermal_cache_update(addr, &msg);
                 panelLogMessage("[FANET rx%d] Thermal %02X:%04X %.5f,%.5f alt=%dm climb=%.1fm/s conf=%d/7",
                                 rx->dev_index, msg.src_manufacturer, msg.src_id,
                                 msg.thermal.latitude, msg.thermal.longitude,
@@ -2113,11 +2447,14 @@ static void fanetDecoderDrain(sdr_receiver_t *rx)
             }
             break;
 
-        case FANET_TYPE_ACK:
+        case FANET_TYPE_ACK: {
+            uint32_t dst = fanet_addr24(msg.dst_manufacturer, msg.dst_id);
+            fanet_ack_cache_update(addr, dst);
             panelLogMessage("[FANET rx%d] ACK %02X:%04X -> %02X:%04X",
                             rx->dev_index, msg.src_manufacturer, msg.src_id,
                             msg.dst_manufacturer, msg.dst_id);
             break;
+        }
 
         default:
             panelLogMessage("[FANET rx%d] Type%u %02X:%04X payload=%d bytes",
@@ -2126,6 +2463,7 @@ static void fanetDecoderDrain(sdr_receiver_t *rx)
             break;
         }
     }
+    return had_data;
 }
 
 static void fanetDecoderStop(sdr_receiver_t *rx)
@@ -2158,12 +2496,14 @@ static const decoder_ops_t fanet_decoder_ops = {
 
 static bool sarsatDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
 static void sarsatDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
-static void sarsatDecoderDrain(sdr_receiver_t *rx) {
+static bool sarsatDecoderDrain(sdr_receiver_t *rx) {
     sarsat_ctx_t *ctx = (sarsat_ctx_t *)rx->decoder_state;
-    if (!ctx) return;
-    if (!SarsatOutputEnabled) return;
+    if (!ctx) { return false; }
+    if (!SarsatOutputEnabled) { return false; }
     sarsat_msg_t msg;
+    bool had_data = false;
     while (msg_queue_pop(ctx->queue, &msg)) {
+        had_data = true;
         // Build identification string based on protocol
         char ident[128] = "";
         if (msg.mmsi[0])
@@ -2180,6 +2520,34 @@ static void sarsatDecoderDrain(sdr_receiver_t *rx) {
             char tmp[32];
             snprintf(tmp, sizeof(tmp), " S/N=%u", msg.serial_number);
             strncat(ident, tmp, sizeof(ident) - strlen(ident) - 1);
+        }
+
+        // Always print to stderr for debug visibility
+        if (msg.position_valid) {
+            fprintf(stderr, "[SARSAT rx%d] %s %s %s [%s] HexID=%s%s pos=%.4f,%.4f BCH1=%s BCH2=%s%s\n",
+                            ctx->rx->dev_index,
+                            msg.is_test ? "TEST" : "DISTRESS",
+                            sarsat_beacon_type_name(msg.beacon_type),
+                            sarsat_protocol_name(msg.protocol),
+                            msg.country_name,
+                            msg.hex_id,
+                            ident,
+                            msg.latitude, msg.longitude,
+                            msg.bch1_valid ? "OK" : "FAIL",
+                            msg.bch2_valid ? "OK" : "FAIL",
+                            msg.homing_121_5 ? " 121.5MHz" : "");
+        } else {
+            fprintf(stderr, "[SARSAT rx%d] %s %s %s [%s] HexID=%s%s BCH1=%s BCH2=%s%s\n",
+                            ctx->rx->dev_index,
+                            msg.is_test ? "TEST" : "DISTRESS",
+                            sarsat_beacon_type_name(msg.beacon_type),
+                            sarsat_protocol_name(msg.protocol),
+                            msg.country_name,
+                            msg.hex_id,
+                            ident,
+                            msg.bch1_valid ? "OK" : "FAIL",
+                            msg.bch2_valid ? "OK" : "FAIL",
+                            msg.homing_121_5 ? " 121.5MHz" : "");
         }
 
         if (msg.position_valid) {
@@ -2209,6 +2577,7 @@ static void sarsatDecoderDrain(sdr_receiver_t *rx) {
                             msg.homing_121_5 ? " 121.5MHz" : "");
         }
     }
+    return had_data;
 }
 static void sarsatDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
@@ -2299,10 +2668,10 @@ static void adsbDecoderProcess(sdr_receiver_t *rx, const uint8_t *buf, uint32_t 
     rxFifoEnqueue(&rx->fifo, outbuf);
 }
 
-static void adsbDecoderDrain(sdr_receiver_t *rx)
+static bool adsbDecoderDrain(sdr_receiver_t *rx)
 {
     struct mag_buf *buf = rxFifoDequeue(&rx->fifo, 0);  // non-blocking
-    if (!buf) return;
+    if (!buf) return false;
 
     demodulate2400(buf);
     if (Modes.mode_ac) demodulate2400AC(buf);
@@ -2311,6 +2680,7 @@ static void adsbDecoderDrain(sdr_receiver_t *rx)
     Modes.stats_current.samples_dropped += buf->dropped;
 
     rxFifoRelease(&rx->fifo, buf);
+    return true;
 }
 
 static void adsbDecoderStop(sdr_receiver_t *rx)
@@ -2372,10 +2742,37 @@ const decoder_ops_t *decoderOpsForRole(sdr_role_t role)
 
 // ======================== Manager ========================
 
+// Check for conflicting kernel DVB driver that corrupts RTL2832U tuner state
+static void checkDvbKernelDriver(void)
+{
+    // Check if the dvb_usb_rtl28xxu module is loaded by probing /sys/module
+    if (access("/sys/module/dvb_usb_rtl28xxu", F_OK) == 0) {
+        DvbDriverWarning = 1;
+        fprintf(stderr, "\n");
+        fprintf(stderr, "╔══════════════════════════════════════════════════════════════════╗\n");
+        fprintf(stderr, "║  WARNING: Kernel DVB driver 'dvb_usb_rtl28xxu' is loaded!       ║\n");
+        fprintf(stderr, "║                                                                  ║\n");
+        fprintf(stderr, "║  This driver conflicts with SDR reception and will corrupt       ║\n");
+        fprintf(stderr, "║  the R820T tuner state, causing NO signal reception.             ║\n");
+        fprintf(stderr, "║                                                                  ║\n");
+        fprintf(stderr, "║  FIX: Create /etc/modprobe.d/rtlsdr-blacklist.conf with:         ║\n");
+        fprintf(stderr, "║    blacklist dvb_usb_rtl28xxu                                    ║\n");
+        fprintf(stderr, "║    blacklist rtl2832_sdr                                         ║\n");
+        fprintf(stderr, "║    blacklist rtl2832                                             ║\n");
+        fprintf(stderr, "║    blacklist dvb_usb_v2                                          ║\n");
+        fprintf(stderr, "║  Then reboot, or run: sudo rmmod dvb_usb_rtl28xxu               ║\n");
+        fprintf(stderr, "╚══════════════════════════════════════════════════════════════════╝\n");
+        fprintf(stderr, "\n");
+    }
+}
+
 void sdrManagerInit(void)
 {
     memset(&SdrManager, 0, sizeof(SdrManager));
     pthread_mutex_init(&SdrManager.lock, NULL);
+
+    // Check for conflicting kernel drivers before touching SDR hardware
+    checkDvbKernelDriver();
 
     // Initialize backend subsystem (detects available libraries)
     sdrBackendInit();
@@ -2488,8 +2885,8 @@ bool sdrManagerDrainAll(void)
     for (int i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         if (rx->state == RX_STATE_RUNNING && rx->decoder_ops && rx->decoder_ops->drain) {
-            rx->decoder_ops->drain(rx);
-            had_data = true;  // We checked at least one active receiver
+            if (rx->decoder_ops->drain(rx))
+                had_data = true;
         }
     }
     pthread_mutex_unlock(&SdrManager.lock);
@@ -2718,4 +3115,353 @@ int sdrManagerLoad(void)
     if (loaded > 0)
         fprintf(stderr, "sdr_manager: loaded %d receivers from %s\n", loaded, RECEIVERS_JSON_PATH);
     return loaded;
+}
+
+// ======================== Decoder stats JSON ========================
+
+char *rxGetDecoderStatsJSON(void)
+{
+    // Build JSON with stats from all active decoder receivers.
+    // Returns a malloc'd string — caller must free().
+    char *buf = (char *)malloc(8192);
+    if (!buf) return NULL;
+    int pos = 0, cap = 8192;
+
+    #define APPEND(...) do { \
+        int n = snprintf(buf + pos, cap - pos, __VA_ARGS__); \
+        if (n > 0) pos += n; \
+    } while(0)
+
+    APPEND("{");
+    int first_top = 1;
+
+    for (int i = 0; i < SdrManager.count; i++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[i];
+        if (rx->state < RX_STATE_RUNNING) continue;
+        // ADS-B uses Modes.stats_* instead of decoder_state; others need decoder_state
+        if (rx->config.role != SDR_ROLE_ADSB && !rx->decoder_state) continue;
+
+        switch (rx->config.role) {
+        case SDR_ROLE_ADSB: {
+            // Combine alltime + current (current hasn't been flushed yet)
+            struct stats s;
+            add_stats(&Modes.stats_alltime, &Modes.stats_current, &s);
+            uint32_t accepted = 0;
+            for (int b = 0; b <= MODES_MAX_BITERRORS; b++)
+                accepted += s.demod_accepted[b];
+            double noise_db = -999;
+            if (s.noise_power_count > 0) {
+                double p = s.noise_power_sum / s.noise_power_count;
+                if (p > 0) noise_db = 10.0 * log10(p);
+            }
+            double signal_db = -999;
+            if (s.signal_power_count > 0) {
+                double p = s.signal_power_sum / s.signal_power_count;
+                if (p > 0) signal_db = 10.0 * log10(p);
+            }
+            if (!first_top) APPEND(","); first_top = 0;
+            APPEND("\"adsb\":{\"rx\":%d"
+                ",\"samples\":%" PRIu64
+                ",\"samples_dropped\":%" PRIu64
+                ",\"messages_total\":%" PRIu32
+                ",\"preambles\":%" PRIu32
+                ",\"accepted\":%" PRIu32
+                ",\"rejected_bad\":%" PRIu32
+                ",\"rejected_unknown\":%" PRIu32
+                ",\"crc_rescued\":%" PRIu32
+                ",\"modeac\":%" PRIu32
+                ",\"strong_signals\":%" PRIu32
+                ",\"noise_dbfs\":%.1f"
+                ",\"signal_dbfs\":%.1f"
+                ",\"peak_signal_dbfs\":%.1f"
+                ",\"tracks\":%" PRIu32
+                ",\"single_msg\":%" PRIu32
+                ",\"gain_db\":%d}",
+                rx->id,
+                (uint64_t)s.samples_processed,
+                (uint64_t)s.samples_dropped,
+                s.messages_total,
+                s.demod_preambles,
+                accepted,
+                s.demod_rejected_bad,
+                s.demod_rejected_unknown_icao,
+                s.demod_crc_rescued,
+                s.demod_modeac,
+                s.strong_signal_count,
+                noise_db,
+                signal_db,
+                s.peak_signal_power > 0 ? 10.0 * log10(s.peak_signal_power) : -999.0,
+                s.unique_aircraft,
+                s.single_message_aircraft,
+                s.sdr_gain);
+            break;
+        }
+        case SDR_ROLE_FLARM: {
+            flarm_demod_stats_t s;
+            if (flarmDecoderGetStats(rx, &s)) {
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"flarm\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"detected\":%" PRIu64 ",\"crc_ok\":%" PRIu64
+                    ",\"decoded\":%" PRIu64 ",\"failed\":%" PRIu64
+                    ",\"type1\":%" PRIu64 ",\"type3\":%" PRIu64 ",\"type4\":%" PRIu64
+                    ",\"ogntp_detected\":%" PRIu64 ",\"ogntp_ldpc_ok\":%" PRIu64
+                    ",\"ogntp_decoded\":%" PRIu64 ",\"ogntp_failed\":%" PRIu64
+                    ",\"p3i_detected\":%" PRIu64 ",\"p3i_decoded\":%" PRIu64 ",\"p3i_failed\":%" PRIu64
+                    ",\"adsl_detected\":%" PRIu64 ",\"adsl_crc_ok\":%" PRIu64
+                    ",\"adsl_decoded\":%" PRIu64 ",\"adsl_failed\":%" PRIu64 "}",
+                    rx->id, s.samples_processed,
+                    s.packets_detected, s.packets_crc_ok,
+                    s.packets_decoded, s.packets_failed,
+                    s.packets_type1, s.packets_type3, s.packets_type4,
+                    s.ogntp_packets_detected, s.ogntp_packets_ldpc_ok,
+                    s.ogntp_packets_decoded, s.ogntp_packets_failed,
+                    s.p3i_packets_detected, s.p3i_packets_decoded, s.p3i_packets_failed,
+                    s.adsl_packets_detected, s.adsl_packets_crc_ok,
+                    s.adsl_packets_decoded, s.adsl_packets_failed);
+            }
+            break;
+        }
+        case SDR_ROLE_ACARS: {
+            acars_ctx_t *c = (acars_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                acars_stats_t s;
+                acars_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"acars\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"decoded\":%" PRIu64 ",\"crc_errors\":%" PRIu64 "}",
+                    rx->id, s.samples_processed, s.messages_decoded, s.crc_errors);
+            }
+            break;
+        }
+        case SDR_ROLE_VDL2: {
+            vdl2_ctx_t *c = (vdl2_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                vdl2_stats_t s;
+                vdl2_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"vdl2\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"frames\":%" PRIu64 ",\"decoded\":%" PRIu64
+                    ",\"fcs_errors\":%" PRIu64 "}",
+                    rx->id, s.samples_processed, s.frames_detected,
+                    s.messages_decoded, s.fcs_errors);
+            }
+            break;
+        }
+        case SDR_ROLE_RADIOSONDE: {
+            sonde_ctx_t *c = (sonde_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                sonde_stats_t s;
+                sonde_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"sonde\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"frames_detected\":%" PRIu64 ",\"frames_decoded\":%" PRIu64
+                    ",\"rs_corrected\":%" PRIu64 ",\"rs_uncorrectable\":%" PRIu64
+                    ",\"crc_errors\":%" PRIu64 "}",
+                    rx->id, s.samples_processed, s.frames_detected,
+                    s.frames_decoded, s.rs_corrected, s.rs_uncorrectable, s.crc_errors);
+            }
+            break;
+        }
+        case SDR_ROLE_POCSAG: {
+            pocsag_ctx_t *c = (pocsag_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                pocsag_stats_t s;
+                pocsag_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"pocsag\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"preambles\":%" PRIu64 ",\"syncs\":%" PRIu64
+                    ",\"decoded\":%" PRIu64 ",\"bch_corrections\":%" PRIu64
+                    ",\"bch_failures\":%" PRIu64 "}",
+                    rx->id, s.samples_processed, s.preambles_detected,
+                    s.syncs_detected, s.messages_decoded,
+                    s.bch_corrections, s.bch_failures);
+            }
+            break;
+        }
+        case SDR_ROLE_GSM: {
+            gsm_ctx_t *c = (gsm_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                gsm_stats_t s;
+                gsm_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"gsm\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"fcch\":%" PRIu64 ",\"sch_ok\":%" PRIu64 ",\"sch_fail\":%" PRIu64
+                    ",\"bcch\":%" PRIu64 ",\"bcch_fail\":%" PRIu64
+                    ",\"ccch\":%" PRIu64 ",\"cb\":%" PRIu64
+                    ",\"freq_offset\":%.1f}",
+                    rx->id, s.samples_processed, s.fcch_detected,
+                    s.sch_decoded, s.sch_failed, s.bcch_decoded, s.bcch_failed,
+                    s.ccch_decoded, s.cb_decoded, s.freq_offset_hz);
+            }
+            break;
+        }
+        case SDR_ROLE_LTE: {
+            lte_ctx_t *c = (lte_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                lte_stats_t s;
+                lte_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"lte\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"pss\":%" PRIu32 ",\"sss\":%" PRIu32
+                    ",\"mib\":%" PRIu32 ",\"sib1\":%" PRIu32
+                    ",\"crc_errors\":%" PRIu32 ",\"freq_offset\":%.1f}",
+                    rx->id, s.samples_processed, s.pss_detected, s.sss_decoded,
+                    s.mib_decoded, s.sib1_decoded, s.crc_errors, s.freq_offset_hz);
+            }
+            break;
+        }
+        case SDR_ROLE_FANET: {
+            fanet_state_t *st = (fanet_state_t *)rx->decoder_state;
+            if (st) {
+                fanet_stats_t s;
+                fanet_get_stats(st, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"fanet\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"preambles\":%" PRIu64 ",\"sync_ok\":%" PRIu64
+                    ",\"decoded\":%" PRIu64 ",\"crc_errors\":%" PRIu64
+                    ",\"header_errors\":%" PRIu64 "}",
+                    rx->id, s.samples_processed, s.preambles_detected,
+                    s.sync_word_ok, s.packets_decoded,
+                    s.crc_errors, s.header_errors);
+            }
+            break;
+        }
+        case SDR_ROLE_SARSAT: {
+            sarsat_ctx_t *c = (sarsat_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                sarsat_stats_t s;
+                sarsat_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"sarsat\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"bursts\":%" PRIu64 ",\"frames\":%" PRIu64
+                    ",\"bch1_corrected\":%" PRIu64 ",\"bch1_failed\":%" PRIu64
+                    ",\"bch2_corrected\":%" PRIu64 ",\"bch2_failed\":%" PRIu64 "}",
+                    rx->id, s.samples_processed, s.bursts_detected, s.frames_decoded,
+                    s.bch1_corrected, s.bch1_failed, s.bch2_corrected, s.bch2_failed);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    APPEND("}");
+    #undef APPEND
+    return buf;
+}
+
+void rxGetStatsSnapshot(rx_stats_snapshot_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    for (int i = 0; i < SdrManager.count; i++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[i];
+        if (rx->state < RX_STATE_RUNNING) continue;
+        if (rx->config.role != SDR_ROLE_ADSB && !rx->decoder_state) continue;
+
+        switch (rx->config.role) {
+        case SDR_ROLE_ADSB: {
+            struct stats s;
+            add_stats(&Modes.stats_alltime, &Modes.stats_current, &s);
+            out->adsb_messages = s.messages_total;
+            out->adsb_tracks = s.unique_aircraft;
+            out->adsb_gain_db = (int16_t)s.sdr_gain;
+            if (s.noise_power_count > 0) {
+                double p = s.noise_power_sum / s.noise_power_count;
+                out->adsb_noise_dbfs = (p > 0) ? (float)(10.0 * log10(p)) : -999.0f;
+            } else {
+                out->adsb_noise_dbfs = -999.0f;
+            }
+            if (s.signal_power_count > 0) {
+                double p = s.signal_power_sum / s.signal_power_count;
+                out->adsb_signal_dbfs = (p > 0) ? (float)(10.0 * log10(p)) : -999.0f;
+            } else {
+                out->adsb_signal_dbfs = -999.0f;
+            }
+            break;
+        }
+        case SDR_ROLE_FLARM: {
+            flarm_demod_stats_t fs;
+            if (flarmDecoderGetStats(rx, &fs)) {
+                out->flarm_detected = (uint32_t)fs.packets_detected;
+                out->flarm_decoded  = (uint32_t)fs.packets_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_ACARS: {
+            acars_ctx_t *c = (acars_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                acars_stats_t as;
+                acars_get_stats(c->inner, &as);
+                out->acars_decoded = (uint32_t)as.messages_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_VDL2: {
+            vdl2_ctx_t *c = (vdl2_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                vdl2_stats_t vs;
+                vdl2_get_stats(c->inner, &vs);
+                out->vdl2_decoded = (uint32_t)vs.messages_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_RADIOSONDE: {
+            sonde_ctx_t *c = (sonde_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                sonde_stats_t ss;
+                sonde_get_stats(c->inner, &ss);
+                out->sonde_decoded = (uint32_t)ss.frames_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_POCSAG: {
+            pocsag_ctx_t *c = (pocsag_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                pocsag_stats_t ps;
+                pocsag_get_stats(c->inner, &ps);
+                out->pocsag_decoded = (uint32_t)ps.messages_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_GSM: {
+            gsm_ctx_t *c = (gsm_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                gsm_stats_t gs;
+                gsm_get_stats(c->inner, &gs);
+                out->gsm_bcch = (uint32_t)gs.bcch_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_LTE: {
+            lte_ctx_t *c = (lte_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                lte_stats_t ls;
+                lte_get_stats(c->inner, &ls);
+                out->lte_mib = ls.mib_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_FANET: {
+            fanet_state_t *st = (fanet_state_t *)rx->decoder_state;
+            if (st) {
+                fanet_stats_t fs;
+                fanet_get_stats(st, &fs);
+                out->fanet_decoded = (uint32_t)fs.packets_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_SARSAT: {
+            sarsat_ctx_t *c = (sarsat_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                sarsat_stats_t ss;
+                sarsat_get_stats(c->inner, &ss);
+                out->sarsat_frames = (uint32_t)ss.frames_decoded;
+            }
+            break;
+        }
+        default: break;
+        }
+    }
 }

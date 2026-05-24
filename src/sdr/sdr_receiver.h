@@ -46,7 +46,8 @@ typedef enum {
     SDR_ROLE_LTE,           // ~800 MHz LTE cell scanner (PSS/SSS/MIB/SIB1)
     SDR_ROLE_IOT868,        // ~868 MHz ISM band IoT device monitor (OOK/FSK)
     SDR_ROLE_FANET,         // ~868.2 MHz FANET+ LoRa (SF7/BW250)
-    SDR_ROLE_SARSAT         // ~406 MHz Cospas-Sarsat ELT/EPIRB/PLB beacon
+    SDR_ROLE_SARSAT,        // ~406 MHz Cospas-Sarsat ELT/EPIRB/PLB beacon
+
 } sdr_role_t;
 
 // Decoder operations — plugin interface for each receiver role.
@@ -58,7 +59,7 @@ typedef struct {
     const char *name;
     bool  (*init)(struct sdr_receiver *rx);
     void  (*process)(struct sdr_receiver *rx, const uint8_t *iq, uint32_t len);
-    void  (*drain)(struct sdr_receiver *rx);
+    bool  (*drain)(struct sdr_receiver *rx);
     void  (*stop)(struct sdr_receiver *rx);
 } decoder_ops_t;
 
@@ -160,6 +161,12 @@ typedef struct sdr_receiver {
     // USB error recovery
     uint32_t        usb_error_count;    // consecutive set_freq failures
     uint32_t        usb_error_total;    // total set_freq failures
+
+    // Waterfall IQ tap (written by stream callback, read by panel thread)
+    volatile int     wf_tap_active;     // nonzero = tapping enabled
+    uint8_t         *wf_tap_buf;        // IQ ring buffer (allocated by panel)
+    volatile uint32_t wf_tap_wr;        // write offset (updated atomically by callback)
+    uint32_t         wf_tap_size;       // buffer size in bytes
 } sdr_receiver_t;
 
 // Global receiver manager state
@@ -176,6 +183,7 @@ extern int LteOutputEnabled;
 extern int IotOutputEnabled;
 extern int FanetOutputEnabled;
 extern int SarsatOutputEnabled;
+extern int DvbDriverWarning;  // 1 if dvb_usb_rtl28xxu kernel module detected at startup
 
 // FANET ground tracking entry (exposed for API serialization)
 typedef struct {
@@ -188,8 +196,75 @@ typedef struct {
     uint8_t  valid;
 } fanet_ground_entry_t;
 
+// FANET name entry (type 2)
+typedef struct {
+    uint32_t addr;
+    char     name[32];
+    uint64_t last_seen;
+    uint8_t  valid;
+} fanet_name_entry_t;
+
+// FANET message entry (type 3)
+typedef struct {
+    uint32_t addr;
+    uint8_t  subtype;
+    char     text[200];
+    uint64_t last_seen;
+    uint8_t  valid;
+} fanet_msg_entry_t;
+
+// FANET weather entry (type 4)
+typedef struct {
+    uint32_t addr;
+    char     name[32];
+    double   latitude;
+    double   longitude;
+    float    temperature;
+    float    wind_speed;
+    float    wind_gust;
+    float    wind_heading;
+    float    humidity;
+    float    pressure;
+    float    state_of_charge;
+    uint8_t  has_pos;
+    uint8_t  has_temp;
+    uint8_t  has_wind;
+    uint8_t  has_humidity;
+    uint8_t  has_pressure;
+    uint8_t  has_soc;
+    uint64_t last_seen;
+    uint8_t  valid;
+} fanet_wx_entry_t;
+
+// FANET thermal entry (type 9)
+typedef struct {
+    uint32_t addr;
+    double   latitude;
+    double   longitude;
+    int      altitude;
+    float    climb;
+    float    wind_speed;
+    float    wind_heading;
+    uint8_t  confidence;
+    uint64_t last_seen;
+    uint8_t  valid;
+} fanet_thermal_entry_t;
+
+// FANET ACK entry (type 0)
+typedef struct {
+    uint32_t src_addr;
+    uint32_t dst_addr;
+    uint64_t timestamp;
+    uint8_t  valid;
+} fanet_ack_entry_t;
+
 // Iterate over active ground tracking entries (thread-safe, <5min old)
 void fanetGetGroundTracks(void (*cb)(const fanet_ground_entry_t *e, void *ctx), void *ctx);
+void fanetGetNames(void (*cb)(const fanet_name_entry_t *e, void *ctx), void *ctx);
+void fanetGetMessages(void (*cb)(const fanet_msg_entry_t *e, void *ctx), void *ctx);
+void fanetGetWeather(void (*cb)(const fanet_wx_entry_t *e, void *ctx), void *ctx);
+void fanetGetThermals(void (*cb)(const fanet_thermal_entry_t *e, void *ctx), void *ctx);
+void fanetGetAcks(void (*cb)(const fanet_ack_entry_t *e, void *ctx), void *ctx);
 
 // ======================== Manager API ========================
 
@@ -304,6 +379,31 @@ void rxDecoderDestroy(sdr_receiver_t *rx);
 
 // Process IQ samples through the internal decoder (called from RTL-SDR callback)
 void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, uint32_t len);
+
+// Collect decoder stats from all running receivers as a JSON string (malloc'd, caller frees)
+char *rxGetDecoderStatsJSON(void);
+
+// Snapshot of key decoder metrics for time-series history
+typedef struct {
+    uint32_t adsb_messages;
+    uint32_t adsb_tracks;
+    float    adsb_noise_dbfs;
+    float    adsb_signal_dbfs;
+    int16_t  adsb_gain_db;
+    uint32_t flarm_detected;
+    uint32_t flarm_decoded;
+    uint32_t acars_decoded;
+    uint32_t vdl2_decoded;
+    uint32_t sonde_decoded;
+    uint32_t pocsag_decoded;
+    uint32_t gsm_bcch;
+    uint32_t lte_mib;
+    uint32_t fanet_decoded;
+    uint32_t sarsat_frames;
+} rx_stats_snapshot_t;
+
+// Fill a stats snapshot from all running decoder receivers
+void rxGetStatsSnapshot(rx_stats_snapshot_t *out);
 
 #ifdef __cplusplus
 }

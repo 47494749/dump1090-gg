@@ -22,15 +22,6 @@ extern "C" {
 
 #include "sdrgg.h"
 
-// Internal libsdrgg functions needed for R820T IF reprogramming after DDC reset.
-// These are not in the public header but exported from the static library.
-namespace rtl {
-    int32_t set_if_freq(sdrgg_dev_t *dev, uint32_t if_freq_hz);
-    int32_t configure_r820t(sdrgg_dev_t *dev);
-}
-
-#define SDRGG_R820T_IF_FREQ 3570000
-
 // ======================== Global sdrgg context ========================
 
 static sdrgg_ctx_t *g_sdrgg_ctx = nullptr;
@@ -76,6 +67,10 @@ struct stream_adapter {
     void          *user_ctx;
     volatile int   stopping;
     struct sdrgg_ring *ring;
+    volatile uint32_t cb_count;      // debug: sdrgg callback invocations
+    volatile uint32_t ring_full;     // debug: ring full drops
+    volatile uint32_t deliver_count; // debug: deliveries to user callback
+    int               adapter_id;   // debug: adapter identifier
 };
 
 // Called from libsdrgg event_loop_thread — must return quickly!
@@ -85,13 +80,15 @@ static void sdrgg_stream_callback(sdrgg_dev_t * /*dev*/, const sdrgg_buffer_t *b
     if (!adapter || adapter->stopping || !buf || !buf->data || buf->length == 0)
         return;
 
+    adapter->cb_count++;
+
     struct sdrgg_ring *ring = adapter->ring;
     if (!ring) return;
 
     // Push to ring buffer (fast memcpy, no heavy processing here)
     int idx = ring->write_idx;
     struct ring_slot *slot = &ring->slots[idx];
-    if (slot->ready) return;  // ring full — drop this buffer
+    if (slot->ready) { adapter->ring_full++; return; }  // ring full — drop this buffer
     uint32_t copy_len = buf->length < SDRGG_RING_BUFSIZE ? buf->length : SDRGG_RING_BUFSIZE;
     memcpy(slot->data, buf->data, copy_len);
     slot->len = copy_len;
@@ -355,8 +352,15 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     adapter->user_cb = cb;
     adapter->user_ctx = ctx;
     adapter->stopping = 0;
+    static int next_adapter_id = 0;
+    adapter->cb_count = 0;
+    adapter->ring_full = 0;
+    adapter->deliver_count = 0;
+    adapter->adapter_id = next_adapter_id++;
     adapter->ring = ring;
     dev->ctx = adapter;
+
+    fprintf(stderr, "sdrgg-diag: adapter[%d] created ring=%p\n", adapter->adapter_id, (void*)ring);
 
     sdrgg_stream_cfg_t cfg = {};
     cfg.buf_count = buf_count ? buf_count : 4;
@@ -367,16 +371,19 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
                                    &cfg, sdrgg_stream_callback, adapter);
     pthread_mutex_unlock(&g_stream_mutex);
     if (rc != SDRGG_OK) {
+        fprintf(stderr, "sdrgg-diag: adapter[%d] start_stream FAILED rc=%d\n", adapter->adapter_id, rc);
         dev->ctx = nullptr;
         delete ring;
         delete adapter;
         return rc;
     }
     dev->async_running = 1;
+    fprintf(stderr, "sdrgg-diag: adapter[%d] streaming started, entering consumer loop\n", adapter->adapter_id);
 
     // Consume ring buffer data (reader thread context)
     // This replaces the old spin-wait: instead of sleeping, we poll the ring.
     struct timespec ts_poll = { .tv_sec = 0, .tv_nsec = 1000000 }; // 1ms poll interval
+    uint32_t poll_empty = 0;
     while (dev->handle && dev->async_running) {
         int idx = ring->read_idx;
         struct ring_slot *slot = &ring->slots[idx];
@@ -384,14 +391,25 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
             // Deliver data to user callback (heavy processing happens HERE, not in event_loop)
             if (adapter->user_cb && !adapter->stopping) {
                 adapter->user_cb(slot->data, slot->len, adapter->user_ctx);
+                adapter->deliver_count++;
             }
             slot->ready = 0;
             ring->read_idx = (idx + 1) % SDRGG_RING_SLOTS;
+            poll_empty = 0;
         } else {
             nanosleep(&ts_poll, nullptr);
+            poll_empty++;
+            // Log every 10s of no data
+            if (poll_empty == 10000) {
+                fprintf(stderr, "sdrgg-diag: adapter[%d] NO DATA for 10s! cb_count=%u ring_full=%u deliver=%u\n",
+                        adapter->adapter_id, adapter->cb_count, adapter->ring_full, adapter->deliver_count);
+            }
         }
     }
 
+    fprintf(stderr, "sdrgg-diag: adapter[%d] consumer loop exited — cb=%u ring_full=%u deliver=%u handle=%p async=%d\n",
+            adapter->adapter_id, adapter->cb_count, adapter->ring_full, adapter->deliver_count,
+            (void*)dev->handle, dev->async_running);
     adapter->stopping = 1;
 
     // Stop the stream so callback is unregistered (allows future start_stream)

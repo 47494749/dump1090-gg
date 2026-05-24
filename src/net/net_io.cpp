@@ -384,6 +384,10 @@ static void flushWrites(struct net_writer *writer) {
 #else
             int nwritten = send(c->fd, writer->data, writer->dataUsed, 0 );
 #endif
+            if (nwritten > 0) {
+                __atomic_fetch_add(&writer->service->bytes_out_total,
+                                   (uint64_t)nwritten, __ATOMIC_RELAXED);
+            }
             if (nwritten != writer->dataUsed) {
                 modesCloseClient(c);
             }
@@ -1852,6 +1856,18 @@ char *generateAircraftJson(const char *url_path, int *len) {
                           a->fanet_thermal.wind_speed, a->fanet_thermal.wind_heading,
                           (uint32_t)a->fanet_thermal.confidence);
         }
+        // Radiosonde info
+        if (a->sonde_info.valid) {
+            s += sfmt(",\"sonde_type\":\"%s\",\"sonde_serial\":\"%s\",\"sonde_frame\":%d",
+                          a->sonde_info.sonde_type, a->sonde_info.serial,
+                          a->sonde_info.frame_num);
+            if (a->sonde_info.rs_errors >= 0)
+                s += sfmt(",\"sonde_rs\":%d", a->sonde_info.rs_errors);
+            s += sfmt(",\"sonde_freq\":%.3f", (double)a->sonde_info.freq_mhz);
+            s += sfmt(",\"sonde_climb\":%.1f", a->sonde_info.vel_v);
+            if (a->sonde_info.satellites > 0)
+                s += sfmt(",\"sonde_sat\":%d", a->sonde_info.satellites);
+        }
         if (trackDataValid(&a->nav_qnh_valid))
             s += sfmt(",\"nav_qnh\":%.1f", a->nav_qnh);
          if (trackDataValid(&a->nav_altitude_mcp_valid))
@@ -1995,6 +2011,10 @@ char *generateAircraftJson(const char *url_path, int *len) {
         // Circling detection
         if (a->circling)
             s += ",\"circling\":true";
+
+        // DF19 (Military Extended Squitter)
+        if (a->seen_df19)
+            s += ",\"df19\":true";
 
         s += ",\"mlat\":";
         s += append_flags(a, SOURCE_MLAT);
@@ -2383,6 +2403,9 @@ static void modesReadFromClient(struct client *c) {
             modesCloseClient(c);
             return;
         }
+
+        __atomic_fetch_add(&c->service->bytes_in_total,
+                           (uint64_t)nread, __ATOMIC_RELAXED);
 
         c->buflen += nread;
 

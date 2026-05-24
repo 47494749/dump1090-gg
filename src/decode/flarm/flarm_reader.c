@@ -823,12 +823,21 @@ void flarmReaderPeriodicWork(void)
 typedef struct {
     struct flarm_state *demod;
     msg_queue_t         queue;
+    struct p3i_demod_state *p3i_demod;
+    msg_queue_t         p3i_queue;
+    volatile int        active;   // set by process callback, cleared by drain
 } flarm_decoder_state_t;
 
 static void flarm_dec_enqueue(const flarm_message_t *msg, void *ctx)
 {
     flarm_decoder_state_t *st = (flarm_decoder_state_t *)ctx;
     msg_queue_push(st->queue, msg);
+}
+
+static void flarm_dec_p3i_enqueue(const p3i_message_t *msg, void *ctx)
+{
+    flarm_decoder_state_t *st = (flarm_decoder_state_t *)ctx;
+    if (st->p3i_queue) msg_queue_push(st->p3i_queue, msg);
 }
 
 static bool flarm_dec_dequeue(flarm_decoder_state_t *st, flarm_message_t *out)
@@ -874,6 +883,23 @@ bool flarmDecoderInit(struct sdr_receiver *rx)
 
     rx->decoder_state = st;
 
+    // Create P3I demodulator if enabled
+    if (FlarmConfig.p3i_enabled) {
+        st->p3i_queue = msg_queue_create(sizeof(p3i_message_t), FLARM_DEC_QUEUE_SIZE);
+        if (st->p3i_queue) {
+            p3i_demod_config_t p3i_cfg = {
+                .sample_rate  = (uint32_t)rx->config.sample_rate,
+                .center_freq  = (uint32_t)rx->config.freq,
+                .callback     = flarm_dec_p3i_enqueue,
+                .callback_ctx = st
+            };
+            st->p3i_demod = p3i_demod_create(&p3i_cfg);
+            if (st->p3i_demod) {
+                fprintf(stderr, "rx[%d]: P3I decoder enabled (869.525 MHz)\n", rx->id);
+            }
+        }
+    }
+
     // Initialize OGN client if station is configured
     if (FlarmConfig.ogn_station[0]) {
         ognClientInit();
@@ -892,17 +918,27 @@ void flarmDecoderProcess(struct sdr_receiver *rx, const uint8_t *iq, uint32_t le
 {
     flarm_decoder_state_t *st = (flarm_decoder_state_t *)rx->decoder_state;
     if (!st || !st->demod) return;
+    st->active = 1;
     flarm_demod_process(st->demod, iq, len);
+    if (st->p3i_demod) p3i_demod_process(st->p3i_demod, iq, len);
 }
 
-void flarmDecoderDrain(struct sdr_receiver *rx)
+bool flarmDecoderDrain(struct sdr_receiver *rx)
 {
     flarm_decoder_state_t *st = (flarm_decoder_state_t *)rx->decoder_state;
-    if (!st) return;
+    if (!st) return false;
+
+    // If process callback ran since last drain, receiver is alive
+    bool had_data = false;
+    if (st->active) {
+        st->active = 0;
+        had_data = true;
+    }
 
     flarm_message_t msg;
     while (flarm_dec_dequeue(st, &msg)) {
         if (!msg.valid) continue;
+        had_data = true;
 
         // Submit to OGN
         ognClientSubmit(&msg);
@@ -923,6 +959,33 @@ void flarmDecoderDrain(struct sdr_receiver *rx)
                           signal, msg.aircraft_type, msg.addr_type,
                           msg.version, DECODE_SOURCE_FLARM);
     }
+
+    // Drain P3I queue
+    if (st->p3i_queue) {
+        p3i_message_t pmsg;
+        while (msg_queue_pop(st->p3i_queue, &pmsg) != 0) {
+            if (!pmsg.valid) continue;
+            had_data = true;
+
+            uint32_t addr = pmsg.addr & 0xFFFFFF;
+            double signal = pmsg.signal_level;
+            if (signal <= 0) signal = 0.001;
+            if (signal > 1.0) signal = 1.0;
+
+            uint32_t category = flarm_to_adsb_category(pmsg.aircraft_type);
+
+            char callsign[9];
+            snprintf(callsign, sizeof(callsign), "PAW%05X", addr & 0xFFFFF);
+
+            flarm_push_update(addr, callsign, category,
+                              pmsg.latitude, pmsg.longitude, pmsg.altitude,
+                              pmsg.speed, pmsg.course, 0,
+                              signal, pmsg.aircraft_type, 0,
+                              0, DECODE_SOURCE_P3I);
+        }
+    }
+
+    return had_data;
 }
 
 void flarmDecoderStop(struct sdr_receiver *rx)
@@ -946,10 +1009,31 @@ void flarmDecoderStop(struct sdr_receiver *rx)
         flarm_demod_destroy(st->demod);
     }
 
+    if (st->p3i_demod) {
+        p3i_demod_stats_t p3i_stats;
+        p3i_demod_get_stats(st->p3i_demod, &p3i_stats);
+        fprintf(stderr, "rx[%d]: P3I stats: sync=%" PRIu64 " decoded=%" PRIu64 " failed=%" PRIu64 "\n",
+                rx->id,
+                (uint64_t)p3i_stats.sync_detected,
+                (uint64_t)p3i_stats.packets_decoded,
+                (uint64_t)p3i_stats.packets_failed);
+        p3i_demod_destroy(st->p3i_demod);
+    }
+    if (st->p3i_queue) msg_queue_destroy(st->p3i_queue);
+
     if (st->queue) msg_queue_destroy(st->queue);
     free(st);
     rx->decoder_state = NULL;
     fprintf(stderr, "rx[%d]: FLARM decoder destroyed\n", rx->id);
+}
+
+bool flarmDecoderGetStats(struct sdr_receiver *rx, flarm_demod_stats_t *stats)
+{
+    if (!rx || !rx->decoder_state) return false;
+    flarm_decoder_state_t *st = (flarm_decoder_state_t *)rx->decoder_state;
+    if (!st->demod) return false;
+    flarm_demod_get_stats(st->demod, stats);
+    return true;
 }
 
 // ======================== CLI option handling ========================

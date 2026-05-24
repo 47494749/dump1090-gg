@@ -83,6 +83,18 @@ typedef struct {
     uint8_t           flarm_addr_type;     // FLARM address type (0=random,1=ICAO,2=FLARM,3=anon)
     uint8_t           flarm_proto_version; // FLARM protocol version (6,7), 0=unset
 
+    // Radiosonde metadata (optional)
+    struct {
+        char          serial[16];      // sonde serial (e.g. "T1234567")
+        char          sonde_type[8];   // "RS41", "DFM", etc.
+        int           frame_num;       // frame counter
+        int           rs_errors;       // RS corrections (-1=uncorrectable)
+        int           satellites;      // GPS satellites
+        double        vel_v;           // vertical velocity m/s
+        float         freq_mhz;        // receive frequency
+        bool          valid;
+    } sonde;
+
     // FANET/FLARM extended info (optional)
     struct {
         uint8_t       device_type;

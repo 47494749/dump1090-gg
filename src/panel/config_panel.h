@@ -25,6 +25,7 @@ extern "C" {
 #define PANEL_MSG_LINE_LEN    256
 #define PANEL_HTML_DIR        "/usr/share/dump1090-gg/panel"
 #define PANEL_CONF_PATH       "/etc/dump1090-gg/panel.conf"
+#define PANEL_WS_MAX_CLIENTS  4
 
 typedef struct {
     int      enabled;
@@ -50,6 +51,11 @@ typedef struct {
     int      listen_fd;
     pthread_t thread;
     int      running;
+
+    // WebSocket state
+    int      ws_fds[PANEL_WS_MAX_CLIENTS];
+    int      ws_count;
+    pthread_mutex_t ws_mutex;
 } panel_state_t;
 
 extern panel_state_t PanelState;

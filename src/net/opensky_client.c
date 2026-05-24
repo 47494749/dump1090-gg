@@ -509,7 +509,7 @@ void *opensky_thread_entry(void *arg) {
                 goto reconnect;
             }
 
-            if (!sent) {
+            {
                 struct timespec ts = {0, 5 * 1000 * 1000};
                 nanosleep(&ts, NULL);
             }

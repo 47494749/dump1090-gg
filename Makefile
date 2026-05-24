@@ -179,7 +179,7 @@ ifeq ($(SDRGG), yes)
 
   ifdef SDRGG_PREFIX
     DUMP1090_CPPFLAGS += -I$(SDRGG_PREFIX)
-    LIBS_SDR += -L$(SDRGG_PREFIX) -lsdrgg -lstdc++
+		LIBS_SDR += $(SDRGG_PREFIX)/libsdrgg.a -lstdc++
   else
     LIBS_SDR += -lsdrgg -lstdc++
   endif

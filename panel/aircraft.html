@@ -41,9 +41,14 @@ tr:hover td{background:var(--hover)}
 .photo{margin-top:12px;text-align:center}
 .photo img{max-width:100%;border-radius:6px;border:1px solid var(--border)}
 .tt{position:relative;display:inline-block}
-.tt .ttbox{visibility:hidden;opacity:0;pointer-events:none;position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#1a1a32;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;font-weight:400;white-space:nowrap;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.6);transition:opacity .15s}
-.tt .ttbox::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:#1a1a32}
+.tt .ttbox{visibility:hidden;opacity:0;pointer-events:none;position:fixed;background:#1a1a32;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;font-weight:400;white-space:nowrap;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.6);transition:opacity .15s}
 .tt:hover .ttbox{visibility:visible;opacity:1}
+.meteo-tip{white-space:normal;min-width:220px;max-width:320px;text-align:left;line-height:1.6}
+.meteo-tip .mg{display:grid;grid-template-columns:auto 1fr;gap:1px 10px}
+.meteo-tip .ml{color:var(--dim);font-size:11px}.meteo-tip .mv{color:var(--text);font-size:11px;text-align:right}
+.meteo-tip .mh{color:var(--accent);font-size:11px;font-weight:600;grid-column:1/-1;padding-top:3px;border-top:1px solid var(--border);margin-top:2px}
+.meteo-tip .mh:first-child{border-top:none;padding-top:0;margin-top:0}
+.msev-nil{color:#888}.msev-light{color:var(--ok)}.msev-moderate{color:var(--warn)}.msev-severe{color:var(--danger);font-weight:700}
 </style>
 </head>
 <body>
@@ -61,6 +66,8 @@ tr:hover td{background:var(--hover)}
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
 <a href="/fanet.html">🚩 FANET</a>
+<a href="/stats.html">📊 Stats</a>
+<a href="/waterfall.html">🌊 Waterfall</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -73,7 +80,7 @@ tr:hover td{background:var(--hover)}
 <span id="ac-update" style="color:var(--dim);margin-left:16px;font-size:12px"></span>
 </div>
 <div style="display:flex;gap:0;align-items:flex-start">
-<div style="overflow-y:auto;max-height:calc(100vh - 120px);flex:1;min-width:0">
+<div style="overflow:auto;max-height:calc(100vh - 120px);flex:1;min-width:0">
 <table id="ac-table">
 <thead><tr>
 <th onclick="sortAC('hex')">ICAO</th>
@@ -91,7 +98,7 @@ tr:hover td{background:var(--hover)}
 <th onclick="sortAC('messages')">Msgs</th>
 <th onclick="sortAC('seen')">Seen</th>
 <th onclick="sortAC('type')">Source</th>
-<th>Flags</th>
+<th>Info</th>
 </tr></thead>
 <tbody id="ac-body"></tbody>
 </table>
@@ -251,6 +258,78 @@ function getSquawkTitle(sq){
 }
 function sortAC(key){if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=1;}renderAC();}
 
+function sevSpan(v){
+    if(!v||v==='nil')return'<span class="msev-nil">NIL</span>';
+    return`<span class="msev-${v}">${v.toUpperCase()}</span>`;
+}
+function hasMeteo(a){
+    return a.temperature!=null||a.pressure!=null||a.humidity!=null||a.turbulence!=null||
+        a.wind_speed!=null||a.mhar_turbulence!=null||a.mhar_windshear!=null||
+        a.mhar_microburst!=null||a.mhar_icing!=null||a.mhar_wake!=null||
+        a.mhar_temperature!=null||a.mhar_pressure!=null||a.mhar_humidity!=null||
+        a.oat!=null||a.tat!=null||a.wd_speed!=null;
+}
+function getMeteoIcon(a){
+    if(!hasMeteo(a))return'';
+    let rows=[];
+    // BDS 4,4 — MRAR
+    const hasMRAR=a.temperature!=null||a.pressure!=null||a.humidity!=null||a.turbulence!=null||a.wind_speed!=null;
+    if(hasMRAR){
+        rows.push('<span class="mh">MRAR (BDS 4,4)</span>');
+        if(a.wind_speed!=null||a.wind_dir!=null)
+            rows.push(`<span class="ml">Wind</span><span class="mv">${a.wind_speed!=null?Math.round(a.wind_speed)+' kt':''} ${a.wind_dir!=null?'@ '+a.wind_dir.toFixed(0)+'°':''}</span>`);
+        if(a.temperature!=null)
+            rows.push(`<span class="ml">SAT</span><span class="mv">${a.temperature.toFixed(1)} °C</span>`);
+        if(a.pressure!=null)
+            rows.push(`<span class="ml">Pressure</span><span class="mv">${Math.round(a.pressure)} hPa</span>`);
+        if(a.humidity!=null)
+            rows.push(`<span class="ml">Humidity</span><span class="mv">${a.humidity.toFixed(1)} %</span>`);
+        if(a.turbulence!=null)
+            rows.push(`<span class="ml">Turbulence</span><span class="mv">${sevSpan(a.turbulence)}</span>`);
+        if(a.mrar_source)
+            rows.push(`<span class="ml">Nav source</span><span class="mv">${escapeHtml(a.mrar_source.toUpperCase())}</span>`);
+    }
+    // BDS 4,5 — MHAR
+    const hasMHAR=a.mhar_turbulence!=null||a.mhar_windshear!=null||a.mhar_microburst!=null||a.mhar_icing!=null||a.mhar_wake!=null||a.mhar_temperature!=null||a.mhar_pressure!=null||a.mhar_humidity!=null;
+    if(hasMHAR){
+        rows.push('<span class="mh">MHAR (BDS 4,5)</span>');
+        if(a.mhar_turbulence!=null)
+            rows.push(`<span class="ml">Turbulence</span><span class="mv">${sevSpan(a.mhar_turbulence)}</span>`);
+        if(a.mhar_windshear!=null)
+            rows.push(`<span class="ml">Windshear</span><span class="mv">${sevSpan(a.mhar_windshear)}</span>`);
+        if(a.mhar_microburst!=null)
+            rows.push(`<span class="ml">Microburst</span><span class="mv">${sevSpan(a.mhar_microburst)}</span>`);
+        if(a.mhar_icing!=null)
+            rows.push(`<span class="ml">Icing</span><span class="mv">${sevSpan(a.mhar_icing)}</span>`);
+        if(a.mhar_wake!=null)
+            rows.push(`<span class="ml">Wake vortex</span><span class="mv">${sevSpan(a.mhar_wake)}</span>`);
+        if(a.mhar_temperature!=null)
+            rows.push(`<span class="ml">SAT</span><span class="mv">${a.mhar_temperature.toFixed(1)} °C</span>`);
+        if(a.mhar_pressure!=null)
+            rows.push(`<span class="ml">Avg pressure</span><span class="mv">${Math.round(a.mhar_pressure)} hPa</span>`);
+        if(a.mhar_humidity!=null)
+            rows.push(`<span class="ml">Rel. humidity</span><span class="mv">${a.mhar_humidity.toFixed(1)} %</span>`);
+    }
+    // Derived wind & temps
+    const hasDerived=a.oat!=null||a.tat!=null||a.wd_speed!=null;
+    if(hasDerived){
+        rows.push('<span class="mh">Derived</span>');
+        if(a.wd_speed!=null)
+            rows.push(`<span class="ml">Wind</span><span class="mv">${Math.round(a.wd_speed)} kt ${a.wd_dir!=null?'@ '+a.wd_dir.toFixed(0)+'°':''}${a.wd_alt!=null?' FL'+Math.round(a.wd_alt/100):''}</span>`);
+        if(a.oat!=null)
+            rows.push(`<span class="ml">OAT</span><span class="mv">${a.oat.toFixed(1)} °C</span>`);
+        if(a.tat!=null)
+            rows.push(`<span class="ml">TAT</span><span class="mv">${a.tat.toFixed(1)} °C</span>`);
+    }
+    // Pick icon color based on severity
+    let col='var(--ok)',icon='🌤️';
+    const sevs=[a.turbulence,a.mhar_turbulence,a.mhar_windshear,a.mhar_microburst,a.mhar_icing,a.mhar_wake];
+    if(sevs.some(s=>s==='severe')){col='var(--danger)';icon='⛈️';}
+    else if(sevs.some(s=>s==='moderate')){col='var(--warn)';icon='🌧️';}
+    else if(sevs.some(s=>s==='light')){col='var(--ok)';icon='🌥️';}
+    return `<span class="tt" style="cursor:help"><span style="font-size:14px">${icon}</span><span class="ttbox meteo-tip"><div class="mg">${rows.join('')}</div></span></span>`;
+}
+
 const flarmTypeInfo=[
     {icon:'❓',label:'Unknown',col:'#888'},
     {icon:'🛩️',label:'Glider',col:'#00cc66'},
@@ -343,6 +422,7 @@ function isMilitary(a){
     if(/^(SPARO|GRIFONE|FALCO|AQUILA|CORVO|VIPER|COBRA|SHARK|LYNX|BOXER|ATLAS|AWACS|NATO|REAPER|PREDATOR|GHOST|SPECTR|SENTRY|TALON|ZEUS|MARS|ARES|TITAN)\d/.test(cs))return true;
     if(icaoCache[a.hex]){const ow=(icaoCache[a.hex].registered_owner||'').toLowerCase();
         if(/air force|navy|army|milit|luftwaffe|marine nationale|aeronautica|bundeswehr|ministry of defen|royal air force/.test(ow))return true;}
+    if(a.df19)return true;
     return false;
 }
 
@@ -393,7 +473,7 @@ function renderAC(){
             <td>${a.messages||''}</td>
             <td>${a.seen!=null?a.seen.toFixed(1)+'s':''}</td>
             <td>${(()=>{const s=getSource(a);return`<span class="tt" style="display:inline-block"><span style="display:inline-block;padding:2px 7px;border-radius:8px;font-size:11px;font-weight:600;background:${s.bg};color:${s.col};cursor:default">${escapeHtml(s.label)}</span><span class="ttbox">${escapeHtml(s.title)}</span></span>`;})()}</td>
-            <td>${flags}</td>
+            <td>${flags}${getMeteoIcon(a)}</td>
         </tr>`;
     }
     document.getElementById('ac-body').innerHTML=html;
@@ -537,6 +617,25 @@ loadAircraft();
 setInterval(loadAircraft,1000);
 fetch('/api/config').then(r=>r.json()).then(d=>{if(d.station){stationLat=d.station.lat;stationLon=d.station.lon;}}).catch(()=>{});
 fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
+
+// Position fixed tooltips on hover
+document.addEventListener('mouseover', function(e) {
+    var tt = e.target.closest('.tt');
+    if (!tt) return;
+    var box = tt.querySelector('.ttbox');
+    if (!box) return;
+    var rect = tt.getBoundingClientRect();
+    var bw = box.offsetWidth || 280;
+    var bh = box.offsetHeight || 100;
+    var left = rect.left - bw - 8;
+    if (left < 4) left = rect.right + 8;
+    var top = rect.top - bh / 2 + rect.height / 2;
+    if (top < 4) top = 4;
+    if (top + bh > window.innerHeight - 4) top = window.innerHeight - bh - 4;
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+});
 </script>
+<script src="/warnings.js"></script>
 </body>
 </html>

@@ -288,12 +288,131 @@ static std::string encode_sbs_line(const struct modesMessage *mm) {
     return s;
 }
 
+// ===================== BeastReduce rate limiting =====================
+// Per-aircraft rate limiting for bandwidth-efficient feeding.
+// State messages (position/velocity) are sent at most every beast_reduce_interval ms.
+// Non-state messages (identity, Mode-AC, etc.) are sent at 4x the interval.
+
+#define REDUCE_HASH_SIZE 4096
+#define REDUCE_HASH_MASK (REDUCE_HASH_SIZE - 1)
+
+struct reduce_entry {
+    uint32_t addr;         // ICAO address (0 = empty slot)
+    uint64_t last_sent;    // last time a message was forwarded (ms)
+};
+
+static struct reduce_entry reduce_table[REDUCE_HASH_SIZE];
+
+// Is this a state-relevant message? (position, velocity, altitude)
+static inline int is_state_message(const struct modesMessage *mm) {
+    if (mm->msgtype == 17 || mm->msgtype == 18) {
+        return (mm->metype >= 5 && mm->metype <= 22);
+    }
+    // DF0/4/5/16/20/21 contain altitude — treat as state
+    if (mm->altitude_baro_valid || mm->altitude_geom_valid)
+        return 1;
+    return 0;
+}
+
+// Check if a message should be sent to BeastReduce feeds.
+// Returns 1 if should send, 0 if should skip.
+static int beast_reduce_check(const struct modesMessage *mm, uint64_t now) {
+    if (Modes.beast_reduce_interval <= 0) return 1;
+    if (mm->addr == 0) return 1;
+    if (mm->addr & MODES_NON_ICAO_ADDRESS) return 1;
+
+    uint32_t hash = (mm->addr ^ (mm->addr >> 12)) & REDUCE_HASH_MASK;
+    struct reduce_entry *e = &reduce_table[hash];
+
+    // Different aircraft in same slot? Replace and allow.
+    if (e->addr != mm->addr) {
+        e->addr = mm->addr;
+        e->last_sent = now;
+        return 1;
+    }
+
+    uint64_t interval = (uint64_t)Modes.beast_reduce_interval;
+    if (!is_state_message(mm))
+        interval *= 4;
+
+    if (now - e->last_sent < interval)
+        return 0;
+
+    e->last_sent = now;
+    return 1;
+}
+
 struct beast_feed_conn {
     int fd;
     uint64_t next_reconnect;
     uint64_t last_heartbeat;
     int reconnect_count;  // suppress repeated log spam
+    int max_backoff_count;
 };
+
+static const uint64_t BEAST_FEED_RECONNECT_INITIAL_MS = 60000ULL;
+static const uint64_t BEAST_FEED_RECONNECT_MAX_MS = 48ULL * 60ULL * 60ULL * 1000ULL;
+static const int BEAST_FEED_MAX_48H_RETRIES = 3;
+
+static uint64_t beast_feed_reconnect_delay_ms(int reconnect_count) {
+    uint64_t delay = BEAST_FEED_RECONNECT_INITIAL_MS;
+
+    if (reconnect_count <= 1)
+        return delay;
+
+    for (int attempt = 1; attempt < reconnect_count; ++attempt) {
+        if (delay >= BEAST_FEED_RECONNECT_MAX_MS / 2) {
+            delay = BEAST_FEED_RECONNECT_MAX_MS;
+            break;
+        }
+        delay *= 2;
+    }
+
+    return delay;
+}
+
+static void beast_feed_format_delay(uint64_t delay_ms, char *buf, size_t buf_len) {
+    if (delay_ms % (60ULL * 60ULL * 1000ULL) == 0) {
+        snprintf(buf, buf_len, "%lluh", (unsigned long long)(delay_ms / (60ULL * 60ULL * 1000ULL)));
+    } else if (delay_ms % (60ULL * 1000ULL) == 0) {
+        snprintf(buf, buf_len, "%llum", (unsigned long long)(delay_ms / (60ULL * 1000ULL)));
+    } else {
+        snprintf(buf, buf_len, "%llus", (unsigned long long)(delay_ms / 1000ULL));
+    }
+}
+
+static void beast_feed_reset_backoff(struct beast_feed_conn *conn, uint64_t now) {
+    conn->next_reconnect = 0;
+    conn->last_heartbeat = now;
+    conn->reconnect_count = 0;
+    conn->max_backoff_count = 0;
+}
+
+static uint64_t beast_feed_schedule_reconnect(struct beast_feed_conn *conn, int feed_index, uint64_t now) {
+    uint64_t delay;
+
+    conn->reconnect_count++;
+    delay = beast_feed_reconnect_delay_ms(conn->reconnect_count);
+
+    if (delay >= BEAST_FEED_RECONNECT_MAX_MS) {
+        conn->max_backoff_count++;
+        if (conn->max_backoff_count >= BEAST_FEED_MAX_48H_RETRIES) {
+            Modes.beast_feeds[feed_index].enabled = 0;
+            conn->next_reconnect = 0;
+            fprintf(stderr, "%s: disabled after %d retries at 48h backoff\n",
+                    Modes.beast_feeds[feed_index].name, conn->max_backoff_count);
+            if (PanelState.enabled)
+                panelLog("%s: disabled after %d retries at 48h backoff",
+                         Modes.beast_feeds[feed_index].name, conn->max_backoff_count);
+            return 0;
+        }
+    } else {
+        conn->max_backoff_count = 0;
+    }
+
+    conn->next_reconnect = now + delay;
+    return delay;
+}
 
 // ===================== ADSBHub ckey IP update =====================
 // Protocol (from official adsbhub.sh):
@@ -491,6 +610,7 @@ static void *beast_feed_thread_entry(void *arg) {
         conns[i].next_reconnect = 0;
         conns[i].last_heartbeat = 0;
         conns[i].reconnect_count = 0;
+        conns[i].max_backoff_count = 0;
     }
 
     // ADSBHub: update dynamic IP via ckey before first connection
@@ -548,29 +668,34 @@ static void *beast_feed_thread_entry(void *arg) {
 
         // Manage connections
         for (int i = 0; i < n; i++) {
+            uint64_t retry_delay;
+            char retry_delay_buf[32];
+
             if (!Modes.beast_feeds[i].enabled) continue;
             if (conns[i].fd >= 0) continue;
             if (now < conns[i].next_reconnect) continue;
 
             conns[i].fd = feeder_tcp_connect(Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
             if (conns[i].fd < 0) {
-                conns[i].reconnect_count++;
-                fprintf(stderr, "%s: failed to connect to %s:%d, retry in 30s\n",
-                        Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
+                retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
+                if (retry_delay > 0) {
+                    beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
+                    fprintf(stderr, "%s: failed to connect to %s:%d, retry in %s\n",
+                            Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port, retry_delay_buf);
+                }
                 if (PanelState.enabled && conns[i].reconnect_count <= 1)
                     panelLog("%s: connect FAILED %s:%d", Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
-                conns[i].next_reconnect = now + 30000;
             } else {
+                int reconnect_count = conns[i].reconnect_count;
                 fprintf(stderr, "%s: connected to %s:%d\n",
                         Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
                 if (PanelState.enabled) {
-                    if (conns[i].reconnect_count == 0)
+                    if (reconnect_count == 0)
                         panelLog("%s: connected %s:%d", Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
                     else
-                        panelLog("%s: reconnected %s:%d (after %d attempts)", Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port, conns[i].reconnect_count);
+                        panelLog("%s: reconnected %s:%d (after %d attempts)", Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port, reconnect_count);
                 }
-                conns[i].reconnect_count = 0;
-                conns[i].last_heartbeat = now;
+                beast_feed_reset_backoff(&conns[i], now);
             }
         }
 
@@ -584,6 +709,9 @@ static void *beast_feed_thread_entry(void *arg) {
         int sent = 0;
         while (msg_queue_pop(beast_feed_queue, &mm)) {
             if (!any_connected) continue; // drain but don't send
+
+            // BeastReduce: per-aircraft rate limiting (computed once per message)
+            int reduce_pass = -1; // -1 = not yet computed
 
             // Encode once per format type (lazy)
             uint8_t beast_buf_enc[256];
@@ -603,6 +731,12 @@ static void *beast_feed_thread_entry(void *arg) {
                 } else if (Modes.beast_feeds[i].format == FEED_FORMAT_SBS) {
                     if (sbs_str.empty()) sbs_str = encode_sbs_line(&mm);
                     len = (int)sbs_str.size(); buf = sbs_str.data();
+                } else if (Modes.beast_feeds[i].format == FEED_FORMAT_BEAST_REDUCE) {
+                    // BeastReduce: apply per-aircraft rate limiting
+                    if (reduce_pass < 0) reduce_pass = beast_reduce_check(&mm, now);
+                    if (!reduce_pass) continue;
+                    if (beast_len < 0) beast_len = encode_beast_binary(&mm, beast_buf_enc, sizeof(beast_buf_enc));
+                    len = beast_len; buf = beast_buf_enc;
                 } else {
                     if (beast_len < 0) beast_len = encode_beast_binary(&mm, beast_buf_enc, sizeof(beast_buf_enc));
                     len = beast_len; buf = beast_buf_enc;
@@ -611,12 +745,18 @@ static void *beast_feed_thread_entry(void *arg) {
 
                 int w = write(conns[i].fd, buf, len);
                 if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    uint64_t retry_delay;
+                    char retry_delay_buf[32];
+
                     fprintf(stderr, "%s: write error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
                     if (PanelState.enabled && conns[i].reconnect_count == 0)
                         panelLog("%s: disconnected (write: %s)", Modes.beast_feeds[i].name, strerror(errno));
                     close(conns[i].fd); conns[i].fd = -1;
-                    conns[i].reconnect_count++;
-                    conns[i].next_reconnect = mstime() + 30000;
+                    retry_delay = beast_feed_schedule_reconnect(&conns[i], i, mstime());
+                    if (retry_delay > 0) {
+                        beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
+                        fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                    }
                 }
             }
             sent++;
@@ -627,16 +767,23 @@ static void *beast_feed_thread_entry(void *arg) {
         for (int i = 0; i < n; i++) {
             if (conns[i].fd < 0) continue;
 
-            // Heartbeat every 30s (only for Beast format feeds)
-            if (Modes.beast_feeds[i].format == FEED_FORMAT_BEAST && now - conns[i].last_heartbeat >= 30000) {
+            // Heartbeat every 30s (Beast and BeastReduce format feeds)
+            if ((Modes.beast_feeds[i].format == FEED_FORMAT_BEAST || Modes.beast_feeds[i].format == FEED_FORMAT_BEAST_REDUCE)
+                && now - conns[i].last_heartbeat >= 30000) {
                 if (write(conns[i].fd, beast_heartbeat, sizeof(beast_heartbeat)) < 0) {
                     if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        uint64_t retry_delay;
+                        char retry_delay_buf[32];
+
                         fprintf(stderr, "%s: heartbeat error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
                         if (PanelState.enabled && conns[i].reconnect_count == 0)
                             panelLog("%s: disconnected (heartbeat: %s)", Modes.beast_feeds[i].name, strerror(errno));
                         close(conns[i].fd); conns[i].fd = -1;
-                        conns[i].reconnect_count++;
-                        conns[i].next_reconnect = now + 30000;
+                        retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
+                        if (retry_delay > 0) {
+                            beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
+                            fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                        }
                         continue;
                     }
                 }
@@ -647,24 +794,38 @@ static void *beast_feed_thread_entry(void *arg) {
             char discard[1024];
             int r = read(conns[i].fd, discard, sizeof(discard));
             if (r == 0) {
+                uint64_t retry_delay;
+                char retry_delay_buf[32];
+
                 fprintf(stderr, "%s: connection closed by server\n", Modes.beast_feeds[i].name);
                 if (PanelState.enabled && conns[i].reconnect_count == 0)
                     panelLog("%s: disconnected (server closed)", Modes.beast_feeds[i].name);
                 close(conns[i].fd); conns[i].fd = -1;
-                conns[i].reconnect_count++;
-                conns[i].next_reconnect = now + 30000;
+                retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
+                if (retry_delay > 0) {
+                    beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
+                    fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                }
             } else if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                uint64_t retry_delay;
+                char retry_delay_buf[32];
+
                 fprintf(stderr, "%s: read error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
                 if (PanelState.enabled && conns[i].reconnect_count == 0)
                     panelLog("%s: disconnected (%s)", Modes.beast_feeds[i].name, strerror(errno));
                 close(conns[i].fd); conns[i].fd = -1;
-                conns[i].reconnect_count++;
-                conns[i].next_reconnect = now + 30000;
+                retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
+                if (retry_delay > 0) {
+                    beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
+                    fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                }
+            } else if (r > 0) {
+                beast_feed_reset_backoff(&conns[i], now);
             }
         }
 
-        if (!sent) {
-            struct timespec ts = {0, 5 * 1000 * 1000};
+        {
+            struct timespec ts = {0, 5000000}; // 5ms unconditional sleep
             nanosleep(&ts, NULL);
         }
     }
@@ -681,7 +842,6 @@ static void *mlat_thread_entry(void *arg) {
     MODES_NOTUSED(arg);
 
     struct modesMessage mm;
-    struct timespec sleep_ts = {0, 5 * 1000 * 1000};
 
     while (atomic_load(&feeders_running)) {
         // When internet is offline, drain queue without processing
@@ -693,17 +853,15 @@ static void *mlat_thread_entry(void *arg) {
             continue;
         }
 
-        int got_msg = 0;
-
         while (msg_queue_pop(mlat_queue, &mm)) {
             mlatClientProcessMessage(&mm);
-            got_msg = 1;
         }
 
         mlatClientPeriodicWork();
 
-        if (!got_msg) {
-            nanosleep(&sleep_ts, NULL);
+        {
+            struct timespec ts = {0, 5000000}; // 5ms unconditional sleep
+            nanosleep(&ts, NULL);
         }
     }
 

@@ -60,6 +60,8 @@ tr:hover td{background:var(--hover)}
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
 <a href="/fanet.html">🚩 FANET</a>
+<a href="/stats.html">📊 Stats</a>
+<a href="/waterfall.html">🌊 Waterfall</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
 </div>
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
@@ -690,5 +692,6 @@ async function calibratePPM(serial){
 loadConfig();
 fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
 </script>
+<script src="/warnings.js"></script>
 </body>
 </html>

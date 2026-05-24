@@ -649,11 +649,7 @@ static void *fa_mlat_thread_entry(void *arg) {
         }
 
         // Process messages from queue
-        int got_msg = 0;
-
         while (msg_queue_pop(fa_mlat_queue, &mm)) {
-            got_msg = 1;
-
             // Skip MLAT results (don't feed back)
             if (mm.source == SOURCE_MLAT) continue;
 
@@ -708,8 +704,7 @@ static void *fa_mlat_thread_entry(void *arg) {
             last_udp_report = now;
         }
 
-        if (!got_msg)
-            nanosleep(&sleep_ts, NULL);
+        nanosleep(&sleep_ts, NULL); // 5ms unconditional
     }
 
     udp_flush(&udp);

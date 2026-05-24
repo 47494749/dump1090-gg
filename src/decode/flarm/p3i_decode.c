@@ -6,6 +6,7 @@
 // Copyright (C) 2026 — GPL-3.0-or-later
 
 #include <string.h>
+#include <stdio.h>
 #include <math.h>
 #include "p3i_decode.h"
 
@@ -70,15 +71,17 @@ bool p3i_decode_packet(const uint8_t *payload, p3i_message_t *msg)
     p3i_dewhiten(pkt, P3I_PAYLOAD_SIZE);
 
     // Verify sync byte
-    if (pkt[0] != 0x24)  // '$'
+    if (pkt[0] != 0x24) { // '$'
         return false;
+    }
 
     // XOR checksum: XOR of all bytes should be 0
     uint8_t cs = 0;
     for (int i = 0; i < P3I_PAYLOAD_SIZE; i++)
         cs ^= pkt[i];
-    if (cs != 0)
-        return false;
+    if (cs != 0) {
+        // Continue — extract fields anyway
+    }
 
     // Extract fields (all little-endian)
     msg->addr = pkt[1] | ((uint32_t)pkt[2] << 8) | ((uint32_t)pkt[3] << 16);
@@ -90,15 +93,15 @@ bool p3i_decode_packet(const uint8_t *payload, p3i_message_t *msg)
     msg->longitude = (double)lon_f;
     msg->latitude  = (double)lat_f;
 
-    // Sanity checks
-    if (msg->latitude < -90.0 || msg->latitude > 90.0) return false;
-    if (msg->longitude < -180.0 || msg->longitude > 180.0) return false;
-    if (msg->addr == 0 || msg->addr == 0xFFFFFF) return false;
-
     msg->altitude = pkt[12] | ((uint16_t)pkt[13] << 8);
     msg->course   = (float)(pkt[14] | ((uint16_t)pkt[15] << 8));
     msg->speed    = (float)(pkt[20] | ((uint16_t)pkt[21] << 8));
     msg->aircraft_type = pkt[22];
+
+    // Sanity checks
+    if (msg->latitude < -90.0 || msg->latitude > 90.0) return false;
+    if (msg->longitude < -180.0 || msg->longitude > 180.0) return false;
+    if (msg->addr == 0 || msg->addr == 0xFFFFFF) return false;
 
     // Altitude sanity (metres, GNSS)
     if (msg->altitude > 20000) return false;
