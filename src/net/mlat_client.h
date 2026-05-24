@@ -58,7 +58,7 @@ typedef enum {
 // Per-aircraft MLAT tracking data (stored in hash table)
 struct mlat_aircraft {
     uint32_t addr;                   // ICAO address (0 = empty slot)
-    int      messages;               // total messages seen
+    int32_t      messages;               // total messages seen
     uint64_t last_message;           // last message time (mstime)
 
     // ADS-B position tracking (for sync messages)
@@ -69,11 +69,11 @@ struct mlat_aircraft {
     uint64_t odd_timestamp;          // 12MHz timestamp of last odd CPR msg
     uint8_t even_msg[14];      // raw even CPR message bytes
     uint8_t odd_msg[14];       // raw odd CPR message bytes
-    int      even_msgbits;           // bit length of even message
-    int      odd_msgbits;            // bit length of odd message
+    int32_t      even_msgbits;           // bit length of even message
+    int32_t      odd_msgbits;            // bit length of odd message
 
     // Rate tracking
-    int      recent_adsb_positions;
+    int32_t      recent_adsb_positions;
     uint64_t rate_measurement_start;
 
     // Flags per-server (bitmask, bit N = server N)
@@ -85,43 +85,43 @@ struct mlat_aircraft {
 struct mlat_server {
     // --- Configuration (set once) ---
     char    *host;
-    int      port;
+    int32_t      port;
 
     // --- Connection state ---
-    int      fd;                     // TCP socket (-1 if disconnected)
+    int32_t      fd;                     // TCP socket (-1 if disconnected)
     mlat_state_t state;
 
     // --- I/O buffers ---
     char     readbuf[MLAT_READ_BUF_SIZE];
-    int      readbuf_len;
+    int32_t      readbuf_len;
     char     writebuf[MLAT_WRITE_BUF_SIZE];
-    int      writebuf_len;
+    int32_t      writebuf_len;
 
     // --- Timers ---
     uint64_t next_reconnect;
     uint64_t next_heartbeat;
     uint64_t last_data_received;
     uint64_t next_aircraft_update;
-    int      report_counter;         // counts up to MLAT_REPORT_INTERVAL
+    int32_t      report_counter;         // counts up to MLAT_REPORT_INTERVAL
 
     // --- Server-controlled settings ---
     bool     split_sync;             // server wants split sync messages
 
     // --- Server index (0..MAX_MLAT_SERVERS-1) ---
-    int      index;
+    int32_t      index;
 
     // --- Exponential backoff ---
-    int      reconnect_count;        // number of consecutive reconnect attempts
-    int      max_backoff_count;      // number of retries at 48h cap
+    int32_t      reconnect_count;        // number of consecutive reconnect attempts
+    int32_t      max_backoff_count;      // number of retries at 48h cap
     bool     disabled_by_backoff;    // true if disabled by backoff logic
 
     // --- Mutual exclusion: peer server that shares the same backend ---
-    int      peer_index;             // index of peer server (-1 = none)
+    int32_t      peer_index;             // index of peer server (-1 = none)
 };
 
 // Global MLAT state
 struct mlat_config {
-    int      server_count;
+    int32_t      server_count;
     struct mlat_server servers[MAX_MLAT_SERVERS];
 
     // Feeder identity
@@ -165,7 +165,7 @@ void mlatClientCleanup(void);
 void mlatClientDisconnectAll(const char *reason);
 
 // Add an MLAT server from CLI (returns 0 on success, -1 if full)
-int mlatClientAddServer(const char *hostport);
+int32_t mlatClientAddServer(const char *hostport);
 
 #ifdef __cplusplus
 }

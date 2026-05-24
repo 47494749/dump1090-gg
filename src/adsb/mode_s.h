@@ -85,9 +85,9 @@ typedef enum {
     SR_DF17_KNOWN,                // DF17,               no errors,  known aircraft
 } score_rank;
 
-int modesMessageLenByType(int type);
+int32_t modesMessageLenByType(int32_t type);
 score_rank scoreModesMessage(const uint8_t *msg);
-int decodeModesMessage (struct modesMessage *mm, const uint8_t *msg);
+int32_t decodeModesMessage (struct modesMessage *mm, const uint8_t *msg);
 void displayModesMessage(struct modesMessage *mm);
 void useModesMessage    (struct modesMessage *mm);
 

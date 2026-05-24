@@ -42,16 +42,16 @@ extern "C" {
 // Decoded POCSAG message
 typedef struct {
     uint32_t address;                       // 21-bit address (3-bit function excluded)
-    int      function;                      // 0-3 function bits
+    int32_t      function;                      // 0-3 function bits
     char     alpha_msg[POCSAG_MSG_MAX_LEN]; // decoded alpha text (NUL-terminated)
     char     numeric_msg[POCSAG_MSG_MAX_LEN]; // decoded numeric string
-    int      alpha_len;
-    int      numeric_len;
+    int32_t      alpha_len;
+    int32_t      numeric_len;
     bool     is_alpha;                      // true if function indicates alpha
     bool     is_numeric;                    // true if function indicates numeric
     bool     is_tone_only;                  // true if tone-only alert
-    int      baud_rate;                     // detected baud rate
-    int      errors_corrected;             // BCH error corrections applied
+    int32_t      baud_rate;                     // detected baud rate
+    int32_t      errors_corrected;             // BCH error corrections applied
     float    signal_level;                  // estimated signal level
     double   channel_freq;                  // channel frequency in Hz
 } pocsag_msg_t;
@@ -64,7 +64,7 @@ typedef struct {
     double           center_freq;       // SDR center frequency in Hz
     double           sample_rate;       // SDR sample rate in Hz
     double           channel_freqs[POCSAG_MAX_CHANNELS]; // channel frequencies in Hz (0 = unused)
-    int              num_channels;      // number of active channels (0 = single-channel legacy)
+    int32_t              num_channels;      // number of active channels (0 = single-channel legacy)
     pocsag_callback_t callback;         // message callback
     void            *callback_ctx;      // opaque context for callback
 } pocsag_config_t;

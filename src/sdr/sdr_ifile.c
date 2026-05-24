@@ -49,6 +49,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_ifile.h"
 
 static struct {
@@ -56,7 +57,7 @@ static struct {
     input_format_t input_format;
     bool throttle;
 
-    int fd;
+    int32_t fd;
     uint32_t bytes_per_sample;
     uint32_t bufsize;
     char *readbuf;
@@ -89,7 +90,7 @@ void ifileShowHelp()
 
 bool ifileHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j +1  < argc);
 
     if (!strcmp(argv[j], "--ifile") && more) {

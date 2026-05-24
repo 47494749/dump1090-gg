@@ -15,6 +15,7 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include <cstdint>
 #include "piaware_client.h"
 #include "fa_mlat.h"
 
@@ -40,7 +41,7 @@ static void paTLSHandshake(void);
 static void paSendLogin(void);
 static void paHandleInput(void);
 static void paHandleLine(const char *line);
-static int  paSend(const char *data, int len);
+static int32_t  paSend(const char *data, int32_t len);
 static void paSendFATSV(void);
 static void paSendHealth(void);
 static void paForwardFaMlatStatus(void);
@@ -182,7 +183,7 @@ static void paReadFeederID(void) {
 // TSV builder helpers
 typedef struct {
     char buf[4096];
-    int  pos;
+    int32_t  pos;
 } tsv_buf_t;
 
 static void tsv_init(tsv_buf_t *t) {
@@ -191,10 +192,10 @@ static void tsv_init(tsv_buf_t *t) {
 }
 
 static void tsv_field(tsv_buf_t *t, const char *key, const char *fmt, ...) {
-    int space = sizeof(t->buf) - t->pos;
+    int32_t space = sizeof(t->buf) - t->pos;
     if (space < 10) return;
 
-    int n = snprintf(t->buf + t->pos, space, "%s\t", key);
+    int32_t n = snprintf(t->buf + t->pos, space, "%s\t", key);
     t->pos += n;
     space -= n;
     if (space < 2) return;
@@ -212,7 +213,7 @@ static void tsv_field(tsv_buf_t *t, const char *key, const char *fmt, ...) {
 }
 
 // Append a field with metadata (value age source)
-static int tsv_field_meta(tsv_buf_t *t, const char *key, struct aircraft *a,
+static int32_t tsv_field_meta(tsv_buf_t *t, const char *key, struct aircraft *a,
                           const data_validity *v, const char *fmt, ...) {
     const char *src = pa_source_char(v->source);
     if (!src) return 0;
@@ -223,10 +224,10 @@ static int tsv_field_meta(tsv_buf_t *t, const char *key, struct aircraft *a,
     uint64_t age = (messageNow() - v->updated) / 1000;
     if (age > 255) return 0;
 
-    int space = sizeof(t->buf) - t->pos;
+    int32_t space = sizeof(t->buf) - t->pos;
     if (space < 10) return 0;
 
-    int n = snprintf(t->buf + t->pos, space, "%s\t", key);
+    int32_t n = snprintf(t->buf + t->pos, space, "%s\t", key);
     t->pos += n;
     space -= n;
 
@@ -248,7 +249,7 @@ static void tsv_finish(tsv_buf_t *t) {
     if (t->pos > 0 && t->buf[t->pos - 1] == '\t') {
         t->buf[t->pos - 1] = '\n';
     } else {
-        if (t->pos < (int)sizeof(t->buf) - 1)
+        if (t->pos < (int32_t)sizeof(t->buf) - 1)
             t->buf[t->pos++] = '\n';
     }
     t->buf[t->pos] = 0;
@@ -258,7 +259,7 @@ static void tsv_finish(tsv_buf_t *t) {
 // TLS Connection
 // ============================================================================
 
-static int paInitSSL(void) {
+static int32_t paInitSSL(void) {
     SSL_library_init();
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
@@ -305,7 +306,7 @@ static void paConnect(void) {
         return;
     }
 
-    int fd = -1;
+    int32_t fd = -1;
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
@@ -315,7 +316,7 @@ static void paConnect(void) {
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
         // Enable TCP keepalive
-        int yes = 1;
+        int32_t yes = 1;
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
 
         err = connect(fd, rp->ai_addr, rp->ai_addrlen);
@@ -341,7 +342,7 @@ static void paConnect(void) {
 
 static void paCheckConnect(void) {
     // Check if async connect completed
-    int err = 0;
+    int32_t err = 0;
     socklen_t len = sizeof(err);
     if (getsockopt(PiawareClient.fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
         // Check if still in progress
@@ -391,7 +392,7 @@ static void paTLSHandshake(void) {
         }
         X509_free(cert);
 
-        long verify = SSL_get_verify_result((SSL *)PiawareClient.ssl);
+        int64_t verify = SSL_get_verify_result((SSL *)PiawareClient.ssl);
         if (verify != X509_V_OK) {
             fprintf(stderr, "PiAware: certificate verification failed: %s\n",
                     X509_verify_cert_error_string(verify));
@@ -409,14 +410,14 @@ static void paTLSHandshake(void) {
         return;
     }
 
-    int err = SSL_get_error((SSL *)PiawareClient.ssl, ret);
+    int32_t err = SSL_get_error((SSL *)PiawareClient.ssl, ret);
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
         // Handshake in progress, try again later
         return;
     }
 
     // Handshake failed
-    unsigned long e = ERR_get_error();
+    uint64_t e = ERR_get_error();
     char errbuf[256];
     ERR_error_string_n(e, errbuf, sizeof(errbuf));
     fprintf(stderr, "PiAware: TLS handshake failed: %s\n", errbuf);
@@ -454,18 +455,18 @@ static void paDisconnect(const char *reason) {
 
 // Extract a field value from a TSV line (key\tval\tkey\tval\t...) without
 // modifying the input string. Returns 1 if found, 0 if not.
-static int pa_tsv_get(const char *line, const char *key, char *buf, int buflen) {
-    int keylen = strlen(key);
+static int32_t pa_tsv_get(const char *line, const char *key, char *buf, int32_t buflen) {
+    int32_t keylen = strlen(key);
     const char *scan = line;
     while (scan && *scan) {
         const char *k = scan;
         const char *tab1 = strchr(k, '\t');
         if (!tab1) break;
-        int klen = (int)(tab1 - k);
+        int32_t klen = (int32_t)(tab1 - k);
 
         const char *v = tab1 + 1;
         const char *tab2 = strchr(v, '\t');
-        int vlen = tab2 ? (int)(tab2 - v) : (int)strlen(v);
+        int32_t vlen = tab2 ? (int32_t)(tab2 - v) : (int32_t)strlen(v);
 
         if (klen == keylen && memcmp(k, key, keylen) == 0) {
             if (vlen >= buflen) vlen = buflen - 1;
@@ -480,13 +481,13 @@ static int pa_tsv_get(const char *line, const char *key, char *buf, int buflen) 
     return 0;
 }
 
-static int paSend(const char *data, int len) {
+static int32_t paSend(const char *data, int32_t len) {
     if (PiawareClient.state < PA_AWAITING_LOGIN || !PiawareClient.ssl)
         return -1;
 
     int written = SSL_write((SSL *)PiawareClient.ssl, data, len);
     if (written <= 0) {
-        int err = SSL_get_error((SSL *)PiawareClient.ssl, written);
+        int32_t err = SSL_get_error((SSL *)PiawareClient.ssl, written);
         if (err == SSL_ERROR_WANT_WRITE)
             return 0;  // retry later
         paDisconnect("write error");
@@ -607,13 +608,13 @@ static void paHandleLoginResponse(const char *line) {
 
 static void paHandleAlive(const char *line) {
     char interval_str[32];
-    int interval = 300;
+    int32_t interval = 300;
 
     if (pa_tsv_get(line, "interval", interval_str, sizeof(interval_str)))
         interval = atoi(interval_str);
 
     // Reset alive timeout (1.2x interval)
-    int timeout_ms = (int)(interval * 1200);
+    int32_t timeout_ms = (int32_t)(interval * 1200);
     if (timeout_ms < PA_ALIVE_TIMEOUT_MS)
         timeout_ms = PA_ALIVE_TIMEOUT_MS;
     PiawareClient.alive_deadline = mstime() + timeout_ms;
@@ -638,13 +639,13 @@ static void paHandleMlatEnable(const char *line) {
     // Parse space-separated "host port key"
     char host[128], portstr[16], keystr[64];
     keystr[0] = 0;
-    int fields = sscanf(transport, "%127s %15s %63s", host, portstr, keystr);
+    int32_t fields = sscanf(transport, "%127s %15s %63s", host, portstr, keystr);
     if (fields < 2) {
         fprintf(stderr, "PiAware: mlat_enable: invalid udp_transport format: %s\n", transport);
         return;
     }
 
-    int port = atoi(portstr);
+    int32_t port = atoi(portstr);
     uint32_t key = keystr[0] ? (uint32_t)strtoul(keystr, NULL, 10) : 0;
 
     fprintf(stderr, "PiAware: MLAT enabled (udp %s:%d key=%u)\n", host, port, key);
@@ -745,7 +746,7 @@ static void paHandleInput(void) {
     if (!PiawareClient.ssl) return;
 
     // Read available data
-    int space = sizeof(PiawareClient.inbuf) - PiawareClient.inbuf_len - 1;
+    int32_t space = sizeof(PiawareClient.inbuf) - PiawareClient.inbuf_len - 1;
     if (space <= 0) {
         // Buffer overflow, discard
         PiawareClient.inbuf_len = 0;
@@ -770,13 +771,13 @@ static void paHandleInput(void) {
         }
 
         // Move remaining data to start of buffer
-        int remaining = PiawareClient.inbuf_len - (start - PiawareClient.inbuf);
+        int32_t remaining = PiawareClient.inbuf_len - (start - PiawareClient.inbuf);
         if (remaining > 0 && start != PiawareClient.inbuf) {
             memmove(PiawareClient.inbuf, start, remaining);
         }
         PiawareClient.inbuf_len = remaining;
     } else {
-        int err = SSL_get_error((SSL *)PiawareClient.ssl, n);
+        int32_t err = SSL_get_error((SSL *)PiawareClient.ssl, n);
         if (err == SSL_ERROR_WANT_READ)
             return;  // no data yet
         if (err == SSL_ERROR_ZERO_RETURN) {
@@ -794,8 +795,8 @@ static void paHandleInput(void) {
 // Parse hex ID list "AABBCC DDEEFF ..." into uint32_t array.
 // IDs starting with '@' are Mode A/C codes.
 static void pa_parse_hexid_list(const char *hexids,
-                                 uint32_t *icao, int *icao_count, int icao_max,
-                                 uint32_t *modeac, int *modeac_count, int modeac_max) {
+                                 uint32_t *icao, int32_t *icao_count, int32_t icao_max,
+                                 uint32_t *modeac, int32_t *modeac_count, int32_t modeac_max) {
     *icao_count = 0;
     *modeac_count = 0;
     if (!hexids || hexids[0] == 0) return;
@@ -825,9 +826,9 @@ static void paHandleMlatWanted(const char *line) {
         return;
 
     uint32_t icao[FA_MLAT_MAX_WANTED];
-    int icao_count = 0;
+    int32_t icao_count = 0;
     uint32_t modeac[FA_MLAT_MAX_MODEAC];
-    int modeac_count = 0;
+    int32_t modeac_count = 0;
 
     pa_parse_hexid_list(hexids, icao, &icao_count, FA_MLAT_MAX_WANTED,
                         modeac, &modeac_count, FA_MLAT_MAX_MODEAC);
@@ -841,9 +842,9 @@ static void paHandleMlatUnwanted(const char *line) {
         return;
 
     uint32_t icao[FA_MLAT_MAX_WANTED];
-    int icao_count = 0;
+    int32_t icao_count = 0;
     uint32_t modeac[FA_MLAT_MAX_MODEAC];
-    int modeac_count = 0;
+    int32_t modeac_count = 0;
 
     pa_parse_hexid_list(hexids, icao, &icao_count, FA_MLAT_MAX_WANTED,
                         modeac, &modeac_count, FA_MLAT_MAX_MODEAC);
@@ -864,7 +865,7 @@ static void paHandleMlatResult(const char *line) {
 
     double lat = 0, lon = 0, alt = 0;
     double nsvel = 0, ewvel = 0, vrate = 0;
-    int anon = 0, modeac_flag = 0;
+    int32_t anon = 0, modeac_flag = 0;
 
     if (pa_tsv_get(line, "lat", lat_str, sizeof(lat_str)))
         lat = atof(lat_str);
@@ -893,8 +894,8 @@ static void paForwardFaMlatStatus(void) {
     while (faMlatPollStatus(line, sizeof(line))) {
         if (PiawareClient.state == PA_LOGGED_IN && line[0] != 0) {
             char sendbuf[FA_MLAT_STATUS_LINE_LEN + 2];
-            int len = snprintf(sendbuf, sizeof(sendbuf), "%s\n", line);
-            if (len > 0 && len < (int)sizeof(sendbuf)) {
+            int32_t len = snprintf(sendbuf, sizeof(sendbuf), "%s\n", line);
+            if (len > 0 && len < (int32_t)sizeof(sendbuf)) {
                 paSend(sendbuf, len);
             }
         }
@@ -927,18 +928,18 @@ static void paSendFATSV(void) {
 
         _messageNow = a->seen;
 
-        int altValid = trackDataValid(&a->altitude_baro_valid);
-        int airgroundValid = trackDataValid(&a->airground_valid) && a->airground_valid.source >= SOURCE_MODE_S_CHECKED;
-        int gsValid = trackDataValid(&a->gs_valid);
-        int squawkValid = trackDataValid(&a->squawk_valid);
-        int callsignValid = trackDataValid(&a->callsign_valid) && strcmp(a->callsign, "        ") != 0;
-        int positionValid = trackDataValid(&a->position_valid);
+        int32_t altValid = trackDataValid(&a->altitude_baro_valid);
+        int32_t airgroundValid = trackDataValid(&a->airground_valid) && a->airground_valid.source >= SOURCE_MODE_S_CHECKED;
+        int32_t gsValid = trackDataValid(&a->gs_valid);
+        int32_t squawkValid = trackDataValid(&a->squawk_valid);
+        int32_t callsignValid = trackDataValid(&a->callsign_valid) && strcmp(a->callsign, "        ") != 0;
+        int32_t positionValid = trackDataValid(&a->position_valid);
 
         if (airgroundValid && a->airground == AG_GROUND && a->altitude_baro_valid.source < SOURCE_MODE_S_CHECKED)
             altValid = 0;
 
         // Change detection (same logic as writeFATSV in net_io.c)
-        int changed =
+        int32_t changed =
             (altValid && abs(a->altitude_baro - a->fatsv_emitted_altitude_baro) >= 50) ||
             (trackDataValid(&a->altitude_geom_valid) && abs(a->altitude_geom - a->fatsv_emitted_altitude_geom) >= 50) ||
             (trackDataValid(&a->baro_rate_valid) && abs(a->baro_rate - a->fatsv_emitted_baro_rate) > 500) ||
@@ -949,11 +950,11 @@ static void paSendFATSV(void) {
             (trackDataValid(&a->mag_heading_valid) && heading_difference(a->mag_heading, a->fatsv_emitted_mag_heading) >= 2) ||
             (trackDataValid(&a->true_heading_valid) && heading_difference(a->true_heading, a->fatsv_emitted_true_heading) >= 2) ||
             (gsValid && fabs(a->gs - a->fatsv_emitted_gs) >= 25) ||
-            (trackDataValid(&a->ias_valid) && abs((int)a->ias - (int)a->fatsv_emitted_ias) >= 25) ||
-            (trackDataValid(&a->tas_valid) && abs((int)a->tas - (int)a->fatsv_emitted_tas) >= 25) ||
+            (trackDataValid(&a->ias_valid) && abs((int32_t)a->ias - (int32_t)a->fatsv_emitted_ias) >= 25) ||
+            (trackDataValid(&a->tas_valid) && abs((int32_t)a->tas - (int32_t)a->fatsv_emitted_tas) >= 25) ||
             (trackDataValid(&a->mach_valid) && fabs(a->mach - a->fatsv_emitted_mach) >= 0.02);
 
-        int immediate =
+        int32_t immediate =
             (trackDataValid(&a->nav_altitude_mcp_valid) && abs(a->nav_altitude_mcp - a->fatsv_emitted_nav_altitude_mcp) > 50) ||
             (trackDataValid(&a->nav_altitude_fms_valid) && abs(a->nav_altitude_fms - a->fatsv_emitted_nav_altitude_fms) > 50) ||
             (trackDataValid(&a->nav_altitude_src_valid) && a->nav_altitude_src != a->fatsv_emitted_nav_altitude_src) ||
@@ -993,7 +994,7 @@ static void paSendFATSV(void) {
         tsv_field(&tsv, (a->addr & MODES_NON_ICAO_ADDRESS) ? "otherid" : "hexid",
                   "%06X", a->addr & 0xFFFFFF);
 
-        int forceEmit = (now - a->fatsv_last_force_emit) > 600000;
+        int32_t forceEmit = (now - a->fatsv_last_force_emit) > 600000;
 
         if (forceEmit || a->addrtype != a->fatsv_emitted_addrtype)
             tsv_field(&tsv, "addrtype", "%s", pa_addrtype_str(a->addrtype));
@@ -1014,7 +1015,7 @@ static void paSendFATSV(void) {
             tsv_field_meta(&tsv, "nic_baro", a, &a->nic_baro_valid, "%u", (uint32_t)a->nic_baro);
 
         // Data fields
-        int hadData = tsv.pos;
+        int32_t hadData = tsv.pos;
 
         if (airgroundValid)
             tsv_field_meta(&tsv, "airGround", a, &a->airground_valid, "%s", pa_airground_str(a->airground));
@@ -1117,7 +1118,7 @@ static void paSendHealth(void) {
     // CPU temperature
     FILE *f = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
     if (f) {
-        int temp;
+        int32_t temp;
         if (fscanf(f, "%d", &temp) == 1)
             tsv_field(&tsv, "cputemp", "%.1f", temp / 1000.0);
         fclose(f);

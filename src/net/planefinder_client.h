@@ -11,10 +11,10 @@ extern "C" {
 #include <stdint.h>
 
 typedef struct {
-    int     enabled;
+    int32_t     enabled;
     char    sharecode[64];
-    int     upload_interval;
-    int     aircraft_timeout;
+    int32_t     upload_interval;
+    int32_t     aircraft_timeout;
     uint64_t last_upload;
     uint64_t uploads_ok;
     uint64_t uploads_failed;

@@ -19,6 +19,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_soapy.h"
 
 #include <SoapySDR/Version.h>
@@ -37,11 +38,11 @@ static struct {
     double bandwidth;
     bool enable_agc;
 
-    int num_gain_elements;
+    int32_t num_gain_elements;
     char **gain_elements;
 
     SoapySDRRange gain_range;
-    int current_gain_step;
+    int32_t current_gain_step;
 } SOAPY;
 
 // Polyfill some differences between SoapySDR 0.7 and 0.8
@@ -53,7 +54,7 @@ static void polyfill_SoapySDR_free(void *ignored)
 }
 
 static SoapySDRStream *polyfill_SoapySDRDevice_setupStream(SoapySDRDevice *device,
-                                                           const int direction,
+                                                           const int32_t direction,
                                                            const char *format,
                                                            const size_t *channels,
                                                            const size_t numChans,
@@ -105,7 +106,7 @@ void soapyShowHelp()
 
 bool soapyHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j +1  < argc);
 
     if (!strcmp(argv[j], "--channel")) {
@@ -299,7 +300,7 @@ bool soapyOpen(void)
             goto error;
         }
 
-        for (int i = 0; i < SOAPY.num_gain_elements; ++i) {
+        for (int32_t i = 0; i < SOAPY.num_gain_elements; ++i) {
             char *element = SOAPY.gain_elements[i];
             char *sep = strchr(element, ':');
             if (!sep || !sep[1]) {
@@ -323,7 +324,7 @@ bool soapyOpen(void)
         }
     }
 
-    SOAPY.current_gain_step = (int) round( (SoapySDRDevice_getGain(SOAPY.dev, SOAPY_SDR_RX, SOAPY.channel) - SOAPY.gain_range.minimum) / SOAPY.gain_range.step );
+    SOAPY.current_gain_step = (int32_t) round( (SoapySDRDevice_getGain(SOAPY.dev, SOAPY_SDR_RX, SOAPY.channel) - SOAPY.gain_range.minimum) / SOAPY.gain_range.step );
     if (Modes.adaptive_range_target == 0)
         Modes.adaptive_range_target = (SOAPY.gain_range.maximum - SOAPY.gain_range.minimum) * 0.6; // just a wild guess
 
@@ -434,16 +435,16 @@ void soapyRun()
     }
 
     uint8_t* buf;
-    const int buffer_elements = MODES_MAG_BUF_SAMPLES; // 131072
+    const int32_t buffer_elements = MODES_MAG_BUF_SAMPLES; // 131072
     buf = malloc(buffer_elements * 4);
 
     uint32_t dropped = 0;
     uint64_t sampleCounter = 0;
 
     while (!Modes.exit) {
-        int flags;
-        long long timeNs;
-        int samples_read = SoapySDRDevice_readStream(SOAPY.dev, SOAPY.stream, (void *) &buf, buffer_elements, &flags, &timeNs, 5000000);
+        int32_t flags;
+        int64_t timeNs;
+        int32_t samples_read = SoapySDRDevice_readStream(SOAPY.dev, SOAPY.stream, (void *) &buf, buffer_elements, &flags, &timeNs, 5000000);
         if (samples_read <= 0) {
             fprintf(stderr, "soapy: readStream failed: %s\n", SoapySDRDevice_lastError());
             return;
@@ -512,7 +513,7 @@ void soapyClose()
         SOAPY.converter_state = NULL;
     }
 
-    for (int i = 0; i < SOAPY.num_gain_elements; ++i) {
+    for (int32_t i = 0; i < SOAPY.num_gain_elements; ++i) {
         free(SOAPY.gain_elements[i]);
     }
     free(SOAPY.gain_elements);
@@ -531,15 +532,15 @@ void soapyClose()
 //   adaptive wants to increase gain further, set gain = current + 1 = 5
 //   we make no progress
 
-int soapyGetGain() {
+int32_t soapyGetGain() {
     return SOAPY.current_gain_step;
 }
 
-int soapyGetMaxGain() {
-    return (int) ceil( (SOAPY.gain_range.maximum - SOAPY.gain_range.minimum) / SOAPY.gain_range.step );
+int32_t soapyGetMaxGain() {
+    return (int32_t) ceil( (SOAPY.gain_range.maximum - SOAPY.gain_range.minimum) / SOAPY.gain_range.step );
 }
 
-double soapyGetGainDb(int step) {
+double soapyGetGainDb(int32_t step) {
     double gain = SOAPY.gain_range.minimum + step * SOAPY.gain_range.step;
     if (gain < SOAPY.gain_range.minimum)
         gain = SOAPY.gain_range.minimum;
@@ -548,7 +549,7 @@ double soapyGetGainDb(int step) {
     return gain;
 }
 
-int soapySetGain(int step) {
+int32_t soapySetGain(int32_t step) {
     double gainDb = soapyGetGainDb(step);
 
     if (SoapySDRDevice_setGain(SOAPY.dev, SOAPY_SDR_RX, SOAPY.channel, gainDb) != 0) {

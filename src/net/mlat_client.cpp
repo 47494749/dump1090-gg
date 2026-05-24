@@ -12,6 +12,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "dump1090.h"
+#include <cstdint>
+#include <cinttypes>
 #include "mlat_client.h"
 #include "feeder_thread.h"
 #include "crc.h"
@@ -41,9 +43,9 @@ static void mlat_server_disconnect(struct mlat_server *s, const char *reason);
 static void mlat_server_send_handshake(struct mlat_server *s);
 static void mlat_server_try_read(struct mlat_server *s);
 static void mlat_server_try_write(struct mlat_server *s);
-static void mlat_server_process_line(struct mlat_server *s, const char *line, int len);
-static void mlat_server_handle_handshake(struct mlat_server *s, const char *line, int len);
-static void mlat_server_handle_request(struct mlat_server *s, const char *line, int len);
+static void mlat_server_process_line(struct mlat_server *s, const char *line, int32_t len);
+static void mlat_server_handle_handshake(struct mlat_server *s, const char *line, int32_t len);
+static void mlat_server_handle_request(struct mlat_server *s, const char *line, int32_t len);
 static void mlat_server_heartbeat(struct mlat_server *s);
 static void mlat_server_update_aircraft(struct mlat_server *s);
 
@@ -57,37 +59,37 @@ static void mlat_send_split_sync(struct mlat_server *s, struct modesMessage *mm)
 static void mlat_send_seen(struct mlat_server *s);
 static void mlat_send_rate_report(struct mlat_server *s, uint64_t now);
 
-static void mlat_inject_result(const char *line, int len);
-static void mlat_build_position_frame(uint8_t *frame, uint32_t addr, int elat, int elon, int ealt, int oddflag);
+static void mlat_inject_result(const char *line, int32_t len);
+static void mlat_build_position_frame(uint8_t *frame, uint32_t addr, int32_t elat, int32_t elon, int32_t ealt, int32_t oddflag);
 static void mlat_build_velocity_frame(uint8_t *frame, uint32_t addr, double nsvel, double ewvel, double vrate);
-static void mlat_inject_beast_message(const uint8_t *frame, int len);
+static void mlat_inject_beast_message(const uint8_t *frame, int32_t len);
 
 // CPR encoding for synthetic frames
-static int cpr_NL(double lat);
-static void cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon);
-static int encode_altitude(double ft);
+static int32_t cpr_NL(double lat);
+static void cpr_encode(double lat, double lon, int32_t odd, int32_t *rlat, int32_t *rlon);
+static int32_t encode_altitude(double ft);
 
 // Simple JSON helpers (no external library needed)
-static int json_find_key(const char *json, int len, const char *key, const char **val_start, int *val_len);
-static int json_find_string(const char *json, int len, const char *key, char *out, int outsize);
-static int json_find_double_array(const char *json, int len, const char *key, double *out, int maxcount);
-static double json_find_number(const char *json, int len, const char *key, double defval);
-static int json_find_bool(const char *json, int len, const char *key, int defval);
-static int json_find_string_array(const char *json, int len, const char *key, uint32_t *icao_out, int maxcount);
+static int32_t json_find_key(const char *json, int32_t len, const char *key, const char **val_start, int32_t *val_len);
+static int32_t json_find_string(const char *json, int32_t len, const char *key, char *out, int32_t outsize);
+static int32_t json_find_double_array(const char *json, int32_t len, const char *key, double *out, int32_t maxcount);
+static double json_find_number(const char *json, int32_t len, const char *key, double defval);
+static int32_t json_find_bool(const char *json, int32_t len, const char *key, int32_t defval);
+static int32_t json_find_string_array(const char *json, int32_t len, const char *key, uint32_t *icao_out, int32_t maxcount);
 
 // Buffer helpers
-static int mlat_buf_append(struct mlat_server *s, const char *data, int len);
-static int mlat_buf_printf(struct mlat_server *s, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static int32_t mlat_buf_append(struct mlat_server *s, const char *data, int32_t len);
+static int32_t mlat_buf_printf(struct mlat_server *s, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 // ECEF to LLH conversion
 static void ecef_to_llh(double x, double y, double z, double *lat, double *lon, double *alt);
 
 // ============================= Backoff helpers ============================
 
-static uint64_t mlat_reconnect_delay_ms(int reconnect_count) {
+static uint64_t mlat_reconnect_delay_ms(int32_t reconnect_count) {
     uint64_t delay = MLAT_RECONNECT_INITIAL_MS;
     if (reconnect_count <= 1) return delay;
-    for (int i = 1; i < reconnect_count; i++) {
+    for (int32_t i = 1; i < reconnect_count; i++) {
         if (delay >= MLAT_RECONNECT_MAX_MS / 2) { delay = MLAT_RECONNECT_MAX_MS; break; }
         delay *= 2;
     }
@@ -96,11 +98,11 @@ static uint64_t mlat_reconnect_delay_ms(int reconnect_count) {
 
 static void mlat_format_delay(uint64_t delay_ms, char *buf, size_t buf_len) {
     if (delay_ms >= 60ULL * 60ULL * 1000ULL && delay_ms % (60ULL * 60ULL * 1000ULL) == 0)
-        snprintf(buf, buf_len, "%lluh", (unsigned long long)(delay_ms / (60ULL * 60ULL * 1000ULL)));
+        snprintf(buf, buf_len, "%" PRIu64 "h", (uint64_t)(delay_ms / (60ULL * 60ULL * 1000ULL)));
     else if (delay_ms >= 60ULL * 1000ULL && delay_ms % (60ULL * 1000ULL) == 0)
-        snprintf(buf, buf_len, "%llum", (unsigned long long)(delay_ms / (60ULL * 1000ULL)));
+        snprintf(buf, buf_len, "%" PRIu64 "m", (uint64_t)(delay_ms / (60ULL * 1000ULL)));
     else
-        snprintf(buf, buf_len, "%llus", (unsigned long long)(delay_ms / 1000ULL));
+        snprintf(buf, buf_len, "%" PRIu64 "s", (uint64_t)(delay_ms / 1000ULL));
 }
 
 static void mlat_reset_backoff(struct mlat_server *s) {
@@ -165,7 +167,7 @@ void mlatClientInit(void)
     }
 
     // Initialize server connections
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    for (int32_t i = 0; i < MlatConfig.server_count; i++) {
         struct mlat_server *s = &MlatConfig.servers[i];
         s->fd = -1;
         s->state = MLAT_DISCONNECTED;
@@ -188,9 +190,9 @@ void mlatClientInit(void)
         { NULL, NULL }
     };
 
-    for (int p = 0; mlat_peers[p].a; p++) {
-        int idx_a = -1, idx_b = -1;
-        for (int i = 0; i < MlatConfig.server_count; i++) {
+    for (int32_t p = 0; mlat_peers[p].a; p++) {
+        int32_t idx_a = -1, idx_b = -1;
+        for (int32_t i = 0; i < MlatConfig.server_count; i++) {
             if (MlatConfig.servers[i].host) {
                 if (strstr(MlatConfig.servers[i].host, mlat_peers[p].a)) idx_a = i;
                 if (strstr(MlatConfig.servers[i].host, mlat_peers[p].b)) idx_b = i;
@@ -216,7 +218,7 @@ void mlatClientInit(void)
     }
 }
 
-int mlatClientAddServer(const char *hostport)
+int32_t mlatClientAddServer(const char *hostport)
 {
     if (MlatConfig.server_count >= MAX_MLAT_SERVERS)
         return -1;
@@ -253,7 +255,7 @@ int mlatClientAddServer(const char *hostport)
 
 void mlatClientCleanup(void)
 {
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    for (int32_t i = 0; i < MlatConfig.server_count; i++) {
         mlat_server_disconnect(&MlatConfig.servers[i], "shutdown");
         free(MlatConfig.servers[i].host);
     }
@@ -264,7 +266,7 @@ void mlatClientCleanup(void)
 
 void mlatClientDisconnectAll(const char *reason)
 {
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    for (int32_t i = 0; i < MlatConfig.server_count; i++) {
         if (MlatConfig.servers[i].state != MLAT_DISCONNECTED)
             mlat_server_disconnect(&MlatConfig.servers[i], reason);
     }
@@ -276,7 +278,7 @@ void mlatClientPeriodicWork(void)
 {
     uint64_t now = mstime();
 
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    for (int32_t i = 0; i < MlatConfig.server_count; i++) {
         struct mlat_server *s = &MlatConfig.servers[i];
 
         if (s->disabled_by_backoff) continue;
@@ -300,7 +302,7 @@ void mlatClientPeriodicWork(void)
 
         case MLAT_CONNECTING: {
             // Check if non-blocking connect completed
-            int err = 0;
+            int32_t err = 0;
             socklen_t errlen = sizeof(err);
             if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0 || err != 0) {
                 if (err == EINPROGRESS || err == EALREADY) {
@@ -375,7 +377,7 @@ static void mlat_server_connect(struct mlat_server *s)
         return;
     }
 
-    int fd = -1;
+    int32_t fd = -1;
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
@@ -413,7 +415,7 @@ static void mlat_server_connect(struct mlat_server *s)
     s->split_sync = false;
 
     // Check if connect already completed (local connections)
-    int err = 0;
+    int32_t err = 0;
     socklen_t errlen = sizeof(err);
     getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
     if (err == 0) {
@@ -461,7 +463,7 @@ static void mlat_server_disconnect(struct mlat_server *s, const char *reason)
 
     // Clear requested flags for this server
     uint32_t mask = ~(1U << s->index);
-    for (int i = 0; i < MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < MLAT_HASH_SIZE; i++) {
         MlatConfig.aircraft[i].requested &= mask;
         MlatConfig.aircraft[i].reported &= mask;
     }
@@ -504,7 +506,7 @@ static void mlat_server_send_handshake(struct mlat_server *s)
     hs.append(128, ' ');
     hs += '\n';
 
-    mlat_buf_append(s, hs.data(), (int)hs.size());
+    mlat_buf_append(s, hs.data(), (int32_t)hs.size());
     mlat_server_try_write(s);
 }
 
@@ -514,7 +516,7 @@ static void mlat_server_try_read(struct mlat_server *s)
 {
     if (s->fd < 0) return;
 
-    int space = MLAT_READ_BUF_SIZE - s->readbuf_len - 1;
+    int32_t space = MLAT_READ_BUF_SIZE - s->readbuf_len - 1;
     if (space <= 0) {
         mlat_server_disconnect(s, "read buffer overflow");
         return;
@@ -542,7 +544,7 @@ static void mlat_server_try_read(struct mlat_server *s)
     char *start = s->readbuf;
     char *nl;
     while ((nl = (char*)memchr(start, '\n', s->readbuf_len - (start - s->readbuf))) != NULL) {
-        int linelen = nl - start;
+        int32_t linelen = nl - start;
         if (linelen > 0) {
             mlat_server_process_line(s, start, linelen);
             if (s->state == MLAT_DISCONNECTED) return;
@@ -551,7 +553,7 @@ static void mlat_server_try_read(struct mlat_server *s)
     }
 
     // Move remaining data to front of buffer
-    int remaining = s->readbuf_len - (start - s->readbuf);
+    int32_t remaining = s->readbuf_len - (start - s->readbuf);
     if (remaining > 0 && start != s->readbuf) {
         memmove(s->readbuf, start, remaining);
     }
@@ -578,7 +580,7 @@ static void mlat_server_try_write(struct mlat_server *s)
     }
 }
 
-static void mlat_server_process_line(struct mlat_server *s, const char *line, int len)
+static void mlat_server_process_line(struct mlat_server *s, const char *line, int32_t len)
 {
     if (s->state == MLAT_HANDSHAKING) {
         mlat_server_handle_handshake(s, line, len);
@@ -589,11 +591,11 @@ static void mlat_server_process_line(struct mlat_server *s, const char *line, in
 
 // ============================= Server Messages ===========================
 
-static void mlat_server_handle_handshake(struct mlat_server *s, const char *line, int len)
+static void mlat_server_handle_handshake(struct mlat_server *s, const char *line, int32_t len)
 {
     // Check for denial
     const char *val;
-    int vlen;
+    int32_t vlen;
     if (json_find_key(line, len, "deny", &val, &vlen)) {
         fprintf(stderr, "MLAT[%s:%d]: server rejected connection\n", s->host, s->port);
         mlat_server_disconnect(s, "server denied connection");
@@ -620,7 +622,7 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
         std::string clean;
         clean.reserve(256);
         bool had_space = true;
-        for (int mi = 0; motd_raw[mi]; mi++) {
+        for (int32_t mi = 0; motd_raw[mi]; mi++) {
             char ch = motd_raw[mi];
             if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
             if (ch == ' ') {
@@ -657,17 +659,17 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
     mlat_buf_printf(s, "{\"rate_report\":{}}\n");
 }
 
-static void mlat_server_handle_request(struct mlat_server *s, const char *line, int len)
+static void mlat_server_handle_request(struct mlat_server *s, const char *line, int32_t len)
 {
     const char *val;
-    int vlen;
+    int32_t vlen;
     uint32_t mask = 1U << s->index;
 
     if (json_find_key(line, len, "start_sending", &val, &vlen)) {
         // Parse array of hex ICAO addresses
         uint32_t icaos[512];
-        int count = json_find_string_array(line, len, "start_sending", icaos, 512);
-        for (int i = 0; i < count; i++) {
+        int32_t count = json_find_string_array(line, len, "start_sending", icaos, 512);
+        for (int32_t i = 0; i < count; i++) {
             struct mlat_aircraft *ac = mlat_get_aircraft(icaos[i]);
             if (ac) {
                 ac->requested |= mask;
@@ -676,9 +678,9 @@ static void mlat_server_handle_request(struct mlat_server *s, const char *line, 
     }
     else if (json_find_key(line, len, "stop_sending", &val, &vlen)) {
         uint32_t icaos[512];
-        int count = json_find_string_array(line, len, "stop_sending", icaos, 512);
+        int32_t count = json_find_string_array(line, len, "stop_sending", icaos, 512);
         uint32_t imask = ~mask;
-        for (int i = 0; i < count; i++) {
+        for (int32_t i = 0; i < count; i++) {
             struct mlat_aircraft *ac = mlat_find_aircraft(icaos[i]);
             if (ac) {
                 ac->requested &= imask;
@@ -712,7 +714,7 @@ static struct mlat_aircraft *mlat_find_aircraft(uint32_t addr)
 {
     if (addr == 0) return NULL;
     uint32_t hash = addr & MLAT_HASH_MASK;
-    for (int i = 0; i < 16; i++) {  // linear probing, max 16 steps
+    for (int32_t i = 0; i < 16; i++) {  // linear probing, max 16 steps
         uint32_t idx = (hash + i) & MLAT_HASH_MASK;
         if (MlatConfig.aircraft[idx].addr == addr)
             return &MlatConfig.aircraft[idx];
@@ -728,7 +730,7 @@ static struct mlat_aircraft *mlat_get_aircraft(uint32_t addr)
     uint32_t hash = addr & MLAT_HASH_MASK;
     struct mlat_aircraft *empty = NULL;
 
-    for (int i = 0; i < 16; i++) {
+    for (int32_t i = 0; i < 16; i++) {
         uint32_t idx = (hash + i) & MLAT_HASH_MASK;
         if (MlatConfig.aircraft[idx].addr == addr)
             return &MlatConfig.aircraft[idx];
@@ -749,7 +751,7 @@ static struct mlat_aircraft *mlat_get_aircraft(uint32_t addr)
 
 static void mlat_expire_aircraft(uint64_t now)
 {
-    for (int i = 0; i < MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < MLAT_HASH_SIZE; i++) {
         struct mlat_aircraft *ac = &MlatConfig.aircraft[i];
         if (ac->addr == 0) continue;
         if ((now - ac->last_message) > MLAT_AIRCRAFT_EXPIRY) {
@@ -813,9 +815,9 @@ static void mlat_send_seen(struct mlat_server *s)
 
     // Build seen list (aircraft we see that server doesn't know about)
     std::string seen_list;
-    int seen_count = 0;
+    int32_t seen_count = 0;
 
-    for (int i = 0; i < MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < MLAT_HASH_SIZE; i++) {
         struct mlat_aircraft *ac = &MlatConfig.aircraft[i];
         if (ac->addr == 0) continue;
         if (ac->messages < 2) continue;
@@ -835,16 +837,16 @@ static void mlat_send_seen(struct mlat_server *s)
 
     if (seen_count > 0) {
         std::string msg = "{\"seen\":[" + seen_list + "]}\n";
-        mlat_buf_append(s, msg.data(), (int)msg.size());
+        mlat_buf_append(s, msg.data(), (int32_t)msg.size());
     }
 }
 
 static void mlat_send_rate_report(struct mlat_server *s, uint64_t now)
 {
     std::string rate_list;
-    int count = 0;
+    int32_t count = 0;
 
-    for (int i = 0; i < MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < MLAT_HASH_SIZE; i++) {
         struct mlat_aircraft *ac = &MlatConfig.aircraft[i];
         if (ac->addr == 0) continue;
         if (ac->recent_adsb_positions == 0) continue;
@@ -865,7 +867,7 @@ static void mlat_send_rate_report(struct mlat_server *s, uint64_t now)
 
     if (count > 0) {
         std::string msg = "{\"rate_report\":{" + rate_list + "}}\n";
-        mlat_buf_append(s, msg.data(), (int)msg.size());
+        mlat_buf_append(s, msg.data(), (int32_t)msg.size());
     }
 }
 
@@ -924,7 +926,7 @@ void mlatClientProcessMessage(struct modesMessage *mm)
                     ts_diff = ac->odd_timestamp - ac->even_timestamp;
 
                 if (ts_diff < (uint64_t)5 * 12000000) {
-                    for (int i = 0; i < MlatConfig.server_count; i++) {
+                    for (int32_t i = 0; i < MlatConfig.server_count; i++) {
                         struct mlat_server *s = &MlatConfig.servers[i];
                         if (s->state != MLAT_READY) continue;
 
@@ -954,7 +956,7 @@ void mlatClientProcessMessage(struct modesMessage *mm)
     if (ac->adsb_good) return;
 
     // Send to each server that has requested this aircraft
-    for (int i = 0; i < MlatConfig.server_count; i++) {
+    for (int32_t i = 0; i < MlatConfig.server_count; i++) {
         struct mlat_server *s = &MlatConfig.servers[i];
         if (s->state != MLAT_READY) continue;
         if (!(ac->requested & (1U << i))) continue;
@@ -969,10 +971,10 @@ static void mlat_send_mlat_message(struct mlat_server *s, struct modesMessage *m
 {
     // Format hex message
     static const char hexchars[] = "0123456789abcdef";
-    int msgbytes = (mm->msgbits + 7) / 8;
+    int32_t msgbytes = (mm->msgbits + 7) / 8;
     std::string hexmsg;
     hexmsg.reserve(msgbytes * 2);
-    for (int i = 0; i < msgbytes; i++) {
+    for (int32_t i = 0; i < msgbytes; i++) {
         hexmsg += hexchars[mm->verbatim[i] >> 4];
         hexmsg += hexchars[mm->verbatim[i] & 0x0f];
     }
@@ -984,17 +986,17 @@ static void mlat_send_mlat_message(struct mlat_server *s, struct modesMessage *m
 static void mlat_send_sync(struct mlat_server *s, struct mlat_aircraft *ac)
 {
     static const char hexchars[] = "0123456789abcdef";
-    int even_bytes = (ac->even_msgbits + 7) / 8;
-    int odd_bytes = (ac->odd_msgbits + 7) / 8;
+    int32_t even_bytes = (ac->even_msgbits + 7) / 8;
+    int32_t odd_bytes = (ac->odd_msgbits + 7) / 8;
 
     std::string even_hex, odd_hex;
     even_hex.reserve(even_bytes * 2);
     odd_hex.reserve(odd_bytes * 2);
-    for (int i = 0; i < even_bytes; i++) {
+    for (int32_t i = 0; i < even_bytes; i++) {
         even_hex += hexchars[ac->even_msg[i] >> 4];
         even_hex += hexchars[ac->even_msg[i] & 0x0f];
     }
-    for (int i = 0; i < odd_bytes; i++) {
+    for (int32_t i = 0; i < odd_bytes; i++) {
         odd_hex += hexchars[ac->odd_msg[i] >> 4];
         odd_hex += hexchars[ac->odd_msg[i] & 0x0f];
     }
@@ -1007,10 +1009,10 @@ static void mlat_send_sync(struct mlat_server *s, struct mlat_aircraft *ac)
 static void mlat_send_split_sync(struct mlat_server *s, struct modesMessage *mm)
 {
     static const char hexchars[] = "0123456789abcdef";
-    int msgbytes = (mm->msgbits + 7) / 8;
+    int32_t msgbytes = (mm->msgbits + 7) / 8;
     std::string hexmsg;
     hexmsg.reserve(msgbytes * 2);
-    for (int i = 0; i < msgbytes; i++) {
+    for (int32_t i = 0; i < msgbytes; i++) {
         hexmsg += hexchars[mm->verbatim[i] >> 4];
         hexmsg += hexchars[mm->verbatim[i] & 0x0f];
     }
@@ -1049,10 +1051,10 @@ static void ecef_to_llh(double x, double y, double z, double *lat, double *lon, 
         *alt = p / cos(lat_rad) - N;
 }
 
-static void mlat_inject_result(const char *line, int len)
+static void mlat_inject_result(const char *line, int32_t len)
 {
     const char *result_start;
-    int result_len;
+    int32_t result_len;
 
     if (!json_find_key(line, len, "result", &result_start, &result_len))
         return;
@@ -1067,7 +1069,7 @@ static void mlat_inject_result(const char *line, int len)
     // Try ECEF format first (preferred)
     double ecef[3] = {0};
     double lat, lon, alt_m;
-    int got_position = 0;
+    int32_t got_position = 0;
 
     if (json_find_double_array(result_start, result_len, "ecef", ecef, 3) == 3) {
         ecef_to_llh(ecef[0], ecef[1], ecef[2], &lat, &lon, &alt_m);
@@ -1093,8 +1095,8 @@ static void mlat_inject_result(const char *line, int len)
     double vrate = json_find_number(result_start, result_len, "vrate", 0);
 
     // Generate synthetic DF18 position frames (even + odd)
-    int ealt = encode_altitude(alt_ft);
-    int elat_even, elon_even, elat_odd, elon_odd;
+    int32_t ealt = encode_altitude(alt_ft);
+    int32_t elat_even, elon_even, elat_odd, elon_odd;
     cpr_encode(lat, lon, 0, &elat_even, &elon_even);
     cpr_encode(lat, lon, 1, &elat_odd, &elon_odd);
 
@@ -1117,7 +1119,7 @@ static void mlat_inject_result(const char *line, int len)
 // Build a synthetic DF18 airborne position frame
 // metype=18: airborne position, baro alt, NUCp=0
 static void mlat_build_position_frame(uint8_t *frame, uint32_t addr,
-                                       int elat, int elon, int ealt, int oddflag)
+                                       int32_t elat, int32_t elon, int32_t ealt, int32_t oddflag)
 {
     memset(frame, 0, 14);
 
@@ -1151,24 +1153,24 @@ static void mlat_build_velocity_frame(uint8_t *frame, uint32_t addr,
 {
     memset(frame, 0, 14);
 
-    int supersonic = (fabs(nsvel) > 1000 || fabs(ewvel) > 1000);
+    int32_t supersonic = (fabs(nsvel) > 1000 || fabs(ewvel) > 1000);
 
     // Encode velocities
-    int e_ew = 0, e_ns = 0, e_vr = 0;
+    int32_t e_ew = 0, e_ns = 0, e_vr = 0;
 
     // E/W velocity
     if (ewvel < 0) { e_ew = 0x400; ewvel = -ewvel; }
     if (supersonic) ewvel /= 4;
-    e_ew |= ((int)(ewvel + 1.5)) & 0x3FF;
+    e_ew |= ((int32_t)(ewvel + 1.5)) & 0x3FF;
 
     // N/S velocity
     if (nsvel < 0) { e_ns = 0x400; nsvel = -nsvel; }
     if (supersonic) nsvel /= 4;
-    e_ns |= ((int)(nsvel + 1.5)) & 0x3FF;
+    e_ns |= ((int32_t)(nsvel + 1.5)) & 0x3FF;
 
     // Vertical rate
     if (vrate < 0) { e_vr = 0x200; vrate = -vrate; }
-    e_vr |= ((int)(vrate / 64 + 1.5)) & 0x1FF;
+    e_vr |= ((int32_t)(vrate / 64 + 1.5)) & 0x1FF;
 
     // DF=18, CF=2
     frame[0] = (18 << 3) | 2;
@@ -1196,7 +1198,7 @@ static void mlat_build_velocity_frame(uint8_t *frame, uint32_t addr,
 // with the magic MLAT timestamp.
 // When running in a feeder thread, we queue the message for the main thread
 // to process (useModesMessage is not thread-safe for network output).
-static void mlat_inject_beast_message(const uint8_t *frame, int len)
+static void mlat_inject_beast_message(const uint8_t *frame, int32_t len)
 {
     // Create a modesMessage and decode it
     struct modesMessage mm = {};
@@ -1211,7 +1213,7 @@ static void mlat_inject_beast_message(const uint8_t *frame, int len)
     memcpy(mm.verbatim, frame, len);
 
     // Decode the message (needs mm + separate msg pointer)
-    int result = decodeModesMessage(&mm, frame);
+    int32_t result = decodeModesMessage(&mm, frame);
     if (result < 0)
         return;
 
@@ -1222,7 +1224,7 @@ static void mlat_inject_beast_message(const uint8_t *frame, int len)
 // ============================= CPR Encoding ==============================
 
 // NL table for CPR encoding (latitude → number of longitude zones)
-static const struct { double lat; int nl; } cpr_nl_table[] = {
+static const struct { double lat; int32_t nl; } cpr_nl_table[] = {
     {10.47047130, 59}, {14.82817437, 58}, {18.18626357, 57}, {21.02939493, 56},
     {23.54504487, 55}, {25.82924707, 54}, {27.93898710, 53}, {29.91135686, 52},
     {31.77209708, 51}, {33.53993436, 50}, {35.22899598, 49}, {36.85025108, 48},
@@ -1240,17 +1242,17 @@ static const struct { double lat; int nl; } cpr_nl_table[] = {
     {86.53536998,  3}, {87.00000000,  2}, {90.00000000,  1}
 };
 
-static int cpr_NL(double lat)
+static int32_t cpr_NL(double lat)
 {
     if (lat < 0) lat = -lat;
-    for (int i = 0; i < 59; i++) {
+    for (int32_t i = 0; i < 59; i++) {
         if (lat < cpr_nl_table[i].lat)
             return cpr_nl_table[i].nl;
     }
     return 1;
 }
 
-static void cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon)
+static void cpr_encode(double lat, double lon, int32_t odd, int32_t *rlat, int32_t *rlon)
 {
     double NbPow = 131072.0;  // 2^17
     double Dlat = 360.0 / (odd ? 59 : 60);
@@ -1260,10 +1262,10 @@ static void cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon)
     if (lat_mod < 0) lat_mod += Dlat;
 
     double yz = floor(NbPow * lat_mod / Dlat + 0.5);
-    int YZ = ((int)yz) & 0x1FFFF;
+    int32_t YZ = ((int32_t)yz) & 0x1FFFF;
 
     double Rlat = Dlat * (yz / NbPow + floor(lat / Dlat));
-    int nl = cpr_NL(Rlat) - (odd ? 1 : 0);
+    int32_t nl = cpr_NL(Rlat) - (odd ? 1 : 0);
     if (nl < 1) nl = 1;
     double Dlon = 360.0 / nl;
 
@@ -1271,15 +1273,15 @@ static void cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon)
     if (lon_mod < 0) lon_mod += Dlon;
 
     double xz = floor(NbPow * lon_mod / Dlon + 0.5);
-    int XZ = ((int)xz) & 0x1FFFF;
+    int32_t XZ = ((int32_t)xz) & 0x1FFFF;
 
     *rlat = YZ;
     *rlon = XZ;
 }
 
-static int encode_altitude(double ft)
+static int32_t encode_altitude(double ft)
 {
-    int i = (int)((ft + 1012.5) / 25.0);
+    int32_t i = (int32_t)((ft + 1012.5) / 25.0);
     if (i < 0) i = 0;
     if (i > 0x7FF) i = 0x7FF;
     // Insert Q=1 in bit 4
@@ -1294,9 +1296,9 @@ static int encode_altitude(double ft)
 
 // Find a key in a JSON object. Returns 1 if found, 0 if not.
 // Sets val_start/val_len to point to the value (after the colon).
-static int json_find_key(const char *json, int len, const char *key, const char **val_start, int *val_len)
+static int32_t json_find_key(const char *json, int32_t len, const char *key, const char **val_start, int32_t *val_len)
 {
-    int keylen = strlen(key);
+    int32_t keylen = strlen(key);
     const char *end = json + len;
 
     for (const char *p = json; p < end - keylen - 3; p++) {
@@ -1321,7 +1323,7 @@ static int json_find_key(const char *json, int len, const char *key, const char 
             } else if (*q == '[' || *q == '{') {
                 // Array or object: find matching bracket
                 char open = *q, close = (*q == '[') ? ']' : '}';
-                int depth = 1;
+                int32_t depth = 1;
                 const char *r = q + 1;
                 while (r < end && depth > 0) {
                     if (*r == open) depth++;
@@ -1350,17 +1352,17 @@ static int json_find_key(const char *json, int len, const char *key, const char 
 }
 
 // Extract a string value for a key. Returns 1 if found, 0 if not.
-static int json_find_string(const char *json, int len, const char *key, char *out, int outsize)
+static int32_t json_find_string(const char *json, int32_t len, const char *key, char *out, int32_t outsize)
 {
     const char *val;
-    int vlen;
+    int32_t vlen;
     out[0] = 0;
 
     if (!json_find_key(json, len, key, &val, &vlen)) return 0;
     if (*val != '"') return 0;
 
     // Copy string content (between quotes), with JSON unescape
-    int i = 0;
+    int32_t i = 0;
     const char *p = val + 1;
     const char *end = val + vlen;
     while (p < end && *p != '"' && i < outsize - 1) {
@@ -1384,20 +1386,20 @@ static int json_find_string(const char *json, int len, const char *key, char *ou
 }
 
 // Extract a number value for a key.
-static double json_find_number(const char *json, int len, const char *key, double defval)
+static double json_find_number(const char *json, int32_t len, const char *key, double defval)
 {
     const char *val;
-    int vlen;
+    int32_t vlen;
 
     if (!json_find_key(json, len, key, &val, &vlen)) return defval;
     return atof(val);
 }
 
 // Extract a boolean value for a key.
-static int json_find_bool(const char *json, int len, const char *key, int defval)
+static int32_t json_find_bool(const char *json, int32_t len, const char *key, int32_t defval)
 {
     const char *val;
-    int vlen;
+    int32_t vlen;
 
     if (!json_find_key(json, len, key, &val, &vlen)) return defval;
     if (vlen >= 4 && memcmp(val, "true", 4) == 0) return 1;
@@ -1406,15 +1408,15 @@ static int json_find_bool(const char *json, int len, const char *key, int defval
 }
 
 // Extract an array of doubles.
-static int json_find_double_array(const char *json, int len, const char *key, double *out, int maxcount)
+static int32_t json_find_double_array(const char *json, int32_t len, const char *key, double *out, int32_t maxcount)
 {
     const char *val;
-    int vlen;
+    int32_t vlen;
 
     if (!json_find_key(json, len, key, &val, &vlen)) return 0;
     if (*val != '[') return 0;
 
-    int count = 0;
+    int32_t count = 0;
     const char *p = val + 1;
     const char *end = val + vlen;
 
@@ -1428,15 +1430,15 @@ static int json_find_double_array(const char *json, int len, const char *key, do
 }
 
 // Parse an array of hex string ICAO addresses: ["aabbcc","ddeeff",...]
-static int json_find_string_array(const char *json, int len, const char *key, uint32_t *icao_out, int maxcount)
+static int32_t json_find_string_array(const char *json, int32_t len, const char *key, uint32_t *icao_out, int32_t maxcount)
 {
     const char *val;
-    int vlen;
+    int32_t vlen;
 
     if (!json_find_key(json, len, key, &val, &vlen)) return 0;
     if (*val != '[') return 0;
 
-    int count = 0;
+    int32_t count = 0;
     const char *p = val + 1;
     const char *end = val + vlen;
 
@@ -1465,7 +1467,7 @@ static int json_find_string_array(const char *json, int len, const char *key, ui
 
 // ============================= Buffer Helpers ============================
 
-static int mlat_buf_append(struct mlat_server *s, const char *data, int len)
+static int32_t mlat_buf_append(struct mlat_server *s, const char *data, int32_t len)
 {
     if (s->writebuf_len + len > MLAT_WRITE_BUF_SIZE) {
         fprintf(stderr, "MLAT[%s:%d]: write buffer overflow, dropping data\n", s->host, s->port);
@@ -1476,14 +1478,14 @@ static int mlat_buf_append(struct mlat_server *s, const char *data, int len)
     return 0;
 }
 
-static int mlat_buf_printf(struct mlat_server *s, const char *fmt, ...)
+static int32_t mlat_buf_printf(struct mlat_server *s, const char *fmt, ...)
 {
     char buf[4096];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    int32_t n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
 
-    if (n < 0 || n >= (int)sizeof(buf)) return -1;
+    if (n < 0 || n >= (int32_t)sizeof(buf)) return -1;
     return mlat_buf_append(s, buf, n);
 }

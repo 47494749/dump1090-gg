@@ -49,7 +49,7 @@ typedef struct {
     void           *ogntp_callback_ctx; // User context for OGNTP callback
     p3i_packet_cb   p3i_callback;       // P3I (PilotAware) packet callback
     void           *p3i_callback_ctx;   // User context for P3I callback
-    int             p3i_enabled;        // Enable P3I channel (requires wider SDR BW)
+    int32_t             p3i_enabled;        // Enable P3I channel (requires wider SDR BW)
     adsl_packet_cb  adsl_callback;      // ADS-L packet callback
     void           *adsl_callback_ctx;  // User context for ADS-L callback
 } flarm_demod_config_t;

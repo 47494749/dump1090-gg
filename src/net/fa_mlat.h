@@ -66,56 +66,56 @@ struct modesMessage;
 // Per-aircraft tracking for FA MLAT coordinator
 struct fa_mlat_aircraft {
     uint32_t addr;                   // ICAO address (0 = empty slot)
-    int      messages;               // total messages seen
+    int32_t      messages;               // total messages seen
     uint64_t last_message_time;      // monotonic ms
     uint64_t last_position_time;     // monotonic ms (last DF17 position)
-    int      requested;              // server wants data for this aircraft
-    int      reported;               // we've reported seeing this aircraft
+    int32_t      requested;              // server wants data for this aircraft
+    int32_t      reported;               // we've reported seeing this aircraft
 
     // DF17 sync pair tracking
-    int      has_even;
-    int      has_odd;
+    int32_t      has_even;
+    int32_t      has_odd;
     uint64_t even_timestamp;         // 12MHz Beast timestamp
     uint64_t odd_timestamp;          // 12MHz Beast timestamp
     uint8_t even_msg[14];      // raw even CPR message
     uint8_t odd_msg[14];       // raw odd CPR message
-    int      even_msgbits;
-    int      odd_msgbits;
+    int32_t      even_msgbits;
+    int32_t      odd_msgbits;
     uint32_t even_nucp;              // NUCp of even message
     uint32_t odd_nucp;               // NUCp of odd message
 
     // Rate measurement
     uint64_t rate_measurement_start; // monotonic ms
-    int      recent_adsb_positions;
+    int32_t      recent_adsb_positions;
 };
 
 // Shared state between PiAware thread and FA MLAT thread
 struct fa_mlat_state {
     // --- Control (PiAware sets, FA MLAT reads) ---
     pthread_mutex_t ctl_mutex;
-    int      enabled;                // FA MLAT active
-    int      stop_requested;         // signal thread to stop
+    int32_t      enabled;                // FA MLAT active
+    int32_t      stop_requested;         // signal thread to stop
 
     // UDP transport config
     char     udp_host[256];
-    int      udp_port;
+    int32_t      udp_port;
     uint32_t udp_key;
 
     // Traffic filter
     uint32_t wanted_icao[FA_MLAT_MAX_WANTED];
-    int      wanted_count;
+    int32_t      wanted_count;
     uint32_t wanted_modeac[FA_MLAT_MAX_MODEAC];
-    int      wanted_modeac_count;
+    int32_t      wanted_modeac_count;
 
     // --- Status output (FA MLAT writes, PiAware reads) ---
     pthread_mutex_t status_mutex;
     char     status_lines[FA_MLAT_STATUS_LINES][FA_MLAT_STATUS_LINE_LEN];
-    int      status_head;
-    int      status_tail;
+    int32_t      status_head;
+    int32_t      status_tail;
 
     // --- Thread ---
     pthread_t thread;
-    int       thread_running;
+    int32_t       thread_running;
 
     // --- Aircraft hash table (FA MLAT thread only) ---
     struct fa_mlat_aircraft aircraft[FA_MLAT_HASH_SIZE];
@@ -129,30 +129,30 @@ extern struct fa_mlat_state FaMlat;
 void faMlatInit(void);
 
 // Enable FA MLAT with UDP transport parameters (called from PiAware thread)
-void faMlatEnable(const char *host, int port, uint32_t key);
+void faMlatEnable(const char *host, int32_t port, uint32_t key);
 
 // Disable FA MLAT (called from PiAware thread)
 void faMlatDisable(void);
 
 // Update wanted ICAO set: add these to the wanted set
-void faMlatStartSending(const uint32_t *icao, int count,
-                        const uint32_t *modeac, int modeac_count);
+void faMlatStartSending(const uint32_t *icao, int32_t count,
+                        const uint32_t *modeac, int32_t modeac_count);
 
 // Update wanted ICAO set: remove these from the wanted set
-void faMlatStopSending(const uint32_t *icao, int count,
-                       const uint32_t *modeac, int modeac_count);
+void faMlatStopSending(const uint32_t *icao, int32_t count,
+                       const uint32_t *modeac, int32_t modeac_count);
 
 // Process a decoded message (called from FA MLAT thread via SPSC queue)
 void faMlatProcessMessage(struct modesMessage *mm);
 
 // Poll for status lines to forward to FA server
 // Returns 1 if a line was retrieved (copied to buf), 0 if none pending
-int faMlatPollStatus(char *buf, int bufsize);
+int32_t faMlatPollStatus(char *buf, int32_t bufsize);
 
 // Inject an MLAT result position (called from PiAware thread when FA sends mlat_result)
 void faMlatInjectResult(uint32_t addr, double lat, double lon, double alt,
                         double nsvel, double ewvel, double vrate,
-                        int anon, int modeac);
+                        int32_t anon, int32_t modeac);
 
 // Cleanup
 void faMlatCleanup(void);

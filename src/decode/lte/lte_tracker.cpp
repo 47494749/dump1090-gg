@@ -11,6 +11,7 @@
 // option) any later version.
 
 #include "lte_tracker.h"
+#include <cstdint>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,7 +72,7 @@ static const lte_celldb_entry_t lte_celldb[] = {
 // Lookup a cell by PCI + EARFCN
 static const lte_celldb_entry_t *lte_celldb_lookup(uint16_t pci, uint16_t earfcn)
 {
-    for (int i = 0; lte_celldb[i].pci || lte_celldb[i].earfcn; i++) {
+    for (int32_t i = 0; lte_celldb[i].pci || lte_celldb[i].earfcn; i++) {
         if (lte_celldb[i].pci == pci && lte_celldb[i].earfcn == earfcn)
             return &lte_celldb[i];
     }
@@ -87,7 +88,7 @@ typedef struct {
 
 static pthread_mutex_t tracker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static tracked_cell_t  tracker_cells[TRACKER_MAX_CELLS];
-static int             tracker_count = 0;
+static int32_t             tracker_count = 0;
 static bool            tracker_inited = false;
 
 void lteTrackerInit(void)
@@ -108,7 +109,7 @@ void lteTrackerUpdate(const lte_cell_info_t *cell)
     tracked_cell_t *slot = NULL;
 
     // Find existing entry by PCI + freq
-    for (int i = 0; i < tracker_count; i++) {
+    for (int32_t i = 0; i < tracker_count; i++) {
         if (tracker_cells[i].active &&
             tracker_cells[i].info.pci == cell->pci &&
             tracker_cells[i].info.freq_hz == cell->freq_hz) {
@@ -119,7 +120,7 @@ void lteTrackerUpdate(const lte_cell_info_t *cell)
 
     if (!slot) {
         // Find a free slot
-        for (int i = 0; i < TRACKER_MAX_CELLS; i++) {
+        for (int32_t i = 0; i < TRACKER_MAX_CELLS; i++) {
             if (!tracker_cells[i].active) {
                 slot = &tracker_cells[i];
                 if (i >= tracker_count) tracker_count = i + 1;
@@ -136,7 +137,7 @@ void lteTrackerUpdate(const lte_cell_info_t *cell)
     }
 
     // Expire old cells
-    for (int i = 0; i < tracker_count; i++) {
+    for (int32_t i = 0; i < tracker_count; i++) {
         if (tracker_cells[i].active &&
             (now - tracker_cells[i].last_seen) > CELL_TIMEOUT_SEC) {
             tracker_cells[i].active = false;
@@ -146,11 +147,11 @@ void lteTrackerUpdate(const lte_cell_info_t *cell)
     pthread_mutex_unlock(&tracker_mutex);
 }
 
-int lteTrackerCount(void)
+int32_t lteTrackerCount(void)
 {
     pthread_mutex_lock(&tracker_mutex);
-    int count = 0;
-    for (int i = 0; i < tracker_count; i++)
+    int32_t count = 0;
+    for (int32_t i = 0; i < tracker_count; i++)
         if (tracker_cells[i].active) count++;
     pthread_mutex_unlock(&tracker_mutex);
     return count;
@@ -162,7 +163,7 @@ static std::string sfmt(const char *fmt, ...) {
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int32_t n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n < 0) return {};
     if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
@@ -179,11 +180,11 @@ std::string lteTrackerToJSON(void)
 
     std::string s = "{\"cells\":[";
 
-    int first = 1;
-    int active_count = 0;
+    int32_t first = 1;
+    int32_t active_count = 0;
     time_t now = time(NULL);
 
-    for (int i = 0; i < tracker_count; i++) {
+    for (int32_t i = 0; i < tracker_count; i++) {
         if (!tracker_cells[i].active) continue;
         active_count++;
         const lte_cell_info_t *c = &tracker_cells[i].info;
@@ -250,7 +251,7 @@ std::string lteTrackerToJSON(void)
         // Alerts
         if (c->alert_count > 0) {
             s += ",\"alerts\":[";
-            for (int ai = 0; ai < c->alert_count; ai++) {
+            for (int32_t ai = 0; ai < c->alert_count; ai++) {
                 const lte_alert_t *a = &c->alerts[ai];
                 if (ai > 0) s += ',';
                 s += sfmt(

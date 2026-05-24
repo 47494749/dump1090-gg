@@ -20,6 +20,7 @@
 
 #ifndef SDR_SOAPY_H
 #define SDR_SOAPY_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,10 +32,10 @@ bool soapyOpen();
 void soapyRun();
 void soapyClose();
 bool soapyHandleOption(int argc, char **argv, int *jptr);
-int soapyGetGain();
-int soapyGetMaxGain();
-double soapyGetGainDb(int step);
-int soapySetGain(int step);
+int32_t soapyGetGain();
+int32_t soapyGetMaxGain();
+double soapyGetGainDb(int32_t step);
+int32_t soapySetGain(int32_t step);
 
 #ifdef __cplusplus
 }

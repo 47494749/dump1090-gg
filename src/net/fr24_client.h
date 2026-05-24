@@ -11,16 +11,16 @@ extern "C" {
 #include <stdint.h>
 
 typedef struct {
-    int      enabled;
+    int32_t      enabled;
     char     fr24key[20];
     char     config_path[256];
     char     server_host[256];
-    int      server_port;
+    int32_t      server_port;
     uint64_t radar_id;
     uint32_t feed_id;
     char     feed_alias[32];
     uint32_t session_key;
-    int      udp_mode;
+    int32_t      udp_mode;
     uint32_t server_value_1;
     uint32_t server_value_2;
     uint64_t last_send;
@@ -35,7 +35,7 @@ typedef struct {
 
 extern fr24_client_t FR24Client;
 
-int fr24_load_config(const char *path);
+int32_t fr24_load_config(const char *path);
 void *fr24_thread_entry(void *arg);
 
 #ifdef __cplusplus

@@ -6,6 +6,7 @@
 // Each decoder type has its own section with its specific options.
 
 #include "decoder_config.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,17 +143,17 @@ static double parse_number(const char **p)
     return val;
 }
 
-static int parse_int(const char **p)
+static int32_t parse_int(const char **p)
 {
-    return (int)parse_number(p);
+    return (int32_t)parse_number(p);
 }
 
-static void parse_string(const char **p, char *out, int maxlen)
+static void parse_string(const char **p, char *out, int32_t maxlen)
 {
     skip_ws(p);
     if (**p != '"') { out[0] = '\0'; return; }
     (*p)++;
-    int i = 0;
+    int32_t i = 0;
     while (**p && **p != '"' && i < maxlen - 1) {
         if (**p == '\\' && *(*p + 1)) {
             (*p)++;
@@ -190,7 +191,7 @@ static void skip_value(const char **p)
         while (**p && **p != '"') { if (**p == '\\') (*p)++; (*p)++; }
         if (**p == '"') (*p)++;
     } else if (**p == '{') {
-        int depth = 1; (*p)++;
+        int32_t depth = 1; (*p)++;
         while (**p && depth > 0) {
             if (**p == '{') depth++;
             else if (**p == '}') depth--;
@@ -198,7 +199,7 @@ static void skip_value(const char **p)
             (*p)++;
         }
     } else if (**p == '[') {
-        int depth = 1; (*p)++;
+        int32_t depth = 1; (*p)++;
         while (**p && depth > 0) {
             if (**p == '[') depth++;
             else if (**p == ']') depth--;
@@ -254,7 +255,7 @@ static void parse_flarm(const char **p)
             skip_ws(p);
             if (**p == '"') {
                 (*p)++;
-                for (int i = 0; i < 12; i++) {
+                for (int32_t i = 0; i < 12; i++) {
                     while (**p && !isxdigit((uint8_t)**p) && **p != '"') (*p)++;
                     if (**p == '"') break;
                     char *end;
@@ -264,7 +265,7 @@ static void parse_flarm(const char **p)
                 if (**p == '"') (*p)++;
             } else if (**p == '[') {
                 (*p)++;
-                for (int i = 0; i < 12; i++) {
+                for (int32_t i = 0; i < 12; i++) {
                     skip_ws(p);
                     if (**p == ']') break;
                     if (**p == ',') (*p)++;
@@ -281,7 +282,7 @@ static void parse_flarm(const char **p)
             skip_ws(p);
             if (**p == '"') {
                 (*p)++;
-                for (int i = 0; i < 4; i++) {
+                for (int32_t i = 0; i < 4; i++) {
                     while (**p && !isxdigit((uint8_t)**p) && **p != '"') (*p)++;
                     if (**p == '"') break;
                     char *end;
@@ -291,7 +292,7 @@ static void parse_flarm(const char **p)
                 if (**p == '"') (*p)++;
             } else if (**p == '[') {
                 (*p)++;
-                for (int i = 0; i < 4; i++) {
+                for (int32_t i = 0; i < 4; i++) {
                     skip_ws(p);
                     if (**p == ']') break;
                     if (**p == ',') (*p)++;
@@ -307,7 +308,7 @@ static void parse_flarm(const char **p)
 
     // Check if keys are present
     bool has_keys = false;
-    for (int i = 0; i < 12; i++) { if (DecoderConfigs.flarm.key_table[i]) { has_keys = true; break; } }
+    for (int32_t i = 0; i < 12; i++) { if (DecoderConfigs.flarm.key_table[i]) { has_keys = true; break; } }
     if (has_keys && DecoderConfigs.flarm.key2) DecoderConfigs.flarm.keys_loaded = true;
 }
 
@@ -515,7 +516,7 @@ bool decoderConfigLoad(void)
     if (!f) return false;
 
     fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
+    int64_t fsize = ftell(f);
     if (fsize <= 0 || fsize > 65536) { fclose(f); return false; }
     fseek(f, 0, SEEK_SET);
 
@@ -618,7 +619,7 @@ bool decoderConfigSave(void)
     fprintf(f, "    \"enabled\": %s,\n", DecoderConfigs.acars.enabled ? "true" : "false");
     fprintf(f, "    \"center_freq\": %.0f,\n", DecoderConfigs.acars.center_freq);
     fprintf(f, "    \"channels\": [");
-    for (int i = 0; i < DecoderConfigs.acars.num_channels; i++)
+    for (int32_t i = 0; i < DecoderConfigs.acars.num_channels; i++)
         fprintf(f, "%s%.0f", i ? "," : "", DecoderConfigs.acars.channel_freqs[i]);
     fprintf(f, "]\n  },\n");
 
@@ -628,7 +629,7 @@ bool decoderConfigSave(void)
     fprintf(f, "    \"center_freq\": %.0f,\n", DecoderConfigs.vdl2.center_freq);
     fprintf(f, "    \"squelch_level\": %.1f,\n", DecoderConfigs.vdl2.squelch_level);
     fprintf(f, "    \"channels\": [");
-    for (int i = 0; i < DecoderConfigs.vdl2.num_channels; i++)
+    for (int32_t i = 0; i < DecoderConfigs.vdl2.num_channels; i++)
         fprintf(f, "%s%.0f", i ? "," : "", DecoderConfigs.vdl2.channel_freqs[i]);
     fprintf(f, "]\n  },\n");
 
@@ -648,7 +649,7 @@ bool decoderConfigSave(void)
     fprintf(f, "    \"output_enabled\": %s,\n", DecoderConfigs.pocsag.output_enabled ? "true" : "false");
     fprintf(f, "    \"center_freq\": %.0f,\n", DecoderConfigs.pocsag.center_freq);
     fprintf(f, "    \"channels\": [");
-    for (int i = 0; i < DecoderConfigs.pocsag.num_channels; i++)
+    for (int32_t i = 0; i < DecoderConfigs.pocsag.num_channels; i++)
         fprintf(f, "%s%.0f", i ? "," : "", DecoderConfigs.pocsag.channel_freqs[i]);
     fprintf(f, "]\n  },\n");
 
@@ -717,7 +718,7 @@ bool decoderConfigLoadFlarmKeys(const char *path)
         if (strncasecmp(s, "key_table=", 10) == 0 || strncasecmp(s, "key_table =", 11) == 0) {
             char *val = strchr(s, '=') + 1;
             while (*val && isspace((uint8_t)*val)) val++;
-            for (int i = 0; i < 12; i++) {
+            for (int32_t i = 0; i < 12; i++) {
                 while (*val && !isxdigit((uint8_t)*val)) val++;
                 if (!*val) break;
                 char *end;
@@ -743,7 +744,7 @@ bool decoderConfigLoadFlarmKeys(const char *path)
         } else if (strncasecmp(s, "key5=", 5) == 0 || strncasecmp(s, "key5 =", 6) == 0) {
             char *val = strchr(s, '=') + 1;
             while (*val && isspace((uint8_t)*val)) val++;
-            for (int i = 0; i < 4; i++) {
+            for (int32_t i = 0; i < 4; i++) {
                 while (*val && !isxdigit((uint8_t)*val)) val++;
                 if (!*val) break;
                 char *end;
@@ -815,7 +816,7 @@ const char *decoderTypeName(decoder_type_t type)
 decoder_type_t decoderTypeFromName(const char *name)
 {
     if (!name) return DECODER_TYPE_COUNT;
-    for (int i = 0; i < DECODER_TYPE_COUNT; i++) {
+    for (int32_t i = 0; i < DECODER_TYPE_COUNT; i++) {
         if (strcasecmp(name, decoder_type_names[i]) == 0)
             return (decoder_type_t)i;
     }

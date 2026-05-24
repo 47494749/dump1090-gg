@@ -13,6 +13,7 @@
 // option) any later version.
 
 #include "lte_sib.h"
+#include <stdint.h>
 #include "lte_decode.h"
 #include <stdlib.h>
 #include <string.h>
@@ -34,22 +35,22 @@ static inline float cf_abs2(cf_t a) { return a.re*a.re + a.im*a.im; }
 
 typedef struct {
     const uint8_t *bits;    // Bit array (1 bit per byte, values 0 or 1)
-    int            len;     // Total bits available
-    int            pos;     // Current read position
+    int32_t            len;     // Total bits available
+    int32_t            pos;     // Current read position
 } bitreader_t;
 
-static inline void br_init(bitreader_t *br, const uint8_t *bits, int len) {
+static inline void br_init(bitreader_t *br, const uint8_t *bits, int32_t len) {
     br->bits = bits; br->len = len; br->pos = 0;
 }
 
-static inline int br_remaining(const bitreader_t *br) {
+static inline int32_t br_remaining(const bitreader_t *br) {
     return br->len - br->pos;
 }
 
 static inline uint32_t br_read(bitreader_t *br, int n) {
     if (n <= 0 || br->pos + n > br->len) { br->pos = br->len; return 0; }
     uint32_t val = 0;
-    for (int i = 0; i < n; i++)
+    for (int32_t i = 0; i < n; i++)
         val = (val << 1) | (br->bits[br->pos++] & 1);
     return val;
 }
@@ -58,7 +59,7 @@ static inline bool br_read_bool(bitreader_t *br) {
     return br_read(br, 1) != 0;
 }
 
-static inline void br_skip(bitreader_t *br, int n) {
+static inline void br_skip(bitreader_t *br, int32_t n) {
     br->pos += n;
     if (br->pos > br->len) br->pos = br->len;
 }
@@ -66,14 +67,14 @@ static inline void br_skip(bitreader_t *br, int n) {
 // Read constrained whole number (UPER)
 static inline uint32_t br_read_constrained(bitreader_t *br, uint32_t lb, uint32_t ub) {
     uint32_t range = ub - lb + 1;
-    int bits_needed = 0;
+    int32_t bits_needed = 0;
     uint32_t r = range - 1;
     while (r > 0) { bits_needed++; r >>= 1; }
     return lb + br_read(br, bits_needed);
 }
 
 // Read length determinant (unconstrained)
-static inline int br_read_length(bitreader_t *br) {
+static inline int32_t br_read_length(bitreader_t *br) {
     if (!br_read_bool(br)) return (int)br_read(br, 7);  // < 128
     return (int)br_read(br, 14);  // < 16384
 }
@@ -125,10 +126,10 @@ static uint8_t sib3_q_hyst_to_db(uint32_t idx)
 
 // ======================== CRC-24A (for PDSCH transport blocks) ========================
 
-static uint32_t crc24a(const uint8_t *bits, int nbits)
+static uint32_t crc24a(const uint8_t *bits, int32_t nbits)
 {
     uint32_t crc = 0;
-    for (int i = 0; i < nbits; i++) {
+    for (int32_t i = 0; i < nbits; i++) {
         uint32_t bit = (crc >> 23) ^ bits[i];
         crc = (crc << 1) & 0xFFFFFF;
         if (bit) crc ^= 0x864CFB;
@@ -138,10 +139,10 @@ static uint32_t crc24a(const uint8_t *bits, int nbits)
 
 // ======================== CRC-16 (for PDCCH DCI) ========================
 
-static uint16_t crc16_dci(const uint8_t *bits, int nbits, uint16_t rnti)
+static uint16_t crc16_dci(const uint8_t *bits, int32_t nbits, uint16_t rnti)
 {
     uint16_t crc = 0xFFFF;
-    for (int i = 0; i < nbits; i++) {
+    for (int32_t i = 0; i < nbits; i++) {
         uint16_t bit = (crc >> 15) ^ bits[i];
         crc = (crc << 1) & 0xFFFF;
         if (bit) crc ^= 0x1021;
@@ -158,51 +159,51 @@ static uint16_t crc16_dci(const uint8_t *bits, int nbits, uint16_t rnti)
 #define VITERBI_K      7
 static const uint8_t viterbi_poly[3] = { 0133, 0171, 0165 };
 
-static inline int vit_output(int state, int input, int poly) {
-    int sr = (state << 1) | input;
-    int out = 0;
-    for (int i = 0; i < VITERBI_K; i++)
+static inline int32_t vit_output(int32_t state, int32_t input, int32_t poly) {
+    int32_t sr = (state << 1) | input;
+    int32_t out = 0;
+    for (int32_t i = 0; i < VITERBI_K; i++)
         out ^= ((sr >> i) & 1) & ((poly >> i) & 1);
     return out;
 }
 
-static int viterbi_decode_sib(const int8_t *soft_bits, int coded_len, uint8_t *out_bits)
+static int32_t viterbi_decode_sib(const int8_t *soft_bits, int32_t coded_len, uint8_t *out_bits)
 {
-    int n_out = coded_len / 3;
+    int32_t n_out = coded_len / 3;
     if (n_out <= 0 || n_out > 512) return 0;
 
-    int *pm = calloc(VITERBI_STATES, sizeof(int));
-    int *pm_new = calloc(VITERBI_STATES, sizeof(int));
+    int32_t *pm = calloc(VITERBI_STATES, sizeof(int32_t));
+    int32_t *pm_new = calloc(VITERBI_STATES, sizeof(int32_t));
     uint8_t *decisions = calloc((size_t)n_out * VITERBI_STATES, 1);
     if (!pm || !pm_new || !decisions) { free(pm); free(pm_new); free(decisions); return 0; }
 
     // Initialize: state 0 = 0, others = -inf (zero tail assumption)
-    for (int i = 1; i < VITERBI_STATES; i++) pm[i] = -999999;
+    for (int32_t i = 1; i < VITERBI_STATES; i++) pm[i] = -999999;
 
-    for (int t = 0; t < n_out; t++) {
-        for (int i = 0; i < VITERBI_STATES; i++) pm_new[i] = -999999;
-        for (int state = 0; state < VITERBI_STATES; state++) {
+    for (int32_t t = 0; t < n_out; t++) {
+        for (int32_t i = 0; i < VITERBI_STATES; i++) pm_new[i] = -999999;
+        for (int32_t state = 0; state < VITERBI_STATES; state++) {
             if (pm[state] == -999999) continue;
-            for (int input = 0; input < 2; input++) {
-                int next_state = ((state << 1) | input) & (VITERBI_STATES - 1);
-                int bm = 0;
-                for (int g = 0; g < 3; g++) {
-                    int expected = vit_output(state, input, viterbi_poly[g]);
+            for (int32_t input = 0; input < 2; input++) {
+                int32_t next_state = ((state << 1) | input) & (VITERBI_STATES - 1);
+                int32_t bm = 0;
+                for (int32_t g = 0; g < 3; g++) {
+                    int32_t expected = vit_output(state, input, viterbi_poly[g]);
                     bm += soft_bits[t*3 + g] * (expected ? -1 : 1);
                 }
-                int metric = pm[state] + bm;
+                int32_t metric = pm[state] + bm;
                 if (metric > pm_new[next_state]) {
                     pm_new[next_state] = metric;
                     decisions[t * VITERBI_STATES + next_state] = (uint8_t)input;
                 }
             }
         }
-        memcpy(pm, pm_new, VITERBI_STATES * sizeof(int));
+        memcpy(pm, pm_new, VITERBI_STATES * sizeof(int32_t));
     }
 
     // Traceback from state 0 (zero tail)
-    int state = 0;
-    for (int t = n_out - 1; t >= 0; t--) {
+    int32_t state = 0;
+    for (int32_t t = n_out - 1; t >= 0; t--) {
         out_bits[t] = decisions[t * VITERBI_STATES + state];
         // Recover previous state
         state = (state >> 1) | (out_bits[t] << (VITERBI_K - 2));
@@ -224,7 +225,7 @@ static int viterbi_decode_sib(const int8_t *soft_bits, int coded_len, uint8_t *o
 
 // QPP interleaver: f(i) = (f1*i + f2*i^2) mod K
 // Table from 3GPP 36.212 Table 5.1.3-3 (selected sizes)
-typedef struct { int K; int f1; int f2; } qpp_entry_t;
+typedef struct { int32_t K; int32_t f1; int32_t f2; } qpp_entry_t;
 static const qpp_entry_t qpp_table[] = {
     {40,   3,  10}, {48,   7,  12}, {56,  19,  42}, {64,   7,  16},
     {72,   7,  18}, {80,  11,  20}, {88,   5,  22}, {96,  11,  24},
@@ -276,28 +277,28 @@ static const qpp_entry_t qpp_table[] = {
     {0, 0, 0} // sentinel
 };
 
-static bool qpp_interleave(int K, int *perm)
+static bool qpp_interleave(int32_t K, int32_t *perm)
 {
-    int f1 = 0, f2 = 0;
-    for (int i = 0; qpp_table[i].K; i++) {
+    int32_t f1 = 0, f2 = 0;
+    for (int32_t i = 0; qpp_table[i].K; i++) {
         if (qpp_table[i].K == K) { f1 = qpp_table[i].f1; f2 = qpp_table[i].f2; break; }
     }
     if (f1 == 0) return false;
-    for (int i = 0; i < K; i++)
-        perm[i] = ((int)((int64_t)f1 * i + (int64_t)f2 * i * i)) % K;
+    for (int32_t i = 0; i < K; i++)
+        perm[i] = ((int32_t)((int64_t)f1 * i + (int64_t)f2 * i * i)) % K;
     return true;
 }
 
 // Simplified turbo decoder (max-log-MAP, hard decision output)
 static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
-                         const int8_t *parity1, int K, uint8_t *out_bits)
+                         const int8_t *parity1, int32_t K, uint8_t *out_bits)
 {
     // For a simplified decoder: use extrinsic information exchange
     // between two SISO decoders (MAP for RSC with K=4)
     // This is a hard-decision approximation for moderate SNR
 
-    int *perm = malloc(K * sizeof(int));
-    int *inv_perm = malloc(K * sizeof(int));
+    int32_t *perm = malloc(K * sizeof(int32_t));
+    int32_t *inv_perm = malloc(K * sizeof(int32_t));
     float *ext1 = calloc(K, sizeof(float));
     float *ext2 = calloc(K, sizeof(float));
     float *llr_out = calloc(K, sizeof(float));
@@ -311,15 +312,15 @@ static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
         free(perm); free(inv_perm); free(ext1); free(ext2); free(llr_out);
         return false;
     }
-    for (int i = 0; i < K; i++) inv_perm[perm[i]] = i;
+    for (int32_t i = 0; i < K; i++) inv_perm[perm[i]] = i;
 
     // Iterative decoding (simplified: forward-backward on trellis)
-    for (int iter = 0; iter < TC_MAX_ITER; iter++) {
+    for (int32_t iter = 0; iter < TC_MAX_ITER; iter++) {
         // ---- Decoder 1 (systematic + parity0 + extrinsic from dec2) ----
         // Forward metrics (alpha)
         float alpha[TC_STATES];
         float alpha_next[TC_STATES];
-        for (int s = 1; s < TC_STATES; s++) alpha[s] = -1e9f;
+        for (int32_t s = 1; s < TC_STATES; s++) alpha[s] = -1e9f;
         alpha[0] = 0;
 
         float *gamma1 = malloc(K * TC_STATES * 2 * sizeof(float));
@@ -327,19 +328,19 @@ static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
         if (!gamma1 || !alpha_store) { free(gamma1); free(alpha_store); goto cleanup; }
         memcpy(alpha_store, alpha, TC_STATES * sizeof(float));
 
-        for (int t = 0; t < K; t++) {
+        for (int32_t t = 0; t < K; t++) {
             float sys = (float)systematic[t] + ext2[t]; // a-priori + extrinsic
             float par = (float)parity0[t];
 
-            for (int s = 0; s < TC_STATES; s++) alpha_next[s] = -1e9f;
-            for (int s = 0; s < TC_STATES; s++) {
+            for (int32_t s = 0; s < TC_STATES; s++) alpha_next[s] = -1e9f;
+            for (int32_t s = 0; s < TC_STATES; s++) {
                 if (alpha[s] < -1e8f) continue;
-                for (int b = 0; b < 2; b++) {
+                for (int32_t b = 0; b < 2; b++) {
                     // RSC encoder: fb = s[2]^s[0]^input, next = {input, s[0], s[1]}
-                    int fb = ((s >> 2) ^ s ^ b) & 1;
-                    int next_s = (fb << 2) | (s >> 1);
+                    int32_t fb = ((s >> 2) ^ s ^ b) & 1;
+                    int32_t next_s = (fb << 2) | (s >> 1);
                     // Parity output: ff = s[2]^s[1]^input
-                    int par_bit = ((s >> 2) ^ (s >> 1) ^ b) & 1;
+                    int32_t par_bit = ((s >> 2) ^ (s >> 1) ^ b) & 1;
                     float g = (b ? sys : -sys) + (par_bit ? par : -par);
                     gamma1[(t * TC_STATES + s) * 2 + b] = g;
                     float m = alpha[s] + g;
@@ -352,18 +353,18 @@ static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
 
         // Backward + LLR computation
         float beta[TC_STATES];
-        for (int s = 1; s < TC_STATES; s++) beta[s] = -1e9f;
+        for (int32_t s = 1; s < TC_STATES; s++) beta[s] = -1e9f;
         beta[0] = 0;
 
-        for (int t = K - 1; t >= 0; t--) {
+        for (int32_t t = K - 1; t >= 0; t--) {
             float llr0 = -1e9f, llr1 = -1e9f;
             float beta_new[TC_STATES];
-            for (int s = 0; s < TC_STATES; s++) beta_new[s] = -1e9f;
+            for (int32_t s = 0; s < TC_STATES; s++) beta_new[s] = -1e9f;
 
-            for (int s = 0; s < TC_STATES; s++) {
-                for (int b = 0; b < 2; b++) {
-                    int fb = ((s >> 2) ^ s ^ b) & 1;
-                    int next_s = (fb << 2) | (s >> 1);
+            for (int32_t s = 0; s < TC_STATES; s++) {
+                for (int32_t b = 0; b < 2; b++) {
+                    int32_t fb = ((s >> 2) ^ s ^ b) & 1;
+                    int32_t next_s = (fb << 2) | (s >> 1);
                     float m = alpha_store[t * TC_STATES + s]
                             + gamma1[(t * TC_STATES + s) * 2 + b]
                             + beta[next_s];
@@ -387,22 +388,22 @@ static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
             free(alpha2); free(alpha2_store); free(gamma2); goto cleanup;
         }
 
-        for (int s = 1; s < TC_STATES; s++) alpha2[s] = -1e9f;
+        for (int32_t s = 1; s < TC_STATES; s++) alpha2[s] = -1e9f;
         alpha2[0] = 0;
         memcpy(alpha2_store, alpha2, TC_STATES * sizeof(float));
 
-        for (int t = 0; t < K; t++) {
+        for (int32_t t = 0; t < K; t++) {
             float sys = (float)systematic[perm[t]] + ext1[perm[t]];
             float par = (float)parity1[t];
 
             float alpha2_next[TC_STATES];
-            for (int s = 0; s < TC_STATES; s++) alpha2_next[s] = -1e9f;
-            for (int s = 0; s < TC_STATES; s++) {
+            for (int32_t s = 0; s < TC_STATES; s++) alpha2_next[s] = -1e9f;
+            for (int32_t s = 0; s < TC_STATES; s++) {
                 if (alpha2[s] < -1e8f) continue;
-                for (int b = 0; b < 2; b++) {
-                    int fb = ((s >> 2) ^ s ^ b) & 1;
-                    int next_s = (fb << 2) | (s >> 1);
-                    int par_bit = ((s >> 2) ^ (s >> 1) ^ b) & 1;
+                for (int32_t b = 0; b < 2; b++) {
+                    int32_t fb = ((s >> 2) ^ s ^ b) & 1;
+                    int32_t next_s = (fb << 2) | (s >> 1);
+                    int32_t par_bit = ((s >> 2) ^ (s >> 1) ^ b) & 1;
                     float g = (b ? sys : -sys) + (par_bit ? par : -par);
                     gamma2[(t * TC_STATES + s) * 2 + b] = g;
                     float m = alpha2[s] + g;
@@ -415,18 +416,18 @@ static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
 
         // Backward for decoder 2
         float beta2[TC_STATES];
-        for (int s = 1; s < TC_STATES; s++) beta2[s] = -1e9f;
+        for (int32_t s = 1; s < TC_STATES; s++) beta2[s] = -1e9f;
         beta2[0] = 0;
 
-        for (int t = K - 1; t >= 0; t--) {
+        for (int32_t t = K - 1; t >= 0; t--) {
             float llr0 = -1e9f, llr1 = -1e9f;
             float beta2_new[TC_STATES];
-            for (int s = 0; s < TC_STATES; s++) beta2_new[s] = -1e9f;
+            for (int32_t s = 0; s < TC_STATES; s++) beta2_new[s] = -1e9f;
 
-            for (int s = 0; s < TC_STATES; s++) {
-                for (int b = 0; b < 2; b++) {
-                    int fb = ((s >> 2) ^ s ^ b) & 1;
-                    int next_s = (fb << 2) | (s >> 1);
+            for (int32_t s = 0; s < TC_STATES; s++) {
+                for (int32_t b = 0; b < 2; b++) {
+                    int32_t fb = ((s >> 2) ^ s ^ b) & 1;
+                    int32_t next_s = (fb << 2) | (s >> 1);
                     float m = alpha2_store[t * TC_STATES + s]
                             + gamma2[(t * TC_STATES + s) * 2 + b]
                             + beta2[next_s];
@@ -443,12 +444,12 @@ static bool turbo_decode(const int8_t *systematic, const int8_t *parity0,
         free(alpha2); free(alpha2_store); free(gamma2);
 
         // Compute final LLR
-        for (int t = 0; t < K; t++)
+        for (int32_t t = 0; t < K; t++)
             llr_out[t] = (float)systematic[t] + ext1[t] + ext2[t];
     }
 
     // Hard decision
-    for (int t = 0; t < K; t++)
+    for (int32_t t = 0; t < K; t++)
         out_bits[t] = (llr_out[t] > 0) ? 1 : 0;
 
     free(perm); free(inv_perm); free(ext1); free(ext2); free(llr_out);
@@ -461,17 +462,17 @@ cleanup:
 
 // ======================== Gold Sequence (for PDCCH/PDSCH scrambling) ========================
 
-static void gold_seq(uint32_t c_init, int offset, int len, uint8_t *seq)
+static void gold_seq(uint32_t c_init, int32_t offset, int32_t len, uint8_t *seq)
 {
     uint32_t x1 = 1u;
     uint32_t x2 = c_init;
-    for (int n = 0; n < 1600 + offset; n++) {
+    for (int32_t n = 0; n < 1600 + offset; n++) {
         uint32_t new1 = ((x1 >> 3) ^ x1) & 1;
         x1 = (x1 >> 1) | (new1 << 30);
         uint32_t new2 = ((x2 >> 3) ^ (x2 >> 2) ^ (x2 >> 1) ^ x2) & 1;
         x2 = (x2 >> 1) | (new2 << 30);
     }
-    for (int n = 0; n < len; n++) {
+    for (int32_t n = 0; n < len; n++) {
         seq[n] = (uint8_t)(((x1 >> 0) ^ (x2 >> 0)) & 1);
         uint32_t new1 = ((x1 >> 3) ^ x1) & 1;
         x1 = (x1 >> 1) | (new1 << 30);
@@ -482,19 +483,19 @@ static void gold_seq(uint32_t c_init, int offset, int len, uint8_t *seq)
 
 // ======================== FFT (shared with lte_decode.c) ========================
 
-static void fft_dit_sib(cf_t *x, const cf_t *twiddle, int n)
+static void fft_dit_sib(cf_t *x, const cf_t *twiddle, int32_t n)
 {
-    for (int i = 1, j = 0; i < n; i++) {
-        int bit = n >> 1;
+    for (int32_t i = 1, j = 0; i < n; i++) {
+        int32_t bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
         if (i < j) { cf_t tmp = x[i]; x[i] = x[j]; x[j] = tmp; }
     }
-    for (int len = 2; len <= n; len <<= 1) {
-        int half = len >> 1;
-        int step = n / len;
-        for (int i = 0; i < n; i += len) {
-            for (int j = 0; j < half; j++) {
+    for (int32_t len = 2; len <= n; len <<= 1) {
+        int32_t half = len >> 1;
+        int32_t step = n / len;
+        for (int32_t i = 0; i < n; i += len) {
+            for (int32_t j = 0; j < half; j++) {
                 cf_t w = twiddle[j * step];
                 cf_t u = x[i + j];
                 cf_t v = cf_mul(x[i + j + half], w);
@@ -508,39 +509,39 @@ static void fft_dit_sib(cf_t *x, const cf_t *twiddle, int n)
 // ======================== PDCCH Decode ========================
 
 // DCI format 1A size for N_RB_DL PRBs
-static int dci_1a_size(int n_rb_dl)
+static int32_t dci_1a_size(int32_t n_rb_dl)
 {
     // Format 1A: 1(flag) + ceil(log2(N_RB*(N_RB+1)/2))(RIV) + 5(MCS) + 3(HARQ) +
     //            1(new_data) + 2(RV) + 2(TPC) = depends on BW
-    int riv_bits = 0;
-    int n = n_rb_dl * (n_rb_dl + 1) / 2;
+    int32_t riv_bits = 0;
+    int32_t n = n_rb_dl * (n_rb_dl + 1) / 2;
     while (n > 0) { riv_bits++; n >>= 1; }
     return 1 + riv_bits + 5 + 3 + 1 + 2 + 2; // + padding to format 0 size if needed
 }
 
 // DCI format 1C size for N_RB_DL PRBs
-static int dci_1c_size(int n_rb_dl)
+static int32_t dci_1c_size(int32_t n_rb_dl)
 {
     // Format 1C: gap_indicator(if N_RB>50) + ceil(log2(N'_RB*(N'_RB+1)/2))(RBA) + 5(MCS)
-    int n_step = (n_rb_dl >= 50) ? 4 : ((n_rb_dl >= 25) ? 2 : 1);
-    int n_vrb = n_rb_dl / n_step;
-    int rba_bits = 0;
-    int n = n_vrb * (n_vrb + 1) / 2;
+    int32_t n_step = (n_rb_dl >= 50) ? 4 : ((n_rb_dl >= 25) ? 2 : 1);
+    int32_t n_vrb = n_rb_dl / n_step;
+    int32_t rba_bits = 0;
+    int32_t n = n_vrb * (n_vrb + 1) / 2;
     while (n > 0) { rba_bits++; n >>= 1; }
-    int gap = (n_rb_dl > 50) ? 1 : 0;
+    int32_t gap = (n_rb_dl > 50) ? 1 : 0;
     return gap + rba_bits + 5;
 }
 
 // TBS table for DCI format 1C (3GPP 36.213 Table 7.1.7.2.1-1)
-static const int tbs_table_1c[] = {
+static const int32_t tbs_table_1c[] = {
     40, 56, 72, 120, 136, 144, 176, 208, 224, 256, 280, 296, 328, 336, 392,
     408, 456, 480, 504, 528, 552, 584, 616, 648, 680, 712, 744, 776, 808, 840,
     872, 936
 };
 
 // Attempt PDCCH blind decode for SI-RNTI
-bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
-                         int n_rb_dl, int pci, float freq_offset_hz,
+bool lte_decode_pdcch_si(const float *iq, int32_t iq_len, int32_t subframe_start,
+                         int32_t n_rb_dl, int32_t pci, float freq_offset_hz,
                          const void *fft_twiddle, lte_dci_t *dci)
 {
     if (!iq || !dci || !fft_twiddle) return false;
@@ -553,21 +554,21 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
     // Control region = 72 subcarriers per symbol (center 6 RBs)
     // REGs: 4 REs per REG, excluding CRS positions
 
-    int fft_size = 128;
+    int32_t fft_size = 128;
     float dp = 2.0f * (float)M_PI * freq_offset_hz / (float)LTE_SAMPLE_RATE;
     float step_re = cosf(dp), step_im = sinf(dp);
 
     // Extract OFDM symbols of the control region (up to 3 symbols)
     cf_t ctrl_syms[3][128];
-    int cp_lens[] = {10, 9, 9}; // CP for symbols 0, 1, 2 at 1.92 MS/s
+    int32_t cp_lens[] = {10, 9, 9}; // CP for symbols 0, 1, 2 at 1.92 MS/s
 
-    int pos = subframe_start;
-    for (int sym = 0; sym < 3; sym++) {
+    int32_t pos = subframe_start;
+    for (int32_t sym = 0; sym < 3; sym++) {
         pos += cp_lens[sym]; // skip CP
         if (pos + fft_size > iq_len) return false;
         float osc_re = cosf(dp * pos);
         float osc_im = sinf(dp * pos);
-        for (int i = 0; i < fft_size; i++) {
+        for (int32_t i = 0; i < fft_size; i++) {
             float I = iq[(pos + i) * 2];
             float Q = iq[(pos + i) * 2 + 1];
             ctrl_syms[sym][i].re = I * osc_re + Q * osc_im;
@@ -589,24 +590,24 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
 
     // Simplified: extract all usable REs from center 72 subcarriers
     // CRS pattern: symbol 0 → k%6==v_shift, k%6==(v_shift+3)%6
-    int v_shift = pci % 6;
-    int v_shift3 = (v_shift + 3) % 6;
+    int32_t v_shift = pci % 6;
+    int32_t v_shift3 = (v_shift + 3) % 6;
     int8_t soft_ctrl[576]; // max for agg 8
-    int soft_idx = 0;
+    int32_t soft_idx = 0;
 
-    for (int sym = 0; sym < 3; sym++) {
-        for (int k = 0; k < 72; k++) {
+    for (int32_t sym = 0; sym < 3; sym++) {
+        for (int32_t k = 0; k < 72; k++) {
             // CRS exclusion on symbols 0 and 1
             if (sym < 2) {
-                int kmod6 = k % 6;
+                int32_t kmod6 = k % 6;
                 if (kmod6 == v_shift || kmod6 == v_shift3) continue;
             }
-            int bin = (k < 36) ? (fft_size - 36 + k) : (k - 35);
+            int32_t bin = (k < 36) ? (fft_size - 36 + k) : (k - 35);
             float re = ctrl_syms[sym][bin].re;
             float im = ctrl_syms[sym][bin].im;
             // QPSK demod (soft)
-            int vr = (int)(re * 8.0f);
-            int vi = (int)(im * 8.0f);
+            int32_t vr = (int32_t)(re * 8.0f);
+            int32_t vi = (int32_t)(im * 8.0f);
             if (vr > 127) vr = 127;
             if (vr < -127) vr = -127;
             if (vi > 127) vi = 127;
@@ -617,18 +618,18 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
     }
 
     // Try DCI format 1C first (used for SIB1 on PDSCH), then 1A
-    int dci_sizes[2] = { dci_1c_size(n_rb_dl), dci_1a_size(n_rb_dl) };
+    int32_t dci_sizes[2] = { dci_1c_size(n_rb_dl), dci_1a_size(n_rb_dl) };
     uint8_t dci_formats[2] = { 0x1C, 0x1A };
 
-    for (int fmt = 0; fmt < 2; fmt++) {
-        int dci_len = dci_sizes[fmt];
-        int coded_len = (dci_len + 16) * 3; // +16 CRC bits, rate 1/3
+    for (int32_t fmt = 0; fmt < 2; fmt++) {
+        int32_t dci_len = dci_sizes[fmt];
+        int32_t coded_len = (dci_len + 16) * 3; // +16 CRC bits, rate 1/3
 
         if (coded_len > soft_idx) continue;
 
         // Try each aggregation level candidate
         // For common search space with agg level 4: start at CCE 0, 4
-        for (int cand_start = 0; cand_start + coded_len <= soft_idx; cand_start += coded_len) {
+        for (int32_t cand_start = 0; cand_start + coded_len <= soft_idx; cand_start += coded_len) {
             // Descramble: c_init = rnti * 2^16 + n_s/2 * 2^9 + N_cell_id
             // For PDCCH on slot n_s, in subframe sf_idx
             uint32_t c_init = (uint32_t)SI_RNTI * 65536 + 0 * 512 + (uint32_t)pci;
@@ -636,18 +637,18 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
             gold_seq(c_init, cand_start, coded_len, scr_seq);
 
             int8_t descr[576];
-            for (int i = 0; i < coded_len; i++)
+            for (int32_t i = 0; i < coded_len; i++)
                 descr[i] = scr_seq[i] ? -soft_ctrl[cand_start + i] : soft_ctrl[cand_start + i];
 
             // Viterbi decode
             uint8_t decoded[512];
-            int n_dec = viterbi_decode_sib(descr, coded_len, decoded);
+            int32_t n_dec = viterbi_decode_sib(descr, coded_len, decoded);
             if (n_dec < dci_len + 16) continue;
 
             // Check CRC-16 with RNTI masking
             uint16_t crc = crc16_dci(decoded, dci_len, SI_RNTI);
             uint16_t rx_crc = 0;
-            for (int i = 0; i < 16; i++)
+            for (int32_t i = 0; i < 16; i++)
                 rx_crc |= (uint16_t)(decoded[dci_len + i] & 1) << (15 - i);
 
             if (crc != rx_crc) continue;
@@ -659,17 +660,17 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
             if (dci_formats[fmt] == 0x1C) {
                 // DCI format 1C
                 dci->format = 0x1C;
-                int n_step = (n_rb_dl >= 50) ? 4 : ((n_rb_dl >= 25) ? 2 : 1);
+                int32_t n_step = (n_rb_dl >= 50) ? 4 : ((n_rb_dl >= 25) ? 2 : 1);
                 if (n_rb_dl > 50) br_skip(&br, 1); // gap indicator
-                int n_vrb = n_rb_dl / n_step;
-                int rba_bits = 0;
-                { int nn = n_vrb * (n_vrb + 1) / 2; while (nn > 0) { rba_bits++; nn >>= 1; } }
+                int32_t n_vrb = n_rb_dl / n_step;
+                int32_t rba_bits = 0;
+                { int32_t nn = n_vrb * (n_vrb + 1) / 2; while (nn > 0) { rba_bits++; nn >>= 1; } }
                 uint32_t riv = br_read(&br, rba_bits);
                 uint32_t mcs_idx = br_read(&br, 5);
                 // Decode RIV → L_CRBs, RB_start
-                int L = 0, rb_start = 0;
+                int32_t L = 0, rb_start = 0;
                 for (L = 1; L <= n_vrb; L++) {
-                    if (riv < (uint32_t)(n_vrb - L + 1)) { rb_start = (int)riv; break; }
+                    if (riv < (uint32_t)(n_vrb - L + 1)) { rb_start = (int32_t)riv; break; }
                     riv -= (uint32_t)(n_vrb - L + 1);
                 }
                 dci->n_prb = (uint8_t)(L * n_step);
@@ -681,17 +682,17 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
                 // DCI format 1A
                 dci->format = 0x1A;
                 br_skip(&br, 1); // format flag
-                int riv_bits = 0;
-                { int nn = n_rb_dl * (n_rb_dl + 1) / 2; while (nn > 0) { riv_bits++; nn >>= 1; } }
+                int32_t riv_bits = 0;
+                { int32_t nn = n_rb_dl * (n_rb_dl + 1) / 2; while (nn > 0) { riv_bits++; nn >>= 1; } }
                 uint32_t riv = br_read(&br, riv_bits);
                 uint32_t mcs_idx = br_read(&br, 5);
                 br_skip(&br, 3); // HARQ
                 br_skip(&br, 1); // new data
                 uint32_t rv = br_read(&br, 2);
                 // Decode RIV
-                int L = 0, rb_start = 0;
+                int32_t L = 0, rb_start = 0;
                 for (L = 1; L <= n_rb_dl; L++) {
-                    if (riv < (uint32_t)(n_rb_dl - L + 1)) { rb_start = (int)riv; break; }
+                    if (riv < (uint32_t)(n_rb_dl - L + 1)) { rb_start = (int32_t)riv; break; }
                     riv -= (uint32_t)(n_rb_dl - L + 1);
                 }
                 dci->n_prb = (uint8_t)L;
@@ -712,16 +713,16 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
 
 // ======================== PDSCH Decode ========================
 
-bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
-                          int n_rb_dl, int pci, float freq_offset_hz,
+bool lte_decode_pdsch_sib(const float *iq, int32_t iq_len, int32_t subframe_start,
+                          int32_t n_rb_dl, int32_t pci, float freq_offset_hz,
                           const void *fft_twiddle, const lte_dci_t *dci,
-                          uint8_t *out_bits, int *out_len)
+                          uint8_t *out_bits, int32_t *out_len)
 {
     if (!iq || !dci || !dci->valid || !out_bits || !out_len) return false;
     *out_len = 0;
 
     const cf_t *twiddle = (const cf_t *)fft_twiddle;
-    int fft_size = 128;
+    int32_t fft_size = 128;
     float dp = 2.0f * (float)M_PI * freq_offset_hz / (float)LTE_SAMPLE_RATE;
     float step_re = cosf(dp), step_im = sinf(dp);
 
@@ -729,28 +730,28 @@ bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
     // For 6-RB cell: symbols 3-6 in slot 0, symbols 0-6 in slot 1
     // Actually for n_ctrl_sym=3: data starts at symbol 3
 
-    int n_ctrl = 3; // For 6 RBs, typically 3 OFDM symbols for control
-    int n_data_sym = 14 - n_ctrl; // 11 data symbols per subframe
+    int32_t n_ctrl = 3; // For 6 RBs, typically 3 OFDM symbols for control
+    int32_t n_data_sym = 14 - n_ctrl; // 11 data symbols per subframe
 
     // Extract data OFDM symbols
-    int max_re = n_data_sym * dci->n_prb * 12;
+    int32_t max_re = n_data_sym * dci->n_prb * 12;
     int8_t *soft_data = calloc(max_re * 2, sizeof(int8_t)); // QPSK: 2 bits per RE
     if (!soft_data) return false;
 
-    int v_shift = pci % 6;
-    int v_shift3 = (v_shift + 3) % 6;
-    int soft_idx = 0;
+    int32_t v_shift = pci % 6;
+    int32_t v_shift3 = (v_shift + 3) % 6;
+    int32_t soft_idx = 0;
 
     // Navigate to the start of data symbols
-    int pos = subframe_start;
+    int32_t pos = subframe_start;
     // Skip control symbols (symbol 0 has CP0=10, rest CP=9)
     pos += 10 + fft_size; // symbol 0
-    for (int s = 1; s < n_ctrl; s++)
+    for (int32_t s = 1; s < n_ctrl; s++)
         pos += 9 + fft_size; // symbols 1..(n_ctrl-1)
 
     // Process remaining symbols
-    for (int sym_in_sf = n_ctrl; sym_in_sf < 14 && soft_idx < max_re * 2; sym_in_sf++) {
-        int cp_len = 9; // Normal CP (not first symbol of slot, which we already passed)
+    for (int32_t sym_in_sf = n_ctrl; sym_in_sf < 14 && soft_idx < max_re * 2; sym_in_sf++) {
+        int32_t cp_len = 9; // Normal CP (not first symbol of slot, which we already passed)
         // First symbol of slot 1 (sym_in_sf == 7) has CP0=10
         if (sym_in_sf == 7) cp_len = 10;
         pos += cp_len;
@@ -760,7 +761,7 @@ bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
         cf_t sym_fft[128];
         float osc_re = cosf(dp * pos);
         float osc_im = sinf(dp * pos);
-        for (int i = 0; i < fft_size; i++) {
+        for (int32_t i = 0; i < fft_size; i++) {
             float I = iq[(pos + i) * 2];
             float Q = iq[(pos + i) * 2 + 1];
             sym_fft[i].re = I * osc_re + Q * osc_im;
@@ -773,26 +774,26 @@ bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
         pos += fft_size;
 
         // Extract REs for allocated PRBs
-        for (int prb = dci->prb_start; prb < dci->prb_start + dci->n_prb && prb < n_rb_dl; prb++) {
-            for (int sc = 0; sc < 12; sc++) {
-                int k = prb * 12 + sc; // subcarrier index within BW
+        for (int32_t prb = dci->prb_start; prb < dci->prb_start + dci->n_prb && prb < n_rb_dl; prb++) {
+            for (int32_t sc = 0; sc < 12; sc++) {
+                int32_t k = prb * 12 + sc; // subcarrier index within BW
                 // CRS exclusion (symbols 0,4,7,11 relative to subframe)
-                int sym_in_slot = sym_in_sf % 7;
+                int32_t sym_in_slot = sym_in_sf % 7;
                 if (sym_in_slot == 0 || sym_in_slot == 4) {
-                    int kmod6 = k % 6;
+                    int32_t kmod6 = k % 6;
                     if (kmod6 == v_shift || kmod6 == v_shift3) continue;
                 }
                 // Map to FFT bin (center-aligned)
-                int half_bw = n_rb_dl * 6; // Half BW in subcarriers
-                int sc_centered = k - half_bw; // Relative to DC
+                int32_t half_bw = n_rb_dl * 6; // Half BW in subcarriers
+                int32_t sc_centered = k - half_bw; // Relative to DC
                 if (sc_centered == 0) continue; // skip DC
-                int bin = (sc_centered > 0) ? sc_centered : (fft_size + sc_centered);
+                int32_t bin = (sc_centered > 0) ? sc_centered : (fft_size + sc_centered);
                 if (bin < 0 || bin >= fft_size) continue;
 
                 float re = sym_fft[bin].re;
                 float im = sym_fft[bin].im;
-                int vr = (int)(re * 8.0f);
-                int vi = (int)(im * 8.0f);
+                int32_t vr = (int32_t)(re * 8.0f);
+                int32_t vi = (int32_t)(im * 8.0f);
                 if (vr > 127) vr = 127;
                 if (vr < -127) vr = -127;
                 if (vi > 127) vi = 127;
@@ -804,11 +805,11 @@ bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
     }
 
     // Rate de-matching: coded bits → turbo decoder input
-    int tbs = dci->tbs;
-    int K = tbs + 24; // +CRC24A
+    int32_t tbs = dci->tbs;
+    int32_t K = tbs + 24; // +CRC24A
     // Find valid turbo interleaver size (>= K)
-    int K_turbo = 0;
-    for (int i = 0; qpp_table[i].K; i++) {
+    int32_t K_turbo = 0;
+    for (int32_t i = 0; qpp_table[i].K; i++) {
         if (qpp_table[i].K >= K) { K_turbo = qpp_table[i].K; break; }
     }
     if (K_turbo == 0 || K_turbo > 6144) { free(soft_data); return false; }
@@ -825,10 +826,10 @@ bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
     }
 
     // Simple rate de-matching: distribute soft bits into 3 streams (circular buffer read)
-    int cb_size = 3 * K_turbo;
-    int rv_offset = 0; // rv=0 start
-    for (int i = 0; i < soft_idx && i < cb_size; i++) {
-        int cb_idx = (rv_offset + i) % cb_size;
+    int32_t cb_size = 3 * K_turbo;
+    int32_t rv_offset = 0; // rv=0 start
+    for (int32_t i = 0; i < soft_idx && i < cb_size; i++) {
+        int32_t cb_idx = (rv_offset + i) % cb_size;
         if (cb_idx < K_turbo)
             sys_soft[cb_idx] += soft_data[i]; // accumulate for combining
         else if (cb_idx < 2 * K_turbo)
@@ -849,7 +850,7 @@ bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
     // CRC-24A check
     uint32_t crc = crc24a(decoded, tbs);
     uint32_t rx_crc = 0;
-    for (int i = 0; i < 24; i++)
+    for (int32_t i = 0; i < 24; i++)
         rx_crc |= (uint32_t)(decoded[tbs + i] & 1) << (23 - i);
 
     if (crc != rx_crc) {
@@ -871,20 +872,20 @@ static bool parse_plmn(bitreader_t *br, uint16_t *mcc, uint16_t *mnc)
 {
     // MCC: SEQUENCE (SIZE 3) OF INTEGER (0..9)
     *mcc = 0;
-    for (int i = 0; i < 3; i++)
+    for (int32_t i = 0; i < 3; i++)
         *mcc = *mcc * 10 + (uint16_t)br_read(br, 4);
 
     // MNC: SEQUENCE (SIZE 2..3) OF INTEGER (0..9)
-    int mnc_len = br_read_bool(br) ? 3 : 2; // length determinant
+    int32_t mnc_len = br_read_bool(br) ? 3 : 2; // length determinant
     *mnc = 0;
-    for (int i = 0; i < mnc_len; i++)
+    for (int32_t i = 0; i < mnc_len; i++)
         *mnc = *mnc * 10 + (uint16_t)br_read(br, 4);
 
     return br_remaining(br) >= 0;
 }
 
 // Parse SystemInformationBlockType1
-bool lte_parse_sib1(const uint8_t *bits, int nbits, lte_sib1_info_t *sib1)
+bool lte_parse_sib1(const uint8_t *bits, int32_t nbits, lte_sib1_info_t *sib1)
 {
     if (!bits || nbits < 40 || !sib1) return false;
     memset(sib1, 0, sizeof(*sib1));
@@ -907,9 +908,9 @@ bool lte_parse_sib1(const uint8_t *bits, int nbits, lte_sib1_info_t *sib1)
 
     // cellAccessRelatedInfo SEQUENCE {
     //   plmn-IdentityList SEQUENCE (SIZE 1..6) OF PLMN-IdentityInfo
-    int plmn_count = (int)br_read_constrained(&br, 1, 6);
+    int32_t plmn_count = (int32_t)br_read_constrained(&br, 1, 6);
     sib1->plmn_count = plmn_count;
-    for (int i = 0; i < plmn_count && i < 6; i++) {
+    for (int32_t i = 0; i < plmn_count && i < 6; i++) {
         parse_plmn(&br, &sib1->plmn[i].mcc, &sib1->plmn[i].mnc);
         // cellReservedForOperatorUse ENUMERATED {reserved, notReserved}
         sib1->plmn[i].cell_reserved = br_read_bool(&br);
@@ -947,15 +948,15 @@ bool lte_parse_sib1(const uint8_t *bits, int nbits, lte_sib1_info_t *sib1)
     sib1->freq_band_indicator = (uint8_t)br_read_constrained(&br, 1, 64);
 
     // schedulingInfoList SEQUENCE (SIZE 1..maxSI-Message) OF SchedulingInfo
-    int si_count = (int)br_read_constrained(&br, 1, LTE_MAX_SI_MSG);
+    int32_t si_count = (int32_t)br_read_constrained(&br, 1, LTE_MAX_SI_MSG);
     sib1->si_sched_count = si_count;
-    for (int i = 0; i < si_count && i < LTE_MAX_SI_MSG; i++) {
+    for (int32_t i = 0; i < si_count && i < LTE_MAX_SI_MSG; i++) {
         // si-Periodicity ENUMERATED {rf8,rf16,rf32,rf64,rf128,rf256,rf512}
         sib1->si_sched[i].si_periodicity = (uint8_t)br_read(&br, 3);
         // sib-MappingInfo SEQUENCE (SIZE 0..maxSIB-1) OF SIB-Type
-        int sib_cnt = (int)br_read_constrained(&br, 0, 31);
+        int32_t sib_cnt = (int32_t)br_read_constrained(&br, 0, 31);
         sib1->si_sched[i].sib_count = sib_cnt;
-        for (int j = 0; j < sib_cnt && j < 8; j++) {
+        for (int32_t j = 0; j < sib_cnt && j < 8; j++) {
             // SIB-Type ENUMERATED {sibType3, sibType4, ..., sibType14, ...}
             sib1->si_sched[i].sib_mapping[j] = (uint8_t)br_read(&br, 5) + 3;
         }
@@ -1084,9 +1085,9 @@ static bool parse_sib4(bitreader_t *br, lte_sib4_t *sib4)
 
     // intraFreqNeighCellList SEQUENCE (SIZE 1..maxCellIntra) OPTIONAL
     if (br_read_bool(br)) {
-        int count = (int)br_read_constrained(br, 1, LTE_MAX_NEIGH_CELLS);
+        int32_t count = (int32_t)br_read_constrained(br, 1, LTE_MAX_NEIGH_CELLS);
         sib4->count = (count > LTE_MAX_NEIGH_CELLS) ? LTE_MAX_NEIGH_CELLS : count;
-        for (int i = 0; i < count; i++) {
+        for (int32_t i = 0; i < count; i++) {
             // physCellId INTEGER (0..503)
             uint16_t pci = (uint16_t)br_read_constrained(br, 0, 503);
             // q-OffsetCell ENUMERATED (-24..24 in steps, mapped to index 0..30)
@@ -1100,8 +1101,8 @@ static bool parse_sib4(bitreader_t *br, lte_sib4_t *sib4)
 
     // intraFreqBlackCellList OPTIONAL — skip
     if (br_read_bool(br)) {
-        int count = (int)br_read_constrained(br, 1, 16);
-        for (int i = 0; i < count; i++) {
+        int32_t count = (int32_t)br_read_constrained(br, 1, 16);
+        for (int32_t i = 0; i < count; i++) {
             br_skip(br, 9 + 3); // PhysCellIdRange: start(9) + range(3)
         }
     }
@@ -1122,10 +1123,10 @@ static bool parse_sib5(bitreader_t *br, lte_sib5_t *sib5)
     (void)ext;
 
     // interFreqCarrierFreqList SEQUENCE (SIZE 1..maxFreq)
-    int count = (int)br_read_constrained(br, 1, LTE_MAX_EARFCN_LIST);
+    int32_t count = (int32_t)br_read_constrained(br, 1, LTE_MAX_EARFCN_LIST);
     sib5->count = (count > LTE_MAX_EARFCN_LIST) ? LTE_MAX_EARFCN_LIST : count;
 
-    for (int i = 0; i < count; i++) {
+    for (int32_t i = 0; i < count; i++) {
         // Extension marker for InterFreqCarrierFreqInfo
         br_read_bool(br);
 
@@ -1178,9 +1179,9 @@ static bool parse_sib6(bitreader_t *br, lte_sib6_t *sib6)
 
     // carrierFreqListUTRA-FDD SEQUENCE (SIZE 1..maxUTRA-FDD-Carrier) OPTIONAL
     if (br_read_bool(br)) {
-        int count = (int)br_read_constrained(br, 1, LTE_MAX_UTRA_FREQ);
+        int32_t count = (int32_t)br_read_constrained(br, 1, LTE_MAX_UTRA_FREQ);
         sib6->count = (count > LTE_MAX_UTRA_FREQ) ? LTE_MAX_UTRA_FREQ : count;
-        for (int i = 0; i < count; i++) {
+        for (int32_t i = 0; i < count; i++) {
             // Extension marker
             br_read_bool(br);
             // carrierFreq ARFCN-ValueUTRA INTEGER (0..16383)
@@ -1211,8 +1212,8 @@ static bool parse_sib6(bitreader_t *br, lte_sib6_t *sib6)
 
     // carrierFreqListUTRA-TDD OPTIONAL — skip
     if (br_read_bool(br)) {
-        int count = (int)br_read_constrained(br, 1, 8);
-        for (int i = 0; i < count; i++) br_skip(br, 14 + 5 + 5 + 7 + 5 + 1);
+        int32_t count = (int32_t)br_read_constrained(br, 1, 8);
+        for (int32_t i = 0; i < count; i++) br_skip(br, 14 + 5 + 5 + 7 + 5 + 1);
     }
 
     sib6->valid = (br_remaining(br) >= 0);
@@ -1234,9 +1235,9 @@ static bool parse_sib7(bitreader_t *br, lte_sib7_t *sib7)
 
     // carrierFreqsInfoList SEQUENCE (SIZE 1..maxGNFG) OPTIONAL
     if (br_read_bool(br)) {
-        int count = (int)br_read_constrained(br, 1, LTE_MAX_GERAN_FREQ);
+        int32_t count = (int32_t)br_read_constrained(br, 1, LTE_MAX_GERAN_FREQ);
         sib7->count = (count > LTE_MAX_GERAN_FREQ) ? LTE_MAX_GERAN_FREQ : count;
-        for (int i = 0; i < count; i++) {
+        for (int32_t i = 0; i < count; i++) {
             // Extension marker
             br_read_bool(br);
             // carrierFreqs SEQUENCE {
@@ -1322,10 +1323,10 @@ static bool parse_sib11(bitreader_t *br, lte_sib11_t *sib11)
     // warningMessageSegmentNumber INTEGER (0..63)
     sib11->warning_msg_segment_num = (uint8_t)br_read(br, 6);
     // warningMessageSegment OCTET STRING
-    int seg_len = br_read_length(br);
+    int32_t seg_len = br_read_length(br);
     if (seg_len > LTE_ETWS_MSG_SIZE) seg_len = LTE_ETWS_MSG_SIZE;
     sib11->warning_msg_len = seg_len;
-    for (int i = 0; i < seg_len; i++)
+    for (int32_t i = 0; i < seg_len; i++)
         sib11->warning_msg[i] = (uint8_t)br_read(br, 8);
     // dataCodingScheme OCTET STRING (SIZE 1) OPTIONAL
     if (br_read_bool(br))
@@ -1349,10 +1350,10 @@ static bool parse_sib12(bitreader_t *br, lte_sib12_t *sib12)
     // warningMessageSegmentNumber INTEGER (0..63)
     sib12->warning_msg_segment_num = (uint8_t)br_read(br, 6);
     // warningMessageSegment OCTET STRING
-    int seg_len = br_read_length(br);
+    int32_t seg_len = br_read_length(br);
     if (seg_len > LTE_CMAS_MSG_SIZE) seg_len = LTE_CMAS_MSG_SIZE;
     sib12->warning_msg_len = seg_len;
-    for (int i = 0; i < seg_len; i++)
+    for (int32_t i = 0; i < seg_len; i++)
         sib12->warning_msg[i] = (uint8_t)br_read(br, 8);
     // dataCodingScheme OCTET STRING (SIZE 1) OPTIONAL
     if (br_read_bool(br))
@@ -1378,7 +1379,7 @@ static bool parse_sib14(bitreader_t *br, lte_sib14_t *sib14)
             //   eab-Category ENUMERATED {a, b, c}
             uint8_t cat = (uint8_t)br_read(br, 2);
             //   eab-BarringBitmap BIT STRING (SIZE 10)
-            for (int ac = 0; ac < 10; ac++) {
+            for (int32_t ac = 0; ac < 10; ac++) {
                 sib14->ac_barring[ac].barred = br_read_bool(br);
                 sib14->ac_barring[ac].category = cat;
             }
@@ -1390,7 +1391,7 @@ static bool parse_sib14(bitreader_t *br, lte_sib14_t *sib14)
 }
 
 // Parse SI message (contains SystemInformation → list of SIBs)
-bool lte_parse_si_msg(const uint8_t *bits, int nbits, lte_sib_results_t *results)
+bool lte_parse_si_msg(const uint8_t *bits, int32_t nbits, lte_sib_results_t *results)
 {
     if (!bits || nbits < 10 || !results) return false;
 
@@ -1409,9 +1410,9 @@ bool lte_parse_si_msg(const uint8_t *bits, int nbits, lte_sib_results_t *results
 
     // SystemInformation-r8-IEs ::= SEQUENCE {
     //   sib-TypeAndInfo SEQUENCE (SIZE 1..maxSIB) OF CHOICE { ... }
-    int sib_count = (int)br_read_constrained(&br, 1, 32);
+    int32_t sib_count = (int32_t)br_read_constrained(&br, 1, 32);
 
-    for (int i = 0; i < sib_count; i++) {
+    for (int32_t i = 0; i < sib_count; i++) {
         // CHOICE index: sib2(0), sib3(1), sib4(2), sib5(3), sib6(4), sib7(5),
         //              sib8(6), sib9(7), sib10(8), sib11(9), sib12-v920(10), ...
         //              sib13-v920(11), sib14-v1130(12), ...
@@ -1493,14 +1494,14 @@ const char *lte_etws_warning_type(uint8_t type_byte)
 }
 
 // Decode CBS text from GSM 7-bit default alphabet or UCS-2
-int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
-                        char *utf8_out, int utf8_max)
+int32_t lte_cbs_decode_text(const uint8_t *data, int32_t data_len, uint8_t dcs,
+                        char *utf8_out, int32_t utf8_max)
 {
     if (!data || !utf8_out || utf8_max < 1) return 0;
     utf8_out[0] = '\0';
 
-    int coding_group = (dcs >> 4) & 0x0F;
-    int charset = 0; // 0=GSM7, 1=8bit, 2=UCS2
+    int32_t coding_group = (dcs >> 4) & 0x0F;
+    int32_t charset = 0; // 0=GSM7, 1=8bit, 2=UCS2
 
     if (coding_group <= 3) {
         charset = 0; // GSM 7-bit default alphabet
@@ -1510,7 +1511,7 @@ int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
         charset = (dcs & 4) ? 1 : 0;
     }
 
-    int out_pos = 0;
+    int32_t out_pos = 0;
 
     if (charset == 0) {
         // GSM 7-bit unpacking
@@ -1525,11 +1526,11 @@ int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
             "\xbf""abcdefghijklmno"
             "pqrstuvwxyz\xe4\xf6\xf1\xfc\xe0";
 
-        int bit_pos = 0;
+        int32_t bit_pos = 0;
         while (bit_pos + 7 <= data_len * 8 && out_pos < utf8_max - 1) {
-            int byte_idx = bit_pos / 8;
-            int bit_off = bit_pos % 8;
-            int ch = (data[byte_idx] >> bit_off) & 0x7F;
+            int32_t byte_idx = bit_pos / 8;
+            int32_t bit_off = bit_pos % 8;
+            int32_t ch = (data[byte_idx] >> bit_off) & 0x7F;
             if (bit_off > 1 && byte_idx + 1 < data_len)
                 ch |= (data[byte_idx + 1] << (8 - bit_off)) & 0x7F;
             if (ch < 128 && gsm7_basic[ch] >= 0x20)
@@ -1542,7 +1543,7 @@ int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
         }
     } else if (charset == 2) {
         // UCS-2: simple 2-byte characters → UTF-8
-        for (int i = 0; i + 1 < data_len && out_pos < utf8_max - 3; i += 2) {
+        for (int32_t i = 0; i + 1 < data_len && out_pos < utf8_max - 3; i += 2) {
             uint16_t ucs2 = ((uint16_t)data[i] << 8) | data[i + 1];
             if (ucs2 == 0) break;
             if (ucs2 < 0x80) {
@@ -1558,7 +1559,7 @@ int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
         }
     } else {
         // 8-bit: copy as-is (Latin-1)
-        for (int i = 0; i < data_len && out_pos < utf8_max - 1; i++) {
+        for (int32_t i = 0; i < data_len && out_pos < utf8_max - 1; i++) {
             if (data[i] >= 0x20 && data[i] < 0x7F)
                 utf8_out[out_pos++] = (char)data[i];
             else if (data[i] == 0) break;

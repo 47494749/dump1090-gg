@@ -17,6 +17,7 @@
 // option) any later version.
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -60,7 +61,7 @@ struct iot_decoder_state {
 
     // Pulse buffer
     pulse_t  pulses[IOT_MAX_PULSES];
-    int      pulse_count;
+    int32_t      pulse_count;
 
     // FSK demodulator state
     int16_t  fsk_prev_i;
@@ -135,12 +136,12 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
-static uint8_t crc8(const uint8_t *data, int len, uint8_t poly, uint8_t init)
+static uint8_t crc8(const uint8_t *data, int32_t len, uint8_t poly, uint8_t init)
 {
     uint8_t crc = init;
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         crc ^= data[i];
-        for (int b = 0; b < 8; b++) {
+        for (int32_t b = 0; b < 8; b++) {
             if (crc & 0x80)
                 crc = (crc << 1) ^ poly;
             else
@@ -150,12 +151,12 @@ static uint8_t crc8(const uint8_t *data, int len, uint8_t poly, uint8_t init)
     return crc;
 }
 
-static uint16_t crc16_ccitt(const uint8_t *data, int len, uint16_t init)
+static uint16_t crc16_ccitt(const uint8_t *data, int32_t len, uint16_t init)
 {
     uint16_t crc = init;
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
-        for (int b = 0; b < 8; b++) {
+        for (int32_t b = 0; b < 8; b++) {
             if (crc & 0x8000)
                 crc = (crc << 1) ^ 0x1021;
             else
@@ -169,18 +170,18 @@ static uint16_t crc16_ccitt(const uint8_t *data, int len, uint16_t init)
 
 // LaCrosse TX29/TX35: pulse ~500µs, gap ~1000µs for '1', ~2000µs for '0'
 // Preamble: 10 x '0' bits, then 0x0A sync nibble
-static bool decode_lacrosse_tx(const pulse_t *pulses, int count, iot_device_msg_t *msg)
+static bool decode_lacrosse_tx(const pulse_t *pulses, int32_t count, iot_device_msg_t *msg)
 {
     if (count < 40) return false;
 
     // Find preamble: pulses ~500µs, gaps alternating ~1000/2000µs
-    int start = -1;
-    for (int i = 0; i < count - 40; i++) {
+    int32_t start = -1;
+    for (int32_t i = 0; i < count - 40; i++) {
         if (pulses[i].pulse_us >= 400 && pulses[i].pulse_us <= 600 &&
             pulses[i].gap_us >= 1800 && pulses[i].gap_us <= 2200) {
             // Possible '0' preamble bit
-            int good = 0;
-            for (int j = 0; j < 4 && (i+j) < count; j++) {
+            int32_t good = 0;
+            for (int32_t j = 0; j < 4 && (i+j) < count; j++) {
                 if (pulses[i+j].pulse_us >= 400 && pulses[i+j].pulse_us <= 600 &&
                     pulses[i+j].gap_us >= 1800 && pulses[i+j].gap_us <= 2200)
                     good++;
@@ -192,10 +193,10 @@ static bool decode_lacrosse_tx(const pulse_t *pulses, int count, iot_device_msg_
 
     // Decode bits: short gap (~1000µs) = 1, long gap (~2000µs) = 0
     uint8_t bytes[5] = {0};
-    int bit_idx = 0;
-    for (int i = start; i < count && bit_idx < 40; i++) {
+    int32_t bit_idx = 0;
+    for (int32_t i = start; i < count && bit_idx < 40; i++) {
         if (pulses[i].pulse_us < 300 || pulses[i].pulse_us > 700) break;
-        int bit = (pulses[i].gap_us < 1500) ? 1 : 0;
+        int32_t bit = (pulses[i].gap_us < 1500) ? 1 : 0;
         bytes[bit_idx / 8] |= (bit << (7 - (bit_idx % 8)));
         bit_idx++;
     }
@@ -207,7 +208,7 @@ static bool decode_lacrosse_tx(const pulse_t *pulses, int count, iot_device_msg_
 
     // Checksum: XOR of nibbles should be 0
     uint8_t chk = 0;
-    for (int i = 0; i < bit_idx / 4; i++) {
+    for (int32_t i = 0; i < bit_idx / 4; i++) {
         uint8_t nibble = (bytes[i/2] >> ((i%2)?0:4)) & 0x0F;
         chk ^= nibble;
     }
@@ -223,12 +224,12 @@ static bool decode_lacrosse_tx(const pulse_t *pulses, int count, iot_device_msg_
 
     if (type_nibble == 0x00) {
         // Temperature: raw = nibbles 3-5, temp = raw/10 - 40
-        int raw = ((bytes[2] & 0x0F) * 100) + ((bytes[3] >> 4) * 10) + (bytes[3] & 0x0F);
+        int32_t raw = ((bytes[2] & 0x0F) * 100) + ((bytes[3] >> 4) * 10) + (bytes[3] & 0x0F);
         msg->temperature_c = raw / 10.0f - 40.0f;
         msg->humidity_pct = NAN;
     } else {
         // Humidity
-        int raw = ((bytes[2] & 0x0F) * 100) + ((bytes[3] >> 4) * 10) + (bytes[3] & 0x0F);
+        int32_t raw = ((bytes[2] & 0x0F) * 100) + ((bytes[3] >> 4) * 10) + (bytes[3] & 0x0F);
         msg->humidity_pct = (float)raw / 10.0f;
         msg->temperature_c = NAN;
     }
@@ -249,16 +250,16 @@ static bool decode_lacrosse_tx(const pulse_t *pulses, int count, iot_device_msg_
 
 // Bresser 5-in-1: OOK, 17 byte message, bit rate ~8 kbps
 // Pulse: ~125µs high, gap: ~125µs = '1', ~375µs = '0'
-static bool decode_bresser_5in1(const pulse_t *pulses, int count, iot_device_msg_t *msg)
+static bool decode_bresser_5in1(const pulse_t *pulses, int32_t count, iot_device_msg_t *msg)
 {
     if (count < 136) return false;  // 17 bytes * 8 bits
 
     // Look for consistent short pulses (~125µs)
-    int start = -1;
-    for (int i = 0; i < count - 136; i++) {
+    int32_t start = -1;
+    for (int32_t i = 0; i < count - 136; i++) {
         if (pulses[i].pulse_us >= 80 && pulses[i].pulse_us <= 180) {
-            int good = 0;
-            for (int j = 0; j < 8 && (i+j) < count; j++) {
+            int32_t good = 0;
+            for (int32_t j = 0; j < 8 && (i+j) < count; j++) {
                 if (pulses[i+j].pulse_us >= 80 && pulses[i+j].pulse_us <= 180)
                     good++;
             }
@@ -269,8 +270,8 @@ static bool decode_bresser_5in1(const pulse_t *pulses, int count, iot_device_msg
 
     // Decode: short gap = 1, long gap = 0
     uint8_t bytes[17] = {0};
-    for (int i = 0; i < 136 && (start + i) < count; i++) {
-        int bit = (pulses[start + i].gap_us < 250) ? 1 : 0;
+    for (int32_t i = 0; i < 136 && (start + i) < count; i++) {
+        int32_t bit = (pulses[start + i].gap_us < 250) ? 1 : 0;
         bytes[i / 8] |= (bit << (7 - (i % 8)));
     }
 
@@ -311,23 +312,23 @@ static bool decode_bresser_5in1(const pulse_t *pulses, int count, iot_device_msg
 // wMBus Mode C/T: GFSK ±50 kHz, 100 kbps (Mode C) or ~32.768 kbps (Mode T)
 // Preamble: Mode C = 0101...0101 + 0x543D, Mode T = 1010...1010 + 0x3965543D
 // We require the FULL 16-bit sync 0x543D (Mode C) to avoid false positives.
-static bool decode_wmbus(const uint8_t *bits, int bit_count, iot_device_msg_t *msg)
+static bool decode_wmbus(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
 {
     if (bit_count < 120) return false;  // need preamble + header + CRC
 
     // Search for wMBus Mode C sync: 0101 0100 0011 1101 = 0x543D
     // Also require at least 8 bits of alternating preamble before sync
-    int start = -1;
+    int32_t start = -1;
     iot_protocol_t proto = IOT_PROTO_WMBUS_C;
-    for (int i = 8; i < bit_count - 120; i++) {
+    for (int32_t i = 8; i < bit_count - 120; i++) {
         uint16_t word = 0;
-        for (int b = 0; b < 16; b++)
+        for (int32_t b = 0; b < 16; b++)
             word = (word << 1) | (bits[i + b] & 1);
         if (word == 0x543D) {
             // Verify preamble: at least 6 of 8 preceding bits should alternate (0101...)
-            int alt_count = 0;
-            for (int p = 0; p < 8 && (i - 8 + p) >= 0; p++) {
-                int expected = (p % 2 == 0) ? 0 : 1;
+            int32_t alt_count = 0;
+            for (int32_t p = 0; p < 8 && (i - 8 + p) >= 0; p++) {
+                int32_t expected = (p % 2 == 0) ? 0 : 1;
                 if ((bits[i - 8 + p] & 1) == expected) alt_count++;
             }
             if (alt_count >= 6) {
@@ -338,7 +339,7 @@ static bool decode_wmbus(const uint8_t *bits, int bit_count, iot_device_msg_t *m
         // Mode T: require 32-bit sync 0x3965543D
         if (i + 32 <= bit_count) {
             uint32_t word32 = 0;
-            for (int b = 0; b < 32; b++)
+            for (int32_t b = 0; b < 32; b++)
                 word32 = (word32 << 1) | (bits[i + b] & 1);
             if (word32 == 0x3965543D) {
                 start = i + 32;
@@ -352,14 +353,14 @@ static bool decode_wmbus(const uint8_t *bits, int bit_count, iot_device_msg_t *m
 
     // Decode bytes after sync
     uint8_t bytes[64] = {0};
-    int byte_count = 0;
-    for (int i = start; i + 8 <= bit_count && byte_count < 64; i += 8) {
+    int32_t byte_count = 0;
+    for (int32_t i = start; i + 8 <= bit_count && byte_count < 64; i += 8) {
         uint8_t byte = 0;
-        for (int b = 0; b < 8; b++)
+        for (int32_t b = 0; b < 8; b++)
             byte = (byte << 1) | (bits[i + b] & 1);
         bytes[byte_count++] = byte;
     }
-    if (byte_count < 10) return false;  // too short
+    if (byte_count < 10) return false;  // too int16_t
 
     // wMBus header: L-field (length), C-field, M-field(2), A-field(6)
     uint8_t l_field = bytes[0];
@@ -389,7 +390,7 @@ static bool decode_wmbus(const uint8_t *bits, int bit_count, iot_device_msg_t *m
     msg->battery_ok = 255;
     msg->freq_hz = 868.95e6;
 
-    int copy_len = byte_count < 64 ? byte_count : 64;
+    int32_t copy_len = byte_count < 64 ? byte_count : 64;
     memcpy(msg->payload, bytes, copy_len);
     msg->payload_len = copy_len;
     msg->timestamp_ms = now_ms();
@@ -397,19 +398,19 @@ static bool decode_wmbus(const uint8_t *bits, int bit_count, iot_device_msg_t *m
 }
 
 // Honeywell CM921/CM927 (Evohome/RAMSES II): FSK, ~38.4 kbps, Manchester encoded
-static bool decode_honeywell_cm(const uint8_t *bits, int bit_count, iot_device_msg_t *msg)
+static bool decode_honeywell_cm(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
 {
     if (bit_count < 120) return false;
 
     // Sync pattern: 0xFF 0x00 0x33 (preamble 1010... then sync word)
-    int start = -1;
-    for (int i = 0; i < bit_count - 120; i += 8) {
+    int32_t start = -1;
+    for (int32_t i = 0; i < bit_count - 120; i += 8) {
         uint8_t b0 = 0, b1 = 0, b2 = 0;
-        for (int b = 0; b < 8 && (i+b) < bit_count; b++)
+        for (int32_t b = 0; b < 8 && (i+b) < bit_count; b++)
             b0 = (b0 << 1) | (bits[i+b] & 1);
-        for (int b = 0; b < 8 && (i+8+b) < bit_count; b++)
+        for (int32_t b = 0; b < 8 && (i+8+b) < bit_count; b++)
             b1 = (b1 << 1) | (bits[i+8+b] & 1);
-        for (int b = 0; b < 8 && (i+16+b) < bit_count; b++)
+        for (int32_t b = 0; b < 8 && (i+16+b) < bit_count; b++)
             b2 = (b2 << 1) | (bits[i+16+b] & 1);
         if (b0 == 0xFF && b1 == 0x00 && b2 == 0x33) {
             start = i + 24;
@@ -420,10 +421,10 @@ static bool decode_honeywell_cm(const uint8_t *bits, int bit_count, iot_device_m
 
     // Manchester decode
     uint8_t bytes[32] = {0};
-    int byte_count = 0;
-    int bit_idx = 0;
-    for (int i = start; i + 1 < bit_count && byte_count < 32; i += 2) {
-        int bit = (bits[i] > bits[i+1]) ? 1 : 0;
+    int32_t byte_count = 0;
+    int32_t bit_idx = 0;
+    for (int32_t i = start; i + 1 < bit_count && byte_count < 32; i += 2) {
+        int32_t bit = (bits[i] > bits[i+1]) ? 1 : 0;
         bytes[byte_count] |= (bit << (7 - bit_idx));
         bit_idx++;
         if (bit_idx == 8) { bit_idx = 0; byte_count++; }
@@ -452,7 +453,7 @@ static bool decode_honeywell_cm(const uint8_t *bits, int bit_count, iot_device_m
     // Try to find temperature in the payload using known Evohome patterns:
     // Pattern 1: command 0x30C9 anywhere → next 3 bytes = [zone][temp_hi][temp_lo]
     // Pattern 2: two consecutive bytes that look like temp/100 in range -20..60°C
-    for (int i = 3; i + 4 < byte_count; i++) {
+    for (int32_t i = 3; i + 4 < byte_count; i++) {
         if (bytes[i] == 0x30 && bytes[i+1] == 0xC9 && i + 5 < byte_count) {
             // 0x30C9 command found: payload = [zone_id][temp_hi][temp_lo]
             int16_t raw = (int16_t)((bytes[i+3] << 8) | bytes[i+4]);
@@ -478,7 +479,7 @@ static bool decode_honeywell_cm(const uint8_t *bits, int bit_count, iot_device_m
             msg->temperature_c = raw / 100.0f;
     }
 
-    int copy_len = byte_count < 32 ? byte_count : 32;
+    int32_t copy_len = byte_count < 32 ? byte_count : 32;
     memcpy(msg->payload, bytes, copy_len);
     msg->payload_len = copy_len;
     msg->timestamp_ms = now_ms();
@@ -504,7 +505,7 @@ void iotDecoderDestroy(iot_decoder_state_t *state)
     free(state);
 }
 
-int iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg)
+int32_t iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg)
 {
     if (!state || !state->out_queue) return 0;
     return msg_queue_pop(state->out_queue, msg);
@@ -513,8 +514,8 @@ int iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg)
 // AM envelope detection: sqrt(I² + Q²) approximated
 static inline uint8_t envelope(int8_t i, int8_t q)
 {
-    int ai = abs(i);
-    int aq = abs(q);
+    int32_t ai = abs(i);
+    int32_t aq = abs(q);
     // Fast magnitude approximation: max(|I|,|Q|) + min(|I|,|Q|)/4
     if (ai > aq)
         return (uint8_t)(ai + (aq >> 2));
@@ -598,16 +599,16 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
     // Pass 2: FSK demodulation at multiple bit rates
     // wMBus Mode C = 100 kbps (20 samp/bit), Mode T = 32.768 kbps (61 samp/bit)
     // Honeywell CM9xx = 38.4 kbps (52 samp/bit)
-    static const int bit_periods[] = { 20, 52, 61 };  // samples per bit
-    static const int num_rates = 3;
+    static const int32_t bit_periods[] = { 20, 52, 61 };  // samples per bit
+    static const int32_t num_rates = 3;
 
-    for (int rate_idx = 0; rate_idx < num_rates; rate_idx++) {
-        int samples_per_bit = bit_periods[rate_idx];
+    for (int32_t rate_idx = 0; rate_idx < num_rates; rate_idx++) {
+        int32_t samples_per_bit = bit_periods[rate_idx];
 
         uint8_t fsk_bits_local[4096];
-        int fsk_bit_count = 0;
+        int32_t fsk_bit_count = 0;
         int32_t accum = 0;
-        int count = 0;
+        int32_t count = 0;
         int8_t prev_i = state->fsk_prev_i;
         int8_t prev_q = state->fsk_prev_q;
 
@@ -623,7 +624,7 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
             count++;
 
             if (count >= samples_per_bit) {
-                int bit = (accum > 0) ? 1 : 0;
+                int32_t bit = (accum > 0) ? 1 : 0;
                 if (fsk_bit_count < 4096)
                     fsk_bits_local[fsk_bit_count++] = bit;
                 accum = 0;

@@ -16,6 +16,7 @@
 // option) any later version.
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
@@ -111,36 +112,36 @@ typedef enum {
 } acars_frame_state_t;
 
 typedef struct {
-    int      chn;           // Channel index
+    int32_t      chn;           // Channel index
     double   freq;          // Channel frequency (Hz)
 
     // Channelizer: complex mixer weights (precomputed)
     float complex *mixer;   // mixer[decim_factor] = exp(-j*2*pi*f_offset*n)
-    int      decim_factor;  // Decimation factor
+    int32_t      decim_factor;  // Decimation factor
 
     // Decimated AM envelope buffer
     float   *dm_buffer;     // Decimated AM samples
-    int      dm_len;        // Number of decimated samples in current block
+    int32_t      dm_len;        // Number of decimated samples in current block
 
     // MSK demodulator state
     double   MskPhi;        // VCO phase
     double   MskDf;         // PLL frequency correction
     float    MskClk;        // Bit clock accumulator
     double   MskLvlSum;     // Signal level accumulator
-    int      MskBitCount;   // Signal level sample count
+    int32_t      MskBitCount;   // Signal level sample count
     uint32_t MskS;          // Symbol counter (I/Q alternation)
-    int      idx;           // Matched filter input buffer index
+    int32_t      idx;           // Matched filter input buffer index
     float complex *inb;     // Matched filter input buffer
 
     // Bit assembly
     uint8_t outbits;  // Shift register for bit assembly
-    int      nbits;         // Bits remaining before byte complete
+    int32_t      nbits;         // Bits remaining before byte complete
 
     // ACARS framing
     acars_frame_state_t frame_state;
     uint8_t  msg_buf[ACARS_MAX_MSGLEN + 16];
-    int      msg_len;
-    int      msg_err;       // Parity error count
+    int32_t      msg_len;
+    int32_t      msg_err;       // Parity error count
     uint8_t  crc_bytes[2];
 } acars_channel_t;
 
@@ -157,7 +158,7 @@ struct acars_state {
     acars_stats_t stats;
 
     // IQ buffer for block processing
-    int      iq_block_size;  // IQ samples per decimation block
+    int32_t      iq_block_size;  // IQ samples per decimation block
 };
 
 // ======================== Create / Destroy ========================
@@ -170,7 +171,7 @@ struct acars_state *acars_create(const acars_config_t *config)
     s->config = *config;
 
     // Compute decimation factor
-    int decim = (int)(config->sample_rate / ACARS_INTRATE + 0.5);
+    int32_t decim = (int32_t)(config->sample_rate / ACARS_INTRATE + 0.5);
     if (decim < 1) decim = 1;
     s->iq_block_size = decim;
 
@@ -178,14 +179,14 @@ struct acars_state *acars_create(const acars_config_t *config)
             config->sample_rate, ACARS_INTRATE, decim, config->num_channels);
 
     // Compute MSK matched filter (cosine at 600 Hz)
-    for (int i = 0; i < MFLT_TOTAL; i++) {
+    for (int32_t i = 0; i < MFLT_TOTAL; i++) {
         float v = cosf(2.0f * (float)M_PI * 600.0f / ACARS_INTRATE / MFLT_OVER *
                         (float)(i - (MFLT_TOTAL - 1) / 2));
         s->msk_filter[i] = (v < 0) ? 0 : v;
     }
 
     // Initialize per-channel state
-    for (int n = 0; n < config->num_channels; n++) {
+    for (int32_t n = 0; n < config->num_channels; n++) {
         acars_channel_t *ch = &s->channels[n];
         ch->chn = n;
         ch->freq = config->channel_freqs[n];
@@ -198,7 +199,7 @@ struct acars_state *acars_create(const acars_config_t *config)
         // Precompute mixer: e^(-j*2*pi*f_offset*n / sample_rate) / (decim * 127.5)
         double f_offset = (ch->freq - config->center_freq) / config->sample_rate * 2.0 * M_PI;
         double norm = 1.0 / (decim * 127.5);
-        for (int k = 0; k < decim; k++) {
+        for (int32_t k = 0; k < decim; k++) {
             ch->mixer[k] = (float complex)(norm * cexp(-I * f_offset * k));
         }
 
@@ -232,7 +233,7 @@ struct acars_state *acars_create(const acars_config_t *config)
 void acars_destroy(struct acars_state *state)
 {
     if (!state) return;
-    for (int n = 0; n < state->config.num_channels; n++) {
+    for (int32_t n = 0; n < state->config.num_channels; n++) {
         free(state->channels[n].mixer);
         free(state->channels[n].dm_buffer);
         free(state->channels[n].inb);
@@ -260,11 +261,11 @@ static bool acars_is_token_char(char c)
     return isalnum((uint8_t)c) || c == ' ';
 }
 
-static int acars_copy_ascii_field(char *dst, size_t dst_size,
-                                  const uint8_t *src, int start, int end, int len)
+static int32_t acars_copy_ascii_field(char *dst, size_t dst_size,
+                                  const uint8_t *src, int32_t start, int32_t end, int32_t len)
 {
-    int available = end - start;
-    int copy_len = len;
+    int32_t available = end - start;
+    int32_t copy_len = len;
 
     if (available < copy_len)
         copy_len = available;
@@ -272,21 +273,21 @@ static int acars_copy_ascii_field(char *dst, size_t dst_size,
         copy_len = 0;
     if (dst_size == 0)
         return 0;
-    if (copy_len > (int)dst_size - 1)
-        copy_len = (int)dst_size - 1;
+    if (copy_len > (int32_t)dst_size - 1)
+        copy_len = (int32_t)dst_size - 1;
 
-    for (int i = 0; i < copy_len; i++)
+    for (int32_t i = 0; i < copy_len; i++)
         dst[i] = acars_ascii(src[start + i]);
     dst[copy_len] = '\0';
     return copy_len;
 }
 
-static bool acars_match_token(const uint8_t *src, int start, int end, int len)
+static bool acars_match_token(const uint8_t *src, int32_t start, int32_t end, int32_t len)
 {
     if (end - start < len)
         return false;
 
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         char c = acars_ascii(src[start + i]);
         if (!acars_is_token_char(c))
             return false;
@@ -294,14 +295,14 @@ static bool acars_match_token(const uint8_t *src, int start, int end, int len)
     return true;
 }
 
-static bool acars_match_sublabel_mfi(const uint8_t *src, int start, int end)
+static bool acars_match_sublabel_mfi(const uint8_t *src, int32_t start, int32_t end)
 {
     bool any_non_space = false;
 
     if (end - start < 4)
         return false;
 
-    for (int i = 0; i < 4; i++) {
+    for (int32_t i = 0; i < 4; i++) {
         char c = acars_ascii(src[start + i]);
         if (!(isalnum((uint8_t)c) || c == ' '))
             return false;
@@ -312,15 +313,15 @@ static bool acars_match_sublabel_mfi(const uint8_t *src, int start, int end)
     return any_non_space;
 }
 
-static int acars_parse_dsp_header(acars_msg_t *msg,
-                                  const uint8_t *src, int start, int end)
+static int32_t acars_parse_dsp_header(acars_msg_t *msg,
+                                  const uint8_t *src, int32_t start, int32_t end)
 {
-    int close = -1;
+    int32_t close = -1;
 
     if (start >= end || acars_ascii(src[start]) != '/')
         return start;
 
-    for (int i = start + 1; i < end && i - start <= 32; i++) {
+    for (int32_t i = start + 1; i < end && i - start <= 32; i++) {
         char c = acars_ascii(src[i]);
         if (c == '/') {
             close = i;
@@ -371,13 +372,13 @@ static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
         : -99.0f;
     msg.errors = ch->msg_err;
 
-    if (ch->msg_len < 13) return;  // Too short
+    if (ch->msg_len < 13) return;  // Too int16_t
 
     // Parse ACARS fields from message buffer
     // Byte 0: mode, 1-7: reg, 8: ack, 9-10: label, 11: block_id, 12: STX/ETX
     msg.mode = ch->msg_buf[0] & 0x7F;
 
-    for (int i = 0; i < 7 && i + 1 < ch->msg_len; i++)
+    for (int32_t i = 0; i < 7 && i + 1 < ch->msg_len; i++)
         msg.reg[i] = ch->msg_buf[i + 1] & 0x7F;
     msg.reg[7] = '\0';
 
@@ -389,8 +390,8 @@ static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
 
     msg.block_id = (ch->msg_len > 11) ? (ch->msg_buf[11] & 0x7F) : ' ';
 
-    int text_start = 12;
-    int text_end = ch->msg_len;
+    int32_t text_start = 12;
+    int32_t text_end = ch->msg_len;
 
     if (ch->msg_len > 12) {
         char marker = acars_ascii(ch->msg_buf[12]);
@@ -424,10 +425,10 @@ static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
     }
 
     // Remaining text
-    int tlen = text_end - text_start;
+    int32_t tlen = text_end - text_start;
     if (tlen > ACARS_MAX_MSGLEN) tlen = ACARS_MAX_MSGLEN;
     if (tlen > 0) {
-        for (int i = 0; i < tlen; i++)
+        for (int32_t i = 0; i < tlen; i++)
             msg.text[i] = acars_ascii(ch->msg_buf[text_start + i]);
     }
     msg.text[tlen > 0 ? tlen : 0] = '\0';
@@ -543,7 +544,7 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
         {
             // CRC check (must be done BEFORE any buffer mutation)
             uint16_t crc = 0;
-            for (int i = 0; i < ch->msg_len; i++) {
+            for (int32_t i = 0; i < ch->msg_len; i++) {
                 UPDATE_CRC(crc, ch->msg_buf[i]);
             }
             UPDATE_CRC(crc, ch->crc_bytes[0]);
@@ -562,7 +563,7 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
                                   (ETX_CHAR & STX_CHAR);
 
             // Strip parity bits
-            for (int i = 0; i < ch->msg_len; i++)
+            for (int32_t i = 0; i < ch->msg_len; i++)
                 ch->msg_buf[i] &= 0x7F;
 
             acars_output_message(state, ch);
@@ -580,17 +581,17 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
 
 // ======================== MSK Demodulator (per channel) ========================
 
-static void acars_demod_msk(struct acars_state *state, acars_channel_t *ch, int len)
+static void acars_demod_msk(struct acars_state *state, acars_channel_t *ch, int32_t len)
 {
-    int idx = ch->idx;
+    int32_t idx = ch->idx;
     double p = ch->MskPhi;
     const float *h = state->msk_filter;
 
-    for (int n = 0; n < len; n++) {
+    for (int32_t n = 0; n < len; n++) {
         float in;
         double s;
         float complex v;
-        int j, o;
+        int32_t j, o;
 
         // VCO: center frequency 1800 Hz
         s = 1800.0 / ACARS_INTRATE * 2.0 * M_PI + ch->MskDf;
@@ -610,7 +611,7 @@ static void acars_demod_msk(struct acars_state *state, acars_channel_t *ch, int 
             ch->MskClk -= 3.0f * (float)M_PI / 2.0f;
 
             // Matched filter
-            o = (int)(MFLT_OVER * (ch->MskClk / s + 0.5));
+            o = (int32_t)(MFLT_OVER * (ch->MskClk / s + 0.5));
             if (o > MFLT_OVER) o = MFLT_OVER;
             v = 0;
             for (j = 0; j < MFLT_LEN; j++, o += MFLT_OVER) {
@@ -660,8 +661,8 @@ static void acars_demod_msk(struct acars_state *state, acars_channel_t *ch, int 
 void acars_process(struct acars_state *state, const uint8_t *iq_data, uint32_t len)
 {
     uint32_t samples = len / 2;  // IQ pairs
-    int decim = state->iq_block_size;
-    int nch = state->config.num_channels;
+    int32_t decim = state->iq_block_size;
+    int32_t nch = state->config.num_channels;
 
     state->stats.samples_processed += samples;
 
@@ -669,12 +670,12 @@ void acars_process(struct acars_state *state, const uint8_t *iq_data, uint32_t l
     uint32_t pos = 0;
     while (pos + (uint32_t)decim * 2 <= len) {
         // For each channel: mix, integrate (decimate), take AM envelope
-        for (int c = 0; c < nch; c++) {
+        for (int32_t c = 0; c < nch; c++) {
             acars_channel_t *ch = &state->channels[c];
             float complex D = 0;
             const float complex *wf = ch->mixer;
 
-            for (int k = 0; k < decim; k++) {
+            for (int32_t k = 0; k < decim; k++) {
                 float r = (float)iq_data[pos + k * 2]     - 127.37f;
                 float g = (float)iq_data[pos + k * 2 + 1] - 127.37f;
                 D += (r + g * I) * wf[k];
@@ -685,14 +686,14 @@ void acars_process(struct acars_state *state, const uint8_t *iq_data, uint32_t l
         }
 
         // All channels get the same output index
-        for (int c = 0; c < nch; c++)
+        for (int32_t c = 0; c < nch; c++)
             state->channels[c].dm_len++;
 
         pos += (uint32_t)(decim * 2);
 
         // When we have a block of decimated samples, demodulate
         if (state->channels[0].dm_len >= ACARS_DECIM_BUFSZ) {
-            for (int c = 0; c < nch; c++) {
+            for (int32_t c = 0; c < nch; c++) {
                 acars_demod_msk(state, &state->channels[c], state->channels[c].dm_len);
                 state->channels[c].dm_len = 0;
             }
@@ -701,7 +702,7 @@ void acars_process(struct acars_state *state, const uint8_t *iq_data, uint32_t l
 
     // Process remaining decimated samples
     if (state->channels[0].dm_len > 0) {
-        for (int c = 0; c < nch; c++) {
+        for (int32_t c = 0; c < nch; c++) {
             acars_demod_msk(state, &state->channels[c], state->channels[c].dm_len);
             state->channels[c].dm_len = 0;
         }

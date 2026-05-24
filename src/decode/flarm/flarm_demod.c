@@ -23,6 +23,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <stdint.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,13 +106,13 @@ static const uint32_t FLARM_CHANNEL_FREQS[FLARM_NUM_CHANNELS] = {
 #define CHANNEL_LPF_CUTOFF   120000.0
 
 static float fir_coeffs[FIR_TAPS];  // shared by all channels (same filter)
-static int fir_initialized = 0;
+static int32_t fir_initialized = 0;
 
-static void design_fir_lpf(float *h, int N, double cutoff_hz, double sample_rate)
+static void design_fir_lpf(float *h, int32_t N, double cutoff_hz, double sample_rate)
 {
-    int M = (N - 1) / 2;
+    int32_t M = (N - 1) / 2;
     double fc = cutoff_hz / sample_rate;  // normalized cutoff (0..0.5)
-    for (int n = 0; n < N; n++) {
+    for (int32_t n = 0; n < N; n++) {
         // Hamming window
         double w = 0.54 - 0.46 * cos(2.0 * M_PI * n / (N - 1));
         // sinc
@@ -129,7 +130,7 @@ static void design_fir_lpf(float *h, int N, double cutoff_hz, double sample_rate
 typedef struct {
     float delay_i[FIR_TAPS];
     float delay_q[FIR_TAPS];
-    int pos;  // circular write position
+    int32_t pos;  // circular write position
 } fir_state_t;
 
 // ======================== Per-channel state ========================
@@ -168,35 +169,35 @@ typedef struct {
     uint32_t lockout_remaining;
 
     // FLARM packet state
-    int      flarm_collecting;
-    int      flarm_polarity;
+    int32_t      flarm_collecting;
+    int32_t      flarm_polarity;
     float    flarm_det_ncc;     // NCC at detection for diagnostics
     uint32_t flarm_payload_start;
     uint32_t flarm_samples_needed;
 
     // FLARM peak-hold sync detection (finds true NCC peak at low SNR)
-    int      flarm_peak_searching;     // 1 = scanning for NCC peak after threshold crossing
+    int32_t      flarm_peak_searching;     // 1 = scanning for NCC peak after threshold crossing
     float    flarm_peak_best_ncc;      // best |NCC| found during peak search
     uint32_t flarm_peak_best_start;    // sync_start at best NCC position
-    int      flarm_peak_countdown;     // remaining coarse checks in search window
+    int32_t      flarm_peak_countdown;     // remaining coarse checks in search window
 
     // OGNTP packet state
-    int      ogntp_collecting;
-    int      ogntp_polarity;
+    int32_t      ogntp_collecting;
+    int32_t      ogntp_polarity;
     uint32_t ogntp_payload_start;
     uint32_t ogntp_samples_needed;
 
     // ADS-L packet state
-    int      adsl_collecting;
-    int      adsl_polarity;
+    int32_t      adsl_collecting;
+    int32_t      adsl_polarity;
     uint32_t adsl_payload_start;
     uint32_t adsl_samples_needed;
 
     // ADS-L peak-hold sync detection (same strategy as FLARM)
-    int      adsl_peak_searching;
+    int32_t      adsl_peak_searching;
     float    adsl_peak_best_ncc;
     uint32_t adsl_peak_best_start;
-    int      adsl_peak_countdown;
+    int32_t      adsl_peak_countdown;
 
     // Diagnostics
     float    diag_best_flarm_ncc;
@@ -211,11 +212,11 @@ typedef struct {
 struct flarm_state {
     flarm_demod_config_t config;
     uint32_t sample_rate;           // actual SDR sample rate
-    int      samples_per_bit;       // sample_rate / FLARM_CHIP_RATE
-    int      sync_template_len;     // 64 * samples_per_bit
-    int      payload_samples;       // PAYLOAD_CHIPS * samples_per_bit
-    int      adsl_payload_samples;  // ADSL_PAYLOAD_CHIPS * samples_per_bit
-    int      sync_lockout;          // sync_template_len + 128
+    int32_t      samples_per_bit;       // sample_rate / FLARM_CHIP_RATE
+    int32_t      sync_template_len;     // 64 * samples_per_bit
+    int32_t      payload_samples;       // PAYLOAD_CHIPS * samples_per_bit
+    int32_t      adsl_payload_samples;  // ADSL_PAYLOAD_CHIPS * samples_per_bit
+    int32_t      sync_lockout;          // sync_template_len + 128
     flarm_channel_t channels[FLARM_NUM_CHANNELS];
     uint64_t diag_report_interval;
     uint64_t diag_last_report;
@@ -234,8 +235,8 @@ static inline void fir_process(fir_state_t *fir, float in_i, float in_q,
 
     // Convolve: sum over taps
     float sum_i = 0, sum_q = 0;
-    int idx = fir->pos;
-    for (int k = 0; k < FIR_TAPS; k++) {
+    int32_t idx = fir->pos;
+    for (int32_t k = 0; k < FIR_TAPS; k++) {
         sum_i += fir_coeffs[k] * fir->delay_i[idx];
         sum_q += fir_coeffs[k] * fir->delay_q[idx];
         idx--;
@@ -257,16 +258,16 @@ static float adsl_sync_template[SYNC_TEMPLATE_LEN_MAX];
 static float flarm_template_energy;   // sum(template²)
 static float ogntp_template_energy;
 static float adsl_template_energy;
-static int templates_initialized = 0;
-static int templates_spb = 0;          // samples_per_bit used for templates
-static int templates_sync_len = 0;     // actual sync template length
+static int32_t templates_initialized = 0;
+static int32_t templates_spb = 0;          // samples_per_bit used for templates
+static int32_t templates_sync_len = 0;     // actual sync template length
 
 // (No pre-filtering needed: FIR has linear phase, rectangular ±1 template works directly)
 
 static void init_templates(uint32_t sample_rate)
 {
-    int spb = sample_rate / FLARM_CHIP_RATE;
-    int sync_len = FLARM_SYNCWORD_SIZE * 8 * spb;
+    int32_t spb = sample_rate / FLARM_CHIP_RATE;
+    int32_t sync_len = FLARM_SYNCWORD_SIZE * 8 * spb;
 
     // Reinitialize if sample rate changed
     if (templates_initialized && templates_spb == spb) return;
@@ -279,31 +280,31 @@ static void init_templates(uint32_t sample_rate)
 
     // Generate ideal ±1 FLARM sync template
     uint64_t pattern = 0;
-    for (int i = 0; i < FLARM_SYNCWORD_SIZE; i++)
+    for (int32_t i = 0; i < FLARM_SYNCWORD_SIZE; i++)
         pattern = (pattern << 8) | FLARM_SYNCWORD[i];
-    for (int chip = 0; chip < 64; chip++) {
+    for (int32_t chip = 0; chip < 64; chip++) {
         float val = ((pattern >> (63 - chip)) & 1) ? 1.0f : -1.0f;
-        for (int s = 0; s < spb; s++)
+        for (int32_t s = 0; s < spb; s++)
             flarm_sync_template[chip * spb + s] = val;
     }
 
     // Generate ideal ±1 OGNTP sync template
     uint64_t ogntp_pattern = 0;
-    for (int i = 0; i < OGNTP_SYNCWORD_SIZE; i++)
+    for (int32_t i = 0; i < OGNTP_SYNCWORD_SIZE; i++)
         ogntp_pattern = (ogntp_pattern << 8) | OGNTP_SYNCWORD[i];
-    for (int chip = 0; chip < 64; chip++) {
+    for (int32_t chip = 0; chip < 64; chip++) {
         float val = ((ogntp_pattern >> (63 - chip)) & 1) ? 1.0f : -1.0f;
-        for (int s = 0; s < spb; s++)
+        for (int32_t s = 0; s < spb; s++)
             ogntp_sync_template[chip * spb + s] = val;
     }
 
     // Generate ideal ±1 ADS-L sync template
     uint64_t adsl_pattern = 0;
-    for (int i = 0; i < ADSL_SYNCWORD_SIZE; i++)
+    for (int32_t i = 0; i < ADSL_SYNCWORD_SIZE; i++)
         adsl_pattern = (adsl_pattern << 8) | ADSL_SYNCWORD[i];
-    for (int chip = 0; chip < 64; chip++) {
+    for (int32_t chip = 0; chip < 64; chip++) {
         float val = ((adsl_pattern >> (63 - chip)) & 1) ? 1.0f : -1.0f;
-        for (int s = 0; s < spb; s++)
+        for (int32_t s = 0; s < spb; s++)
             adsl_sync_template[chip * spb + s] = val;
     }
 
@@ -322,10 +323,10 @@ static void init_templates(uint32_t sample_rate)
 // Since template is zero-mean (sum=0), numerator is unaffected by signal DC.
 // NCC = Σ(s·t) / sqrt((Σs² - (Σs)²/N) · N)
 
-static float compute_ncc_flat(const float *signal, const float *tmpl, float tmpl_energy, int tmpl_len)
+static float compute_ncc_flat(const float *signal, const float *tmpl, float tmpl_energy, int32_t tmpl_len)
 {
     float corr = 0, energy = 0, sig_sum = 0;
-    for (int i = 0; i < tmpl_len; i++) {
+    for (int32_t i = 0; i < tmpl_len; i++) {
         float v = signal[i];
         corr += v * tmpl[i];
         energy += v * v;
@@ -339,7 +340,7 @@ static float compute_ncc_flat(const float *signal, const float *tmpl, float tmpl
 }
 
 static float compute_ncc_ring(const float *ring, uint32_t start,
-                              const float *tmpl, float tmpl_energy, int tmpl_len)
+                              const float *tmpl, float tmpl_energy, int32_t tmpl_len)
 {
     start &= FM_RING_MASK;
     if (start + (uint32_t)tmpl_len <= FM_RING_SIZE) {
@@ -353,13 +354,13 @@ static float compute_ncc_ring(const float *ring, uint32_t start,
 }
 
 static uint32_t refine_sync(const float *ring, uint32_t initial_start,
-                            const float *tmpl, float tmpl_energy, int tmpl_len,
+                            const float *tmpl, float tmpl_energy, int32_t tmpl_len,
                             float *best_ncc_out)
 {
     uint32_t best_pos = initial_start;
     float best_ncc = fabsf(compute_ncc_ring(ring, initial_start, tmpl, tmpl_energy, tmpl_len));
 
-    for (int offset = -SYNC_REFINE_RANGE; offset <= SYNC_REFINE_RANGE; offset++) {
+    for (int32_t offset = -SYNC_REFINE_RANGE; offset <= SYNC_REFINE_RANGE; offset++) {
         if (offset == 0) continue;
         uint32_t pos = (initial_start + offset) & FM_RING_MASK;
         float ncc = fabsf(compute_ncc_ring(ring, pos, tmpl, tmpl_energy, tmpl_len));
@@ -374,22 +375,22 @@ static uint32_t refine_sync(const float *ring, uint32_t initial_start,
 
 // ======================== Payload extraction ========================
 
-static void extract_payload_bits(const float *ring, uint32_t start, int polarity,
-                                 uint8_t *manchester_bits, int samples_per_bit,
-                                 int num_chips)
+static void extract_payload_bits(const float *ring, uint32_t start, int32_t polarity,
+                                 uint8_t *manchester_bits, int32_t samples_per_bit,
+                                 int32_t num_chips)
 {
     // Compute local DC estimate over the full payload region.
     // Manchester encoding is balanced (equal +1 and -1 chips), so the mean ≈ DC offset.
     float dc_sum = 0;
-    for (int s = 0; s < num_chips * samples_per_bit; s++) {
+    for (int32_t s = 0; s < num_chips * samples_per_bit; s++) {
         dc_sum += ring[(start + s) & FM_RING_MASK];
     }
     float dc_offset = dc_sum / (float)(num_chips * samples_per_bit);
 
-    for (int chip = 0; chip < num_chips; chip++) {
+    for (int32_t chip = 0; chip < num_chips; chip++) {
         uint32_t chip_start = (start + chip * samples_per_bit) & FM_RING_MASK;
         float acc = 0;
-        for (int s = 0; s < samples_per_bit; s++) {
+        for (int32_t s = 0; s < samples_per_bit; s++) {
             acc += ring[(chip_start + s) & FM_RING_MASK];
         }
         acc -= dc_offset * samples_per_bit;  // remove DC bias
@@ -434,7 +435,7 @@ static bool manchester_decode_payload(const uint8_t *manchester_bits, uint32_t n
 
 // Try CRC with up to max_corrections bit flips on the payload (excluding CRC bytes).
 // Returns the number of corrections applied (0 = no error, -1 = uncorrectable).
-static int try_bit_correction(uint8_t *payload, uint32_t len, uint32_t max_corrections)
+static int32_t try_bit_correction(uint8_t *payload, uint32_t len, uint32_t max_corrections)
 {
     // 0 corrections: direct check
     if (flarm_check_crc(payload, len))
@@ -473,7 +474,7 @@ static int try_bit_correction(uint8_t *payload, uint32_t len, uint32_t max_corre
 
 // Attempt FLARM payload decode at a given ring buffer offset.
 // Returns: number of corrections applied (0-2), or -1 if CRC failed.
-static int try_decode_flarm_at_offset(struct flarm_state *state, flarm_channel_t *ch,
+static int32_t try_decode_flarm_at_offset(struct flarm_state *state, flarm_channel_t *ch,
                                       uint32_t start, uint8_t *payload_out,
                                       uint32_t *violations_out)
 {
@@ -499,15 +500,15 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
 {
     uint8_t payload[FLARM_PACKET_TOTAL];
     uint32_t violations = 0;
-    int corrections;
+    int32_t corrections;
 
     // ---- Try OGN-TP LDPC first (same sync word, stricter check) ----
     // LDPC requires exact alignment (no corrections possible), so try multiple offsets.
     {
-        static const int ogntp_offsets[] = { 0, 1, -1, 2, 3 };
-        int samples_per_premanchbyte = 16 * state->samples_per_bit;
+        static const int32_t ogntp_offsets[] = { 0, 1, -1, 2, 3 };
+        int32_t samples_per_premanchbyte = 16 * state->samples_per_bit;
 
-        for (int oi = 0; oi < 5; oi++) {
+        for (int32_t oi = 0; oi < 5; oi++) {
             uint32_t start = (ch->flarm_payload_start +
                              ogntp_offsets[oi] * samples_per_premanchbyte) & FM_RING_MASK;
             uint8_t manchester_bits[PAYLOAD_CHIPS];
@@ -555,14 +556,14 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
         // CRC failed with low violations — NCC sync may be misaligned.
         // Try forward offsets in pre-Manchester byte steps (16 chips = 256 samples each).
         // Also try one step backward for robustness.
-        static const int byte_offsets[] = { 1, 2, 3, -1 };
-        int samples_per_premanchbyte = 16 * state->samples_per_bit;
+        static const int32_t byte_offsets[] = { 1, 2, 3, -1 };
+        int32_t samples_per_premanchbyte = 16 * state->samples_per_bit;
 
-        for (int i = 0; i < 4; i++) {
+        for (int32_t i = 0; i < 4; i++) {
             uint32_t start = (ch->flarm_payload_start +
                              byte_offsets[i] * samples_per_premanchbyte) & FM_RING_MASK;
             uint32_t off_viol = 0;
-            int off_corr = try_decode_flarm_at_offset(state, ch, start, payload, &off_viol);
+            int32_t off_corr = try_decode_flarm_at_offset(state, ch, start, payload, &off_viol);
             if (off_corr >= 0) {
                 corrections = off_corr;
                 violations = off_viol;
@@ -618,13 +619,13 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
     // When replaying a file, scan a wider time window (file mtime = start of capture)
     // File duration up to ~120s + GPS/UTC offset ~18s + margin → scan ±150s
     // V7 tstamp field validation prevents false positives despite wide range
-    int scan_range = state->time_override ? 150 : 1;
+    int32_t scan_range = state->time_override ? 150 : 1;
 
-    for (int dt = 0; dt <= scan_range; dt++) {
+    for (int32_t dt = 0; dt <= scan_range; dt++) {
         // Try dt=0 first, then -1,+1,-2,+2,...
-        int offsets[2] = { -dt, dt };
-        int n_offsets = (dt == 0) ? 1 : 2;
-        for (int k = 0; k < n_offsets; k++) {
+        int32_t offsets[2] = { -dt, dt };
+        int32_t n_offsets = (dt == 0) ? 1 : 2;
+        for (int32_t k = 0; k < n_offsets; k++) {
             if (flarm_decode_packet(payload, state->config.ref_lat, state->config.ref_lon,
                                     state->config.ref_alt_geoid, now + offsets[k], &msg)) {
                 msg.signal_level = 0;
@@ -730,7 +731,7 @@ static void try_decode_adsl(struct flarm_state *state, flarm_channel_t *ch)
         return;
     }
     if (payload_len < ADSL_PACKET_TOTAL) {
-        fprintf(stderr, "ADSL-DBG short payload len=%u (need %d)\n", payload_len, ADSL_PACKET_TOTAL);
+        fprintf(stderr, "ADSL-DBG int16_t payload len=%u (need %d)\n", payload_len, ADSL_PACKET_TOTAL);
         state->stats.adsl_packets_failed++;
         return;
     }
@@ -797,7 +798,7 @@ struct flarm_state *flarm_demod_create(const flarm_demod_config_t *config)
     uint32_t center = config->center_freq;
     if (center == 0) center = FLARM_CENTER_FREQ;
 
-    for (int ch = 0; ch < FLARM_NUM_CHANNELS; ch++) {
+    for (int32_t ch = 0; ch < FLARM_NUM_CHANNELS; ch++) {
         flarm_channel_t *c = &s->channels[ch];
 
         double offset_hz = (double)FLARM_CHANNEL_FREQS[ch] - (double)center;
@@ -876,10 +877,10 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
     state->stats.samples_processed += n_samples;
 
     for (uint32_t i = 0; i < n_samples; i++) {
-        float raw_i = (float)((int)iq_data[i * 2]     - 128);
-        float raw_q = (float)((int)iq_data[i * 2 + 1] - 128);
+        float raw_i = (float)((int32_t)iq_data[i * 2]     - 128);
+        float raw_q = (float)((int32_t)iq_data[i * 2 + 1] - 128);
 
-        for (int ch_idx = 0; ch_idx < FLARM_NUM_CHANNELS; ch_idx++) {
+        for (int32_t ch_idx = 0; ch_idx < FLARM_NUM_CHANNELS; ch_idx++) {
             flarm_channel_t *ch = &state->channels[ch_idx];
 
             // ---- NCO mixing (complex rotation) ----
@@ -956,7 +957,7 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
             }
 
             // ---- Lockout (FLARM only — other protocols check independently) ----
-            int flarm_locked_out = 0;
+            int32_t flarm_locked_out = 0;
             if (ch->lockout_remaining > 0) {
                 ch->lockout_remaining--;
                 flarm_locked_out = 1;
@@ -968,7 +969,7 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
                 continue;
             ch->corr_countdown = CORR_CHECK_INTERVAL;
 
-            int stl = state->sync_template_len;
+            int32_t stl = state->sync_template_len;
 
             // Sync would end at current ring_wr, starts sync_template_len before
             uint32_t sync_start = (ch->ring_wr - stl) & FM_RING_MASK;
@@ -1134,7 +1135,7 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
 
     // ---- Periodic diagnostic report ----
     if (state->stats.samples_processed - state->diag_last_report >= state->diag_report_interval) {
-        for (int ch = 0; ch < FLARM_NUM_CHANNELS; ch++) {
+        for (int32_t ch = 0; ch < FLARM_NUM_CHANNELS; ch++) {
             flarm_channel_t *c = &state->channels[ch];
             float avg_fm = (c->diag_fm_count > 0) ?
                             c->diag_fm_sum / c->diag_fm_count : 0;

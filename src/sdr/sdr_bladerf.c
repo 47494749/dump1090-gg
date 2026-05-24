@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_bladerf.h"
 
 #include <libbladeRF.h>
@@ -59,7 +60,7 @@ void bladeRFInitConfig()
 
 bool bladeRFHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j+1 < argc);
     if (!strcmp(argv[j], "--bladerf-fpga") && more) {
         BladeRF.fpga_path = strdup(argv[++j]);
@@ -92,7 +93,7 @@ void bladeRFShowHelp()
     printf("\n");
 }
 
-static int lna_gain_db(bladerf_lna_gain gain)
+static int32_t lna_gain_db(bladerf_lna_gain gain)
 {
     switch (gain) {
     case BLADERF_LNA_GAIN_BYPASS:
@@ -108,15 +109,15 @@ static int lna_gain_db(bladerf_lna_gain gain)
 
 static void show_config()
 {
-    int status;
+    int32_t status;
 
     uint32_t rate;
     bladerf_frequency freq;
     bladerf_lpf_mode lpf_mode;
     uint32_t lpf_bw;
     bladerf_lna_gain lna_gain;
-    int rxvga1_gain;
-    int rxvga2_gain;
+    int32_t rxvga1_gain;
+    int32_t rxvga2_gain;
     int16_t lms_dc_i, lms_dc_q;
     int16_t fpga_phase, fpga_gain;
     struct bladerf_lms_dc_cals dc_cals;
@@ -176,7 +177,7 @@ bool bladeRFOpen()
         return true;
     }
 
-    int status;
+    int32_t status;
 
     bladerf_set_usb_reset_on_open(true);
     if ((status = bladerf_open(&BladeRF.device, Modes.dev_name)) < 0) {
@@ -421,7 +422,7 @@ void bladeRFRun()
 
     uint32_t transfers = 7;
 
-    int status;
+    int32_t status;
     struct bladerf_stream *stream = NULL;
     void **buffers = NULL;
 

@@ -8,6 +8,7 @@
 // option) any later version.
 
 #include "sdr_backend.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -30,11 +31,11 @@ extern const sdr_backend_ops_t sdrgg_backend_ops;
 
 #ifdef ENABLE_RTLSDR
 
-static int rtl_enumerate(sdr_dev_info_t *devs, int max_devs)
+static int32_t rtl_enumerate(sdr_dev_info_t *devs, int32_t max_devs)
 {
-    int count = rtlsdr_get_device_count();
-    int found = 0;
-    for (int i = 0; i < count && found < max_devs; i++) {
+    int32_t count = rtlsdr_get_device_count();
+    int32_t found = 0;
+    for (int32_t i = 0; i < count && found < max_devs; i++) {
         char manuf[256] = {0}, prod[256] = {0}, serial[256] = {0};
         if (rtlsdr_get_device_usb_strings(i, manuf, prod, serial) == 0) {
             devs[found].index = i;
@@ -49,7 +50,7 @@ static int rtl_enumerate(sdr_dev_info_t *devs, int max_devs)
     return found;
 }
 
-static sdr_device_t *rtl_open_by_index(int index)
+static sdr_device_t *rtl_open_by_index(int32_t index)
 {
     rtlsdr_dev_t *dev = NULL;
     if (rtlsdr_open(&dev, (uint32_t)index) < 0)
@@ -62,7 +63,7 @@ static sdr_device_t *rtl_open_by_index(int index)
     sdev->ctx = NULL;
 
     // Map tuner type
-    int tt = rtlsdr_get_tuner_type(dev);
+    int32_t tt = rtlsdr_get_tuner_type(dev);
     switch (tt) {
         case RTLSDR_TUNER_R820T:  sdev->tuner_type = SDR_TUNER_R820T;  break;
         case RTLSDR_TUNER_R828D:  sdev->tuner_type = SDR_TUNER_R820T2; break;
@@ -78,8 +79,8 @@ static sdr_device_t *rtl_open_by_index(int index)
 
 static sdr_device_t *rtl_open_by_serial(const char *serial)
 {
-    int count = rtlsdr_get_device_count();
-    for (int i = 0; i < count; i++) {
+    int32_t count = rtlsdr_get_device_count();
+    for (int32_t i = 0; i < count; i++) {
         char dev_serial[256] = {0};
         if (rtlsdr_get_device_usb_strings(i, NULL, NULL, dev_serial) == 0) {
             if (strcmp(dev_serial, serial) == 0) {
@@ -99,9 +100,9 @@ static void rtl_close(sdr_device_t *dev)
     free(dev);
 }
 
-static int rtl_set_frequency(sdr_device_t *dev, uint32_t freq_hz)
+static int32_t rtl_set_frequency(sdr_device_t *dev, uint32_t freq_hz)
 {
-    int rc = rtlsdr_set_center_freq((rtlsdr_dev_t *)dev->handle, freq_hz);
+    int32_t rc = rtlsdr_set_center_freq((rtlsdr_dev_t *)dev->handle, freq_hz);
     if (rc == 0) dev->current_freq = freq_hz;
     return rc;
 }
@@ -111,82 +112,82 @@ static uint32_t rtl_get_frequency(sdr_device_t *dev)
     return rtlsdr_get_center_freq((rtlsdr_dev_t *)dev->handle);
 }
 
-static int rtl_set_sample_rate(sdr_device_t *dev, uint32_t rate_hz)
+static int32_t rtl_set_sample_rate(sdr_device_t *dev, uint32_t rate_hz)
 {
-    int rc = rtlsdr_set_sample_rate((rtlsdr_dev_t *)dev->handle, rate_hz);
+    int32_t rc = rtlsdr_set_sample_rate((rtlsdr_dev_t *)dev->handle, rate_hz);
     if (rc == 0) dev->current_rate = rate_hz;
     return rc;
 }
 
-static int rtl_set_gain_mode(sdr_device_t *dev, int manual)
+static int32_t rtl_set_gain_mode(sdr_device_t *dev, int32_t manual)
 {
     return rtlsdr_set_tuner_gain_mode((rtlsdr_dev_t *)dev->handle, manual);
 }
 
-static int rtl_set_gain(sdr_device_t *dev, int gain_tenth_db)
+static int32_t rtl_set_gain(sdr_device_t *dev, int32_t gain_tenth_db)
 {
-    int rc = rtlsdr_set_tuner_gain((rtlsdr_dev_t *)dev->handle, gain_tenth_db);
+    int32_t rc = rtlsdr_set_tuner_gain((rtlsdr_dev_t *)dev->handle, gain_tenth_db);
     if (rc == 0) dev->current_gain = gain_tenth_db;
     return rc;
 }
 
-static int rtl_get_gain(sdr_device_t *dev)
+static int32_t rtl_get_gain(sdr_device_t *dev)
 {
     return rtlsdr_get_tuner_gain((rtlsdr_dev_t *)dev->handle);
 }
 
-static int rtl_set_freq_correction(sdr_device_t *dev, int ppm)
+static int32_t rtl_set_freq_correction(sdr_device_t *dev, int32_t ppm)
 {
     return rtlsdr_set_freq_correction((rtlsdr_dev_t *)dev->handle, ppm);
 }
 
-static int rtl_set_agc(sdr_device_t *dev, int enable)
+static int32_t rtl_set_agc(sdr_device_t *dev, int32_t enable)
 {
     return rtlsdr_set_agc_mode((rtlsdr_dev_t *)dev->handle, enable);
 }
 
-static int rtl_set_direct_sampling(sdr_device_t *dev, int mode)
+static int32_t rtl_set_direct_sampling(sdr_device_t *dev, int32_t mode)
 {
     return rtlsdr_set_direct_sampling((rtlsdr_dev_t *)dev->handle, mode);
 }
 
-static int rtl_reset_buffer(sdr_device_t *dev)
+static int32_t rtl_reset_buffer(sdr_device_t *dev)
 {
     return rtlsdr_reset_buffer((rtlsdr_dev_t *)dev->handle);
 }
 
-static int rtl_get_tuner_gains(sdr_device_t *dev, int *gains, int max_count)
+static int32_t rtl_get_tuner_gains(sdr_device_t *dev, int32_t *gains, int32_t max_count)
 {
-    int count = rtlsdr_get_tuner_gains((rtlsdr_dev_t *)dev->handle, NULL);
+    int32_t count = rtlsdr_get_tuner_gains((rtlsdr_dev_t *)dev->handle, NULL);
     if (count <= 0) return 0;
     if (!gains) return count;
     if (count > max_count) count = max_count;
-    int *tmp = malloc((size_t)count * sizeof(int));
+    int32_t *tmp = malloc((size_t)count * sizeof(int32_t));
     if (!tmp) return 0;
     rtlsdr_get_tuner_gains((rtlsdr_dev_t *)dev->handle, tmp);
-    memcpy(gains, tmp, (size_t)count * sizeof(int));
+    memcpy(gains, tmp, (size_t)count * sizeof(int32_t));
     free(tmp);
     return count;
 }
 
-static int rtl_get_tuner_type(sdr_device_t *dev)
+static int32_t rtl_get_tuner_type(sdr_device_t *dev)
 {
-    return (int)dev->tuner_type;
+    return (int32_t)dev->tuner_type;
 }
 
-static int rtl_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
+static int32_t rtl_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
                           uint32_t buf_count, uint32_t buf_size)
 {
     return rtlsdr_read_async((rtlsdr_dev_t *)dev->handle,
                              (rtlsdr_read_async_cb_t)cb, ctx, buf_count, buf_size);
 }
 
-static int rtl_cancel_async(sdr_device_t *dev)
+static int32_t rtl_cancel_async(sdr_device_t *dev)
 {
     return rtlsdr_cancel_async((rtlsdr_dev_t *)dev->handle);
 }
 
-static int rtl_read_sync(sdr_device_t *dev, uint8_t *buf, uint32_t len, int *n_read)
+static int32_t rtl_read_sync(sdr_device_t *dev, uint8_t *buf, uint32_t len, int32_t *n_read)
 {
     return rtlsdr_read_sync((rtlsdr_dev_t *)dev->handle, buf, len, n_read);
 }
@@ -227,8 +228,8 @@ static const sdr_backend_ops_t rtlsdr_backend_ops = {
 
 // ======================== Global backend state ========================
 
-static int backends_available = 0;
-static int backends_initialized = 0;
+static int32_t backends_available = 0;
+static int32_t backends_initialized = 0;
 
 void sdrBackendInit(void)
 {
@@ -253,7 +254,7 @@ void sdrBackendInit(void)
     fprintf(stderr, "\n");
 }
 
-int sdrBackendAvailable(void)
+int32_t sdrBackendAvailable(void)
 {
     return backends_available;
 }
@@ -297,24 +298,24 @@ const sdr_backend_ops_t *sdrBackendResolve(sdr_backend_type_t type)
     return sdrBackendGetDefault();
 }
 
-int sdrBackendEnumerateAll(sdr_dev_info_t *devs, int max_devs)
+int32_t sdrBackendEnumerateAll(sdr_dev_info_t *devs, int32_t max_devs)
 {
-    int total = 0;
+    int32_t total = 0;
 
 #ifdef ENABLE_SDRGG
     // sdrgg enumerate first (preferred)
-    int n = sdrgg_backend_ops.enumerate(devs + total, max_devs - total);
+    int32_t n = sdrgg_backend_ops.enumerate(devs + total, max_devs - total);
     total += n;
 #endif
 
 #ifdef ENABLE_RTLSDR
     // rtlsdr enumerate — skip devices already found by sdrgg (by serial)
     sdr_dev_info_t rtl_devs[MAX_SDR_RECEIVERS];
-    int rtl_count = rtlsdr_backend_ops.enumerate(rtl_devs, MAX_SDR_RECEIVERS);
-    for (int i = 0; i < rtl_count && total < max_devs; i++) {
+    int32_t rtl_count = rtlsdr_backend_ops.enumerate(rtl_devs, MAX_SDR_RECEIVERS);
+    for (int32_t i = 0; i < rtl_count && total < max_devs; i++) {
         // Check if this serial is already in the list from sdrgg
-        int duplicate = 0;
-        for (int j = 0; j < total; j++) {
+        int32_t duplicate = 0;
+        for (int32_t j = 0; j < total; j++) {
             if (strcmp(devs[j].serial, rtl_devs[i].serial) == 0) {
                 duplicate = 1;
                 break;

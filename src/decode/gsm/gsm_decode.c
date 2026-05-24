@@ -23,6 +23,7 @@
 //   3GPP TS 23.041 v11.4.0 — Cell Broadcast Service
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -69,7 +70,7 @@ static const int8_t dummy_burst_data[GSM_NB_DATA_BITS] __attribute__((unused)) =
 // Burst accumulator for 4-burst interleaving
 typedef struct {
     float    soft_bits[4][GSM_NB_DATA_BITS]; // 4 bursts × 114 soft bits
-    int      n_bursts;                        // bursts collected (0-3)
+    int32_t      n_bursts;                        // bursts collected (0-3)
     uint32_t fn_start;                        // frame number of first burst
 } gsm_burst_acc_t;
 
@@ -81,27 +82,27 @@ struct gsm_state {
 
     // IQ sample buffer
     float          *phase_buf;          // instantaneous phase history
-    int             phase_buf_size;
-    int             phase_buf_len;      // valid samples in buffer
+    int32_t             phase_buf_size;
+    int32_t             phase_buf_len;      // valid samples in buffer
 
     // FCCH detection
     double          freq_offset;        // estimated frequency offset (Hz)
-    int             fcch_sample_pos;    // sample position of last FCCH
+    int32_t             fcch_sample_pos;    // sample position of last FCCH
 
     // Frame timing
-    int             frame_sample_pos;   // sample position of current frame start
-    int             samples_per_frame;  // computed from sample rate
+    int32_t             frame_sample_pos;   // sample position of current frame start
+    int32_t             samples_per_frame;  // computed from sample rate
     double          symbol_period;      // samples per symbol (fractional)
     double carrier_offset_hz;   // ARFCN freq - tuned freq (Hz)
     uint32_t        fn;                 // current TDMA frame number
-    int             fn_mod51;           // position within 51-multiframe
+    int32_t             fn_mod51;           // position within 51-multiframe
 
     // SCH
     uint8_t         bsic;
     bool            bsic_valid;
 
     // TSC detection
-    int             tsc;                // detected or configured TSC
+    int32_t             tsc;                // detected or configured TSC
 
     // Burst accumulator for BCCH (4-burst interleaving)
     gsm_burst_acc_t bcch_acc;
@@ -115,7 +116,7 @@ struct gsm_state {
     float          *filt_I;             // filter delay line, I component
     float          *filt_Q;             // filter delay line, Q component
     float          *filt_coeff;         // FIR filter coefficients (symmetric)
-    int             filt_taps;          // number of FIR taps (odd)
+    int32_t             filt_taps;          // number of FIR taps (odd)
     double          filt_phase;         // NCO phase for carrier mixing (radians)
     double          filt_phase_inc;     // NCO phase increment per sample
 };
@@ -157,8 +158,8 @@ static void iq_to_phase_filtered(struct gsm_state *st,
                                   const uint8_t *iq_data, uint32_t n_samples,
                                   float *phase_out)
 {
-    int ntaps = st->filt_taps;
-    int half = ntaps / 2;
+    int32_t ntaps = st->filt_taps;
+    int32_t half = ntaps / 2;
 
     for (uint32_t i = 0; i < n_samples; i++) {
         float raw_I = (float)iq_data[2*i]   - 127.5f;
@@ -181,7 +182,7 @@ static void iq_to_phase_filtered(struct gsm_state *st,
 
         /* FIR convolution */
         float out_I = 0, out_Q = 0;
-        for (int k = 0; k < ntaps; k++) {
+        for (int32_t k = 0; k < ntaps; k++) {
             out_I += st->filt_I[k] * st->filt_coeff[k];
             out_Q += st->filt_Q[k] * st->filt_coeff[k];
         }
@@ -193,9 +194,9 @@ static void iq_to_phase_filtered(struct gsm_state *st,
 
 // Differential phase detection: instantaneous frequency from phase buffer.
 // freq_out[i] = phase[i+1] - phase[i], normalized.
-static void phase_to_freq(const float *phase, int n, float *freq_out)
+static void phase_to_freq(const float *phase, int32_t n, float *freq_out)
 {
-    for (int i = 0; i < n - 1; i++) {
+    for (int32_t i = 0; i < n - 1; i++) {
         freq_out[i] = wrap_phase(phase[i+1] - phase[i]);
     }
 }
@@ -214,23 +215,23 @@ static void phase_to_freq(const float *phase, int n, float *freq_out)
 
 // Returns sample offset of FCCH center within freq_buf, or -1 if not found.
 // Also estimates frequency offset from ideal.
-int detect_fcch(const float *freq_buf, int n_freq,
+int32_t detect_fcch(const float *freq_buf, int32_t n_freq,
                        float samples_per_symbol, float carrier_rps,
                        double *freq_offset_out)
 {
     // Expected phase increment per sample for FCCH tone
     float expected_dphi = carrier_rps + (float)M_PI / (2.0f * samples_per_symbol);
-    int min_samples = (int)(FCCH_MIN_SYMBOLS * samples_per_symbol);
+    int32_t min_samples = (int32_t)(FCCH_MIN_SYMBOLS * samples_per_symbol);
 
-    int best_start = -1;
-    int best_len = 0;
+    int32_t best_start = -1;
+    int32_t best_len = 0;
     double best_sum = 0;
 
-    int run_start = 0;
-    int run_len = 0;
+    int32_t run_start = 0;
+    int32_t run_len = 0;
     double run_sum = 0;
 
-    for (int i = 0; i < n_freq; i++) {
+    for (int32_t i = 0; i < n_freq; i++) {
         float diff = fabsf(freq_buf[i] - expected_dphi);
         if (diff < FCCH_FREQ_TOL) {
             if (run_len == 0) run_start = i;
@@ -274,15 +275,15 @@ int detect_fcch(const float *freq_buf, int n_freq,
 // samples_per_sym: fractional samples per symbol
 // soft_out: GSM_BURST_BITS soft decisions
 // freq_offset: current frequency offset correction (rad/sample)
-static void extract_burst_soft(const float *phase_buf, int phase_len,
-                               int sample_start, float samples_per_sym,
+static void extract_burst_soft(const float *phase_buf, int32_t phase_len,
+                               int32_t sample_start, float samples_per_sym,
                                float freq_offset_rps, float *soft_out)
 {
     // Sample at symbol centers, single-sample differential phase
     float expected_mag = (float)M_PI / (2.0f * samples_per_sym);
 
-    for (int b = 0; b < GSM_BURST_BITS; b++) {
-        int sample_idx = sample_start + (int)(b * samples_per_sym + 0.5f);
+    for (int32_t b = 0; b < GSM_BURST_BITS; b++) {
+        int32_t sample_idx = sample_start + (int32_t)(b * samples_per_sym + 0.5f);
         if (sample_idx < 1 || sample_idx >= phase_len) {
             soft_out[b] = 0.0f;
             continue;
@@ -301,19 +302,19 @@ static void extract_burst_soft(const float *phase_buf, int phase_len,
 // tsc: training sequence index (0-7)
 // Returns timing offset in samples (fractional), and correlation quality.
 static float correlate_training(const float *soft_bits, const int8_t *training,
-                                int train_len, int train_start_bit, float *quality_out)
+                                int32_t train_len, int32_t train_start_bit, float *quality_out)
 {
     // The training sequence starts at bit position train_start_bit within the burst
     // Search around the expected position for best correlation
     float best_corr = 0;
-    int best_offset = 0;
+    int32_t best_offset = 0;
 
-    for (int offset = -20; offset <= 20; offset++) {
+    for (int32_t offset = -20; offset <= 20; offset++) {
         float corr = 0;
-        int pos = train_start_bit + offset;
+        int32_t pos = train_start_bit + offset;
         if (pos < 0 || pos + train_len > GSM_BURST_BITS) continue;
 
-        for (int i = 0; i < train_len; i++) {
+        for (int32_t i = 0; i < train_len; i++) {
             float expected = training[i] ? -1.0f : 1.0f;
             corr += soft_bits[pos + i] * expected;
         }
@@ -372,17 +373,17 @@ static void init_conv_tables(void)
 {
     if (gsm_conv_tables_init) return;
 
-    for (int state = 0; state < GSM_CONV_STATES; state++) {
-        for (int input = 0; input < 2; input++) {
+    for (int32_t state = 0; state < GSM_CONV_STATES; state++) {
+        for (int32_t input = 0; input < 2; input++) {
             // State bits: s3=u[n-1], s2=u[n-2], s1=u[n-3], s0=u[n-4]
-            int s3 = (state >> 3) & 1;
-            int s1 = (state >> 1) & 1;
-            int s0 = (state >> 0) & 1;
+            int32_t s3 = (state >> 3) & 1;
+            int32_t s1 = (state >> 1) & 1;
+            int32_t s0 = (state >> 0) & 1;
 
             // G0 = u[n] + u[n-3] + u[n-4] = input ^ s1 ^ s0
-            int c0 = input ^ s1 ^ s0;
+            int32_t c0 = input ^ s1 ^ s0;
             // G1 = u[n] + u[n-1] + u[n-3] + u[n-4] = input ^ s3 ^ s1 ^ s0
-            int c1 = input ^ s3 ^ s1 ^ s0;
+            int32_t c1 = input ^ s3 ^ s1 ^ s0;
 
             gsm_conv_output[state][input] = (uint8_t)((c0 << 1) | c1);
 
@@ -394,12 +395,12 @@ static void init_conv_tables(void)
 }
 
 // Convolutional encoder
-void gsm_conv_encode(const uint8_t *input, int n, uint8_t *output)
+void gsm_conv_encode(const uint8_t *input, int32_t n, uint8_t *output)
 {
     init_conv_tables();
-    int state = 0;
-    for (int i = 0; i < n; i++) {
-        int u = input[i] & 1;
+    int32_t state = 0;
+    for (int32_t i = 0; i < n; i++) {
+        int32_t u = input[i] & 1;
         uint8_t out = gsm_conv_output[state][u];
         output[2*i]     = (out >> 1) & 1; // c0
         output[2*i + 1] = out & 1;        // c1
@@ -416,49 +417,49 @@ void gsm_conv_encode(const uint8_t *input, int n, uint8_t *output)
 //   soft < 0 means the transmitted coded bit was 1
 // output: decoded bits, n_output_bits long.
 // Returns accumulated path metric of best path.
-int gsm_viterbi_decode(const float *soft_input, int n_output_bits, uint8_t *output)
+int32_t gsm_viterbi_decode(const float *soft_input, int32_t n_output_bits, uint8_t *output)
 {
     init_conv_tables();
 
     // Path metrics (use int for speed, quantize soft values)
     #define VITERBI_SCALE 16
-    int path_metric[GSM_CONV_STATES];
-    int new_metric[GSM_CONV_STATES];
+    int32_t path_metric[GSM_CONV_STATES];
+    int32_t new_metric[GSM_CONV_STATES];
 
     // Traceback memory
-    int n = n_output_bits;
+    int32_t n = n_output_bits;
     uint8_t *traceback = (uint8_t *)calloc((size_t)n * GSM_CONV_STATES, sizeof(uint8_t));
     if (!traceback) return -1;
 
     // Initialize: start in state 0 (all-zero register)
-    for (int s = 0; s < GSM_CONV_STATES; s++)
+    for (int32_t s = 0; s < GSM_CONV_STATES; s++)
         path_metric[s] = (s == 0) ? 0 : 1000000;
 
-    for (int i = 0; i < n; i++) {
+    for (int32_t i = 0; i < n; i++) {
         // Received soft values for this step
-        int r0 = (int)(soft_input[2*i]     * VITERBI_SCALE);
-        int r1 = (int)(soft_input[2*i + 1] * VITERBI_SCALE);
+        int32_t r0 = (int32_t)(soft_input[2*i]     * VITERBI_SCALE);
+        int32_t r1 = (int32_t)(soft_input[2*i + 1] * VITERBI_SCALE);
 
-        for (int s = 0; s < GSM_CONV_STATES; s++)
+        for (int32_t s = 0; s < GSM_CONV_STATES; s++)
             new_metric[s] = 1000000;
 
-        for (int s = 0; s < GSM_CONV_STATES; s++) {
+        for (int32_t s = 0; s < GSM_CONV_STATES; s++) {
             if (path_metric[s] >= 999999) continue;
 
-            for (int u = 0; u < 2; u++) {
+            for (int32_t u = 0; u < 2; u++) {
                 uint8_t coded_out = gsm_conv_output[s][u];
-                int c0 = (coded_out >> 1) & 1;
-                int c1 = coded_out & 1;
+                int32_t c0 = (coded_out >> 1) & 1;
+                int32_t c1 = coded_out & 1;
 
                 // Branch metric: distance between received and expected
                 // Expected soft for coded bit 0 → +VITERBI_SCALE, for bit 1 → -VITERBI_SCALE
-                int e0 = c0 ? -VITERBI_SCALE : VITERBI_SCALE;
-                int e1 = c1 ? -VITERBI_SCALE : VITERBI_SCALE;
+                int32_t e0 = c0 ? -VITERBI_SCALE : VITERBI_SCALE;
+                int32_t e1 = c1 ? -VITERBI_SCALE : VITERBI_SCALE;
 
-                int bm = abs(r0 - e0) + abs(r1 - e1);
-                int candidate = path_metric[s] + bm;
+                int32_t bm = abs(r0 - e0) + abs(r1 - e1);
+                int32_t candidate = path_metric[s] + bm;
 
-                int ns = gsm_conv_next_state[s][u];
+                int32_t ns = gsm_conv_next_state[s][u];
                 if (candidate < new_metric[ns]) {
                     new_metric[ns] = candidate;
                     traceback[i * GSM_CONV_STATES + ns] = (uint8_t)s;
@@ -470,13 +471,13 @@ int gsm_viterbi_decode(const float *soft_input, int n_output_bits, uint8_t *outp
     }
 
     // Force final state to 0 (tail bits drive encoder to state 0)
-    int best_state = 0;
-    int best_metric = path_metric[0];
+    int32_t best_state = 0;
+    int32_t best_metric = path_metric[0];
 
     // Traceback
-    int state = best_state;
-    for (int i = n - 1; i >= 0; i--) {
-        int prev_state = traceback[i * GSM_CONV_STATES + state];
+    int32_t state = best_state;
+    for (int32_t i = n - 1; i >= 0; i--) {
+        int32_t prev_state = traceback[i * GSM_CONV_STATES + state];
         // The input bit that caused transition from prev_state to state
         // is the MSB of state (since new_state = (input<<3) | (prev>>1))
         output[i] = (uint8_t)((state >> 3) & 1);
@@ -502,13 +503,13 @@ int gsm_viterbi_decode(const float *soft_input, int n_output_bits, uint8_t *outp
 static const uint64_t FIRE_POLY = (1ULL << 40) | (1ULL << 26) | (1ULL << 23) |
                                    (1ULL << 17) | (1ULL << 3)  | (1ULL << 0);
 
-void gsm_fire_encode(const uint8_t *data, int n_bits, uint8_t *parity)
+void gsm_fire_encode(const uint8_t *data, int32_t n_bits, uint8_t *parity)
 {
     // Compute remainder of data * x^40 / g(x)
     // Using bit-serial division
     uint64_t reg = 0;
 
-    for (int i = 0; i < n_bits; i++) {
+    for (int32_t i = 0; i < n_bits; i++) {
         uint64_t feedback = ((reg >> 39) ^ data[i]) & 1;
         reg = (reg << 1) & ((1ULL << 40) - 1);
         if (feedback) {
@@ -517,17 +518,17 @@ void gsm_fire_encode(const uint8_t *data, int n_bits, uint8_t *parity)
     }
 
     // Output parity bits (MSB first)
-    for (int i = 0; i < 40; i++) {
+    for (int32_t i = 0; i < 40; i++) {
         parity[i] = (uint8_t)((reg >> (39 - i)) & 1);
     }
 }
 
-bool gsm_fire_check(const uint8_t *data_with_parity, int total_bits)
+bool gsm_fire_check(const uint8_t *data_with_parity, int32_t total_bits)
 {
     // Check: remainder of entire codeword / g(x) should be 0
     uint64_t reg = 0;
 
-    for (int i = 0; i < total_bits; i++) {
+    for (int32_t i = 0; i < total_bits; i++) {
         uint64_t feedback = ((reg >> 39) ^ data_with_parity[i]) & 1;
         reg = (reg << 1) & ((1ULL << 40) - 1);
         if (feedback) {
@@ -547,10 +548,10 @@ bool gsm_fire_check(const uint8_t *data_with_parity, int total_bits)
 #define SCH_CRC_POLY 0x0175  // g(x)=x^10+x^8+x^6+x^5+x^4+x^2+1, matching osmocom gsm0503_sch_crc10
 #define SCH_CRC_REMAINDER 0x3FF  // final XOR mask per osmocom convention
 
-static uint16_t sch_crc_compute(const uint8_t *data, int n_bits)
+static uint16_t sch_crc_compute(const uint8_t *data, int32_t n_bits)
 {
     uint16_t reg = 0;
-    for (int i = 0; i < n_bits; i++) {
+    for (int32_t i = 0; i < n_bits; i++) {
         uint16_t feedback = ((reg >> 9) ^ data[i]) & 1;
         reg = (reg << 1) & 0x3FF;
         if (feedback) {
@@ -560,21 +561,21 @@ static uint16_t sch_crc_compute(const uint8_t *data, int n_bits)
     return reg;
 }
 
-static void sch_crc_encode(const uint8_t *data, int n_bits, uint8_t *parity)
+static void sch_crc_encode(const uint8_t *data, int32_t n_bits, uint8_t *parity)
 {
     uint16_t crc = sch_crc_compute(data, n_bits) ^ SCH_CRC_REMAINDER;
-    for (int i = 0; i < 10; i++) {
+    for (int32_t i = 0; i < 10; i++) {
         parity[i] = (uint8_t)((crc >> (9 - i)) & 1);
     }
 }
 
-static bool sch_crc_check(const uint8_t *data_with_parity, int total_bits)
+static bool sch_crc_check(const uint8_t *data_with_parity, int32_t total_bits)
 {
     /* Recompute CRC from data, apply remainder XOR, compare with parity */
-    int data_bits = total_bits - 10;
+    int32_t data_bits = total_bits - 10;
     uint16_t expected = sch_crc_compute(data_with_parity, data_bits) ^ SCH_CRC_REMAINDER;
     uint16_t received = 0;
-    for (int i = 0; i < 10; i++)
+    for (int32_t i = 0; i < 10; i++)
         received = (received << 1) | (data_with_parity[data_bits + i] & 1);
     return (expected == received);
 }
@@ -608,11 +609,11 @@ bool gsm_sch_decode(const float *soft_input, uint8_t *info_out)
         uint8_t test_coded[78];
         gsm_sch_encode(test_info, test_coded);
         float test_soft[78];
-        for (int i = 0; i < 78; i++) test_soft[i] = test_coded[i] ? -1.0f : 1.0f;
+        for (int32_t i = 0; i < 78; i++) test_soft[i] = test_coded[i] ? -1.0f : 1.0f;
         uint8_t test_dec[25];
         bool ok = gsm_sch_decode(test_soft, test_dec);
-        int match = 1;
-        if (ok) { for (int i = 0; i < 25; i++) if (test_dec[i] != test_info[i]) match = 0; }
+        int32_t match = 1;
+        if (ok) { for (int32_t i = 0; i < 25; i++) if (test_dec[i] != test_info[i]) match = 0; }
         if (!ok || !match)
             fprintf(stderr, "GSM SCH self-test: encode/decode %s, match=%d\n", ok ? "PASS" : "FAIL", match);
     }
@@ -625,11 +626,11 @@ bool gsm_sch_decode(const float *soft_input, uint8_t *info_out)
     if (!sch_crc_check(pre_conv, 35)) {
         uint16_t exp = sch_crc_compute(pre_conv, 25) ^ SCH_CRC_REMAINDER;
         uint16_t got = 0;
-        for (int i = 0; i < 10; i++) got = (got << 1) | (pre_conv[25+i] & 1);
-        static int crc_dbg = 0;
+        for (int32_t i = 0; i < 10; i++) got = (got << 1) | (pre_conv[25+i] & 1);
+        static int32_t crc_dbg = 0;
         if (++crc_dbg <= 10) {
             fprintf(stderr, "GSM SCH CRC fail: exp=0x%03X got=0x%03X bits=", exp, got);
-            for (int i = 0; i < 39; i++) fprintf(stderr, "%d", pre_conv[i]);
+            for (int32_t i = 0; i < 39; i++) fprintf(stderr, "%d", pre_conv[i]);
             fprintf(stderr, "\n");
         }
         return false;
@@ -662,16 +663,16 @@ void gsm_sch_parse(const uint8_t *info, uint8_t *bsic, uint32_t *fn)
     // t3': d(16)..d(18) → 3 bits
     // BSIC: d(19)..d(24) → 6 bits
     uint32_t t1 = 0;
-    for (int i = 0; i < 11; i++) t1 = (t1 << 1) | (info[i] & 1);
+    for (int32_t i = 0; i < 11; i++) t1 = (t1 << 1) | (info[i] & 1);
 
     uint32_t t2 = 0;
-    for (int i = 11; i < 16; i++) t2 = (t2 << 1) | (info[i] & 1);
+    for (int32_t i = 11; i < 16; i++) t2 = (t2 << 1) | (info[i] & 1);
 
     uint32_t t3p = 0;
-    for (int i = 16; i < 19; i++) t3p = (t3p << 1) | (info[i] & 1);
+    for (int32_t i = 16; i < 19; i++) t3p = (t3p << 1) | (info[i] & 1);
 
     uint32_t b = 0;
-    for (int i = 19; i < 25; i++) b = (b << 1) | (info[i] & 1);
+    for (int32_t i = 19; i < 25; i++) b = (b << 1) | (info[i] & 1);
 
     uint32_t t3 = 10 * t3p + 1; // recover t3 from t3'
     // TS 05.02: FN = 51 * ((t3 - t2) mod 26) + t3 + 51*26*t1
@@ -687,13 +688,13 @@ void gsm_sch_build(uint8_t bsic, uint32_t fn, uint8_t *info)
     uint32_t t3p = (t3 - 1) / 10; // valid only when t3 = 1,11,21,31,41
 
     // t1: 11 bits MSB first
-    for (int i = 10; i >= 0; i--) { info[10-i] = (uint8_t)((t1 >> i) & 1); }
+    for (int32_t i = 10; i >= 0; i--) { info[10-i] = (uint8_t)((t1 >> i) & 1); }
     // t2: 5 bits
-    for (int i = 4; i >= 0; i--) { info[15-i] = (uint8_t)((t2 >> i) & 1); }
+    for (int32_t i = 4; i >= 0; i--) { info[15-i] = (uint8_t)((t2 >> i) & 1); }
     // t3': 3 bits
-    for (int i = 2; i >= 0; i--) { info[18-i] = (uint8_t)((t3p >> i) & 1); }
+    for (int32_t i = 2; i >= 0; i--) { info[18-i] = (uint8_t)((t3p >> i) & 1); }
     // BSIC: 6 bits
-    for (int i = 5; i >= 0; i--) { info[24-i] = (uint8_t)((bsic >> i) & 1); }
+    for (int32_t i = 5; i >= 0; i--) { info[24-i] = (uint8_t)((bsic >> i) & 1); }
 }
 
 // ======================== BCCH Interleaving (TS 05.03, section 4.1) ========================
@@ -722,18 +723,18 @@ void gsm_sch_build(uint8_t bsic, uint32_t fn, uint8_t *info)
 
 void gsm_bcch_interleave(const uint8_t *coded_bits, uint8_t burst_bits[4][GSM_NB_DATA_BITS])
 {
-    for (int k = 0; k < GSM_BCCH_CODED_BITS; k++) {
-        int burst = k % 4;
-        int pos   = k / 4;
+    for (int32_t k = 0; k < GSM_BCCH_CODED_BITS; k++) {
+        int32_t burst = k % 4;
+        int32_t pos   = k / 4;
         burst_bits[burst][pos] = coded_bits[k];
     }
 }
 
 void gsm_bcch_deinterleave(const float burst_soft[4][GSM_NB_DATA_BITS], float *coded_soft)
 {
-    for (int k = 0; k < GSM_BCCH_CODED_BITS; k++) {
-        int burst = k % 4;
-        int pos   = k / 4;
+    for (int32_t k = 0; k < GSM_BCCH_CODED_BITS; k++) {
+        int32_t burst = k % 4;
+        int32_t pos   = k / 4;
         coded_soft[k] = burst_soft[burst][pos];
     }
 }
@@ -759,9 +760,9 @@ static bool decode_bcch_block(const float burst_soft[4][GSM_NB_DATA_BITS],
     }
 
     // Step 4: Extract 184 data bits → 23 octets
-    for (int i = 0; i < GSM_L2_FRAME_LEN; i++) {
+    for (int32_t i = 0; i < GSM_L2_FRAME_LEN; i++) {
         uint8_t byte = 0;
-        for (int b = 0; b < 8; b++) {
+        for (int32_t b = 0; b < 8; b++) {
             byte = (uint8_t)((byte << 1) | (pre_conv[i * 8 + b] & 1));
         }
         l2_frame[i] = byte;
@@ -796,7 +797,7 @@ static void extract_nb_data(const float *burst_soft, float *data_soft)
 //   Octets 4..4+L-1: Information field (L3 data)
 //   Remaining: Fill (0x2B)
 
-bool gsm_l2_parse(const uint8_t *data, int len, gsm_l2_frame_t *frame)
+bool gsm_l2_parse(const uint8_t *data, int32_t len, gsm_l2_frame_t *frame)
 {
     if (len < 3) return false;
 
@@ -861,14 +862,14 @@ static void decode_lai(const uint8_t *data, uint16_t *mcc, uint16_t *mnc, uint16
     *lac = (uint16_t)((data[3] << 8) | data[4]);
 }
 
-static int decode_bitmap0_arfcn_list(const uint8_t *desc, uint16_t *list, int max_list)
+static int32_t decode_bitmap0_arfcn_list(const uint8_t *desc, uint16_t *list, int32_t max_list)
 {
-    int count = 0;
-    int arfcn = 1;
+    int32_t count = 0;
+    int32_t arfcn = 1;
 
-    for (int byte_idx = 0; byte_idx < 16 && arfcn <= 124; byte_idx++) {
-        int start_bit = (byte_idx == 0) ? 5 : 7;
-        for (int bit = start_bit; bit >= 0 && arfcn <= 124; bit--, arfcn++) {
+    for (int32_t byte_idx = 0; byte_idx < 16 && arfcn <= 124; byte_idx++) {
+        int32_t start_bit = (byte_idx == 0) ? 5 : 7;
+        for (int32_t bit = start_bit; bit >= 0 && arfcn <= 124; bit--, arfcn++) {
             if ((desc[byte_idx] & (1u << bit)) && count < max_list) {
                 list[count++] = (uint16_t)arfcn;
             }
@@ -890,7 +891,7 @@ static void decode_rach_control(const uint8_t *data, uint8_t *max_retrans,
 }
 
 // SI3 Message Type = 0x1B
-bool gsm_parse_si3(const uint8_t *l3, int len, gsm_si3_t *out)
+bool gsm_parse_si3(const uint8_t *l3, int32_t len, gsm_si3_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -937,7 +938,7 @@ bool gsm_parse_si3(const uint8_t *l3, int len, gsm_si3_t *out)
 }
 
 // SI1 Message Type = 0x19 — Cell Channel Description (Cell Allocation)
-bool gsm_parse_si1(const uint8_t *l3, int len, gsm_si1_t *out)
+bool gsm_parse_si1(const uint8_t *l3, int32_t len, gsm_si1_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -964,7 +965,7 @@ bool gsm_parse_si1(const uint8_t *l3, int len, gsm_si1_t *out)
 }
 
 // SI2 Message Type = 0x1A — Neighbour Cell Description
-bool gsm_parse_si2(const uint8_t *l3, int len, gsm_si2_t *out)
+bool gsm_parse_si2(const uint8_t *l3, int32_t len, gsm_si2_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -991,7 +992,7 @@ bool gsm_parse_si2(const uint8_t *l3, int len, gsm_si2_t *out)
 }
 
 // SI4 Message Type = 0x1C — LAI + Cell Selection + CBCH
-bool gsm_parse_si4(const uint8_t *l3, int len, gsm_si4_t *out)
+bool gsm_parse_si4(const uint8_t *l3, int32_t len, gsm_si4_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -1009,7 +1010,7 @@ bool gsm_parse_si4(const uint8_t *l3, int len, gsm_si4_t *out)
     // (same format as SI3)
 
     // Optional: CBCH Channel Description (TLV/TV, IEI=0x64)
-    int pos = 12;
+    int32_t pos = 12;
     while (pos < len - 1) {
         uint8_t iei = l3[pos];
         if (iei == 0x64 && pos + 4 <= len) {
@@ -1040,7 +1041,7 @@ bool gsm_parse_si4(const uint8_t *l3, int len, gsm_si4_t *out)
 //   Octet 5: Page Parameter (total_pages in hi, page_nr in lo)
 //   Octets 6-87: Content (82 octets)
 
-bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out)
+bool gsm_parse_cb(const uint8_t *data, int32_t len, gsm_cb_msg_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -1054,7 +1055,7 @@ bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out)
     out->page_nr     = data[5] & 0x0F;
 
     // Decode text content
-    int content_len = len - 6;
+    int32_t content_len = len - 6;
     if (content_len > GSM_CB_PAGE_LEN) content_len = GSM_CB_PAGE_LEN;
 
     // Data Coding Scheme determines encoding
@@ -1063,14 +1064,14 @@ bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out)
     if (coding_group == 0x00 || coding_group == 0x01) {
         // Default 7-bit GSM alphabet
         // GSM 7-bit packing: characters are packed LSB-first into octets
-        int out_pos = 0;
-        int bit_pos = 0;
+        int32_t out_pos = 0;
+        int32_t bit_pos = 0;
         const uint8_t *src = &data[6];
-        int max_chars = (content_len * 8) / 7;
+        int32_t max_chars = (content_len * 8) / 7;
 
-        for (int n = 0; n < max_chars && out_pos < GSM_CB_PAGE_LEN; n++) {
-            int byte_off = bit_pos / 8;
-            int bit_off = bit_pos % 8;
+        for (int32_t n = 0; n < max_chars && out_pos < GSM_CB_PAGE_LEN; n++) {
+            int32_t byte_off = bit_pos / 8;
+            int32_t bit_off = bit_pos % 8;
             if (byte_off >= content_len) break;
 
             uint8_t ch = (uint8_t)(src[byte_off] >> bit_off);
@@ -1089,7 +1090,7 @@ bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out)
         out->text_len = out_pos;
     } else {
         // 8-bit or UCS-2: just copy as-is for now (truncate to ASCII)
-        for (int i = 0; i < content_len && i < GSM_CB_PAGE_LEN; i++) {
+        for (int32_t i = 0; i < content_len && i < GSM_CB_PAGE_LEN; i++) {
             uint8_t ch = data[6 + i];
             out->text[i] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : '.';
         }
@@ -1107,7 +1108,7 @@ bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out)
 // Paging Request Type 2 (msg type 0x22)
 // Paging Request Type 3 (msg type 0x24)
 
-bool gsm_parse_paging(const uint8_t *l3, int len, gsm_paging_t *out)
+bool gsm_parse_paging(const uint8_t *l3, int32_t len, gsm_paging_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -1135,7 +1136,7 @@ bool gsm_parse_paging(const uint8_t *l3, int len, gsm_paging_t *out)
             }
 
             // Mobile Identity 2 (optional, TLV with IEI=0x17)
-            int pos = 3 + 1 + mi_len;
+            int32_t pos = 3 + 1 + mi_len;
             if (pos + 2 < len && l3[pos] == 0x17) {
                 uint8_t mi2_len = l3[pos + 1];
                 uint8_t mi2_type = l3[pos + 2] & 0x07;
@@ -1159,8 +1160,8 @@ bool gsm_parse_paging(const uint8_t *l3, int len, gsm_paging_t *out)
         // Paging Request Type 3 — 4 TMSIs
         out->paging_type = 3;
         if (len >= 19) {
-            for (int i = 0; i < 4 && 3 + i*4 + 3 < len; i++) {
-                int off = 3 + i * 4;
+            for (int32_t i = 0; i < 4 && 3 + i*4 + 3 < len; i++) {
+                int32_t off = 3 + i * 4;
                 out->tmsi[i] = (uint32_t)((l3[off] << 24) | (l3[off+1] << 16) |
                                            (l3[off+2] << 8) | l3[off+3]);
             }
@@ -1188,25 +1189,25 @@ double gsm_arfcn_to_freq(uint16_t arfcn, gsm_band_t band)
         if (arfcn >= 1 && arfcn <= 124)
             return 935.0 + 0.2 * arfcn;
         if (arfcn >= 975 && arfcn <= 1023)
-            return 935.0 + 0.2 * ((int)arfcn - 1024);
+            return 935.0 + 0.2 * ((int32_t)arfcn - 1024);
         return 0;
 
     case GSM_BAND_1800:
         // DCS 1800: ARFCN 512-885 → DL = 1805.2 + 0.2*(ARFCN-512)
         if (arfcn >= 512 && arfcn <= 885)
-            return 1805.2 + 0.2 * ((int)arfcn - 512);
+            return 1805.2 + 0.2 * ((int32_t)arfcn - 512);
         return 0;
 
     case GSM_BAND_850:
         // GSM 850: ARFCN 128-251 → DL = 869.2 + 0.2*(ARFCN-128)
         if (arfcn >= 128 && arfcn <= 251)
-            return 869.2 + 0.2 * ((int)arfcn - 128);
+            return 869.2 + 0.2 * ((int32_t)arfcn - 128);
         return 0;
 
     case GSM_BAND_1900:
         // PCS 1900: ARFCN 512-810 → DL = 1930.2 + 0.2*(ARFCN-512)
         if (arfcn >= 512 && arfcn <= 810)
-            return 1930.2 + 0.2 * ((int)arfcn - 512);
+            return 1930.2 + 0.2 * ((int32_t)arfcn - 512);
         return 0;
 
     default:
@@ -1219,7 +1220,7 @@ uint16_t gsm_freq_to_arfcn(double freq_mhz, gsm_band_t *band)
     // Try each band
     // P-GSM 900: DL 935.2 - 959.8
     if (freq_mhz >= 935.0 && freq_mhz <= 960.0) {
-        int arfcn = (int)((freq_mhz - 935.0) / 0.2 + 0.5);
+        int32_t arfcn = (int32_t)((freq_mhz - 935.0) / 0.2 + 0.5);
         if (arfcn >= 0 && arfcn <= 124) {
             if (band) *band = GSM_BAND_900;
             return (uint16_t)arfcn;
@@ -1227,7 +1228,7 @@ uint16_t gsm_freq_to_arfcn(double freq_mhz, gsm_band_t *band)
     }
     // E-GSM 900: DL 925.2 - 935.0 → ARFCN 975-1023
     if (freq_mhz >= 925.0 && freq_mhz < 935.0) {
-        int arfcn = (int)((freq_mhz - 935.0) / 0.2 + 1024.5);
+        int32_t arfcn = (int32_t)((freq_mhz - 935.0) / 0.2 + 1024.5);
         if (arfcn >= 975 && arfcn <= 1023) {
             if (band) *band = GSM_BAND_E900;
             return (uint16_t)arfcn;
@@ -1235,7 +1236,7 @@ uint16_t gsm_freq_to_arfcn(double freq_mhz, gsm_band_t *band)
     }
     // DCS 1800: DL 1805.2 - 1879.8
     if (freq_mhz >= 1805.0 && freq_mhz <= 1880.0) {
-        int arfcn = (int)((freq_mhz - 1805.2) / 0.2 + 512.5);
+        int32_t arfcn = (int32_t)((freq_mhz - 1805.2) / 0.2 + 512.5);
         if (arfcn >= 512 && arfcn <= 885) {
             if (band) *band = GSM_BAND_1800;
             return (uint16_t)arfcn;
@@ -1243,7 +1244,7 @@ uint16_t gsm_freq_to_arfcn(double freq_mhz, gsm_band_t *band)
     }
     // GSM 850: DL 869.2 - 893.8
     if (freq_mhz >= 869.0 && freq_mhz <= 894.0) {
-        int arfcn = (int)((freq_mhz - 869.2) / 0.2 + 128.5);
+        int32_t arfcn = (int32_t)((freq_mhz - 869.2) / 0.2 + 128.5);
         if (arfcn >= 128 && arfcn <= 251) {
             if (band) *band = GSM_BAND_850;
             return (uint16_t)arfcn;
@@ -1284,7 +1285,7 @@ uint16_t gsm_freq_to_arfcn(double freq_mhz, gsm_band_t *band)
 //  42-49: CCCH
 //  50:  IDLE
 
-gsm_chan_type_t gsm_get_channel_type(int fn_mod51)
+gsm_chan_type_t gsm_get_channel_type(int32_t fn_mod51)
 {
     // FCCH frames: 0, 10, 20, 30, 40
     if (fn_mod51 == 0  || fn_mod51 == 10 || fn_mod51 == 20 ||
@@ -1328,7 +1329,7 @@ struct gsm_state *gsm_create(const gsm_config_t *cfg)
     st->cell.arfcn = gsm_freq_to_arfcn(st->cell.freq_mhz, &st->cell.band);
 
     st->symbol_period = (double)cfg->sample_rate / GSM_SYMBOL_RATE;
-    st->samples_per_frame = (int)(GSM_TIMESLOTS * GSM_BURST_BITS * st->symbol_period + 0.5);
+    st->samples_per_frame = (int32_t)(GSM_TIMESLOTS * GSM_BURST_BITS * st->symbol_period + 0.5);
     st->carrier_offset_hz = cfg->arfcn_freq - cfg->center_freq;
 
     // Allocate phase buffer — enough for ~4 frames of processing
@@ -1352,7 +1353,7 @@ struct gsm_state *gsm_create(const gsm_config_t *cfg)
 
     // Channel filter: mix to baseband + Hamming-windowed sinc LPF at 150 kHz
     {
-        int ntaps = 51; // odd number of taps
+        int32_t ntaps = 51; // odd number of taps
         double fc = 150000.0 / (double)cfg->sample_rate; // normalized cutoff
         st->filt_taps = ntaps;
         st->filt_coeff = calloc((size_t)ntaps, sizeof(float));
@@ -1364,9 +1365,9 @@ struct gsm_state *gsm_create(const gsm_config_t *cfg)
             free(st);
             return NULL;
         }
-        int half = ntaps / 2;
+        int32_t half = ntaps / 2;
         double sum = 0;
-        for (int i = 0; i < ntaps; i++) {
+        for (int32_t i = 0; i < ntaps; i++) {
             double t = (double)(i - half);
             /* normalized sinc: sin(π·x)/(π·x) where x = 2·fc·t */
             double x = 2.0 * fc * t;
@@ -1375,7 +1376,7 @@ struct gsm_state *gsm_create(const gsm_config_t *cfg)
             st->filt_coeff[i] = (float)(sinc_val * hamming);
             sum += st->filt_coeff[i];
         }
-        for (int i = 0; i < ntaps; i++)
+        for (int32_t i = 0; i < ntaps; i++)
             st->filt_coeff[i] /= (float)sum;
 
         st->filt_phase = 0.0;
@@ -1407,7 +1408,7 @@ void gsm_destroy(struct gsm_state *st)
 
 // Process SCH burst at a known sample position.
 // Returns true if successfully decoded.
-static bool process_sch(struct gsm_state *st, int sample_pos)
+static bool process_sch(struct gsm_state *st, int32_t sample_pos)
 {
     float burst_soft[GSM_BURST_BITS];
     float sps = (float)st->symbol_period;
@@ -1423,7 +1424,7 @@ static bool process_sch(struct gsm_state *st, int sample_pos)
 
     if (quality < 0.15f) {
         st->stats.sch_failed++;
-        static int sch_dbg_count = 0;
+        static int32_t sch_dbg_count = 0;
         if (++sch_dbg_count <= 3) {
             fprintf(stderr, "GSM SCH: quality=%.3f < 0.15 at pos=%d freq_off=%.1f Hz\n",
                     quality, sample_pos, st->freq_offset);
@@ -1433,7 +1434,7 @@ static bool process_sch(struct gsm_state *st, int sample_pos)
 
     // Re-extract with timing correction if needed
     if (fabsf(timing_adj) > 0.5f) {
-        int adj_samples = (int)(timing_adj * sps + 0.5f);
+        int32_t adj_samples = (int32_t)(timing_adj * sps + 0.5f);
         extract_burst_soft(st->phase_buf, st->phase_buf_len,
                            sample_pos + adj_samples, sps, freq_rps, burst_soft);
     }
@@ -1442,21 +1443,21 @@ static bool process_sch(struct gsm_state *st, int sample_pos)
     {
         float q2;
         float tadj2 = correlate_training(burst_soft, gsm_sb_training, 64, 42, &q2);
-        static int pcdbg = 0;
+        static int32_t pcdbg = 0;
         if (++pcdbg <= 5) {
             fprintf(stderr, "GSM SCH post-corr: q=%.3f tadj=%.1f (was q=%.3f tadj=%.1f)\n",
                     q2, tadj2, quality, timing_adj);
             fprintf(stderr, "  training soft[42..55]=");
-            for (int i = 42; i < 56; i++) fprintf(stderr, " %.2f", burst_soft[i]);
+            for (int32_t i = 42; i < 56; i++) fprintf(stderr, " %.2f", burst_soft[i]);
             fprintf(stderr, "\n  expect[0..13]       =");
-            for (int i = 0; i < 14; i++) fprintf(stderr, " %+.0f.00", gsm_sb_training[i] ? -1.0f : 1.0f);
+            for (int32_t i = 0; i < 14; i++) fprintf(stderr, " %+.0f.00", gsm_sb_training[i] ? -1.0f : 1.0f);
             fprintf(stderr, "\n");
         }
     }
 
     // Extract SCH data bits: positions 3..41 (39 bits) + 109..147 (39 bits)
     float sch_soft[GSM_SCH_CODED_BITS]; // 78 soft bits
-    for (int i = 0; i < 39; i++) {
+    for (int32_t i = 0; i < 39; i++) {
         sch_soft[i]      = burst_soft[3 + i];
         sch_soft[39 + i] = burst_soft[3 + 39 + 64 + i]; // after training
     }
@@ -1464,7 +1465,7 @@ static bool process_sch(struct gsm_state *st, int sample_pos)
     uint8_t info[GSM_SCH_INFO_BITS];
     if (!gsm_sch_decode(sch_soft, info)) {
         st->stats.sch_failed++;
-        static int sch_dec_dbg = 0;
+        static int32_t sch_dec_dbg = 0;
         if (++sch_dec_dbg <= 5) {
             fprintf(stderr, "GSM SCH: decode failed (quality=%.3f ok) at pos=%d, timing_adj=%.1f\n", quality, sample_pos, timing_adj);
             fprintf(stderr, "GSM SCH soft[0..9]: %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f\n",
@@ -1481,7 +1482,7 @@ static bool process_sch(struct gsm_state *st, int sample_pos)
     st->bsic = bsic;
     st->bsic_valid = true;
     st->fn = fn;
-    st->fn_mod51 = (int)(fn % 51);
+    st->fn_mod51 = (int32_t)(fn % 51);
     st->cell.bsic = bsic;
     st->cell.si3.ncc = bsic >> 3;
     st->cell.si3.bcc = bsic & 7;
@@ -1502,8 +1503,8 @@ static bool process_sch(struct gsm_state *st, int sample_pos)
 }
 
 // Process a Normal Burst and accumulate for BCCH/CCCH
-static bool process_normal_burst(struct gsm_state *st, int sample_pos,
-                                 gsm_chan_type_t chan_type, int fn_mod51)
+static bool process_normal_burst(struct gsm_state *st, int32_t sample_pos,
+                                 gsm_chan_type_t chan_type, int32_t fn_mod51)
 {
     float burst_soft[GSM_BURST_BITS];
     float sps = (float)st->symbol_period;
@@ -1522,7 +1523,7 @@ static bool process_normal_burst(struct gsm_state *st, int sample_pos,
 
     // Re-extract with timing correction
     if (fabsf(timing_adj) > 0.5f) {
-        int adj_samples = (int)(timing_adj * sps + 0.5f);
+        int32_t adj_samples = (int32_t)(timing_adj * sps + 0.5f);
         extract_burst_soft(st->phase_buf, st->phase_buf_len,
                            sample_pos + adj_samples, sps, freq_rps, burst_soft);
     }
@@ -1536,7 +1537,7 @@ static bool process_normal_burst(struct gsm_state *st, int sample_pos,
 
     if (chan_type == GSM_CHAN_BCCH) {
         acc = &st->bcch_acc;
-        int burst_idx = fn_mod51 - 2; // frames 2,3,4,5 → indices 0,1,2,3
+        int32_t burst_idx = fn_mod51 - 2; // frames 2,3,4,5 → indices 0,1,2,3
         if (burst_idx < 0 || burst_idx > 3) return false;
         memcpy(acc->soft_bits[burst_idx], data_soft, sizeof(data_soft));
         if (burst_idx == 0) acc->fn_start = st->fn;
@@ -1544,7 +1545,7 @@ static bool process_normal_burst(struct gsm_state *st, int sample_pos,
     } else if (chan_type == GSM_CHAN_CCCH) {
         // CCCH blocks: frames 6-9, 12-15, 16-19, 22-25, 26-29, 32-35, 36-39, 42-45, 46-49
         // Each block is 4 consecutive frames
-        int ccch_frame;
+        int32_t ccch_frame;
         if (fn_mod51 >= 6 && fn_mod51 <= 9) ccch_frame = fn_mod51 - 6;
         else if (fn_mod51 >= 12 && fn_mod51 <= 15) ccch_frame = fn_mod51 - 12;
         else if (fn_mod51 >= 16 && fn_mod51 <= 19) ccch_frame = fn_mod51 - 16;
@@ -1557,7 +1558,7 @@ static bool process_normal_burst(struct gsm_state *st, int sample_pos,
         else return false;
 
         // Use a rotating CCCH accumulator
-        int ccch_block_idx = 0;
+        int32_t ccch_block_idx = 0;
         if (fn_mod51 >= 6 && fn_mod51 <= 9)   ccch_block_idx = 0;
         else if (fn_mod51 >= 12 && fn_mod51 <= 19) ccch_block_idx = 1;
         else if (fn_mod51 >= 22 && fn_mod51 <= 29) ccch_block_idx = 2;
@@ -1580,7 +1581,7 @@ static bool process_normal_burst(struct gsm_state *st, int sample_pos,
             if (gsm_l2_parse(l2_frame, GSM_L2_FRAME_LEN, &l2)) {
                 // L3 data starts at octet 3 of L2 frame
                 const uint8_t *l3_data = &l2_frame[3];
-                int l3_len = l2.length;
+                int32_t l3_len = l2.length;
 
                 if (l3_len > 0) {
                     // Parse the L3 message
@@ -1671,7 +1672,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
         if (chunk > avail) chunk = avail;
         if (chunk == 0) {
             // Buffer full: shift left by half
-            int shift = st->phase_buf_size / 2;
+            int32_t shift = st->phase_buf_size / 2;
             memmove(st->phase_buf, &st->phase_buf[shift],
                     (size_t)(st->phase_buf_len - shift) * sizeof(float));
             st->phase_buf_len -= shift;
@@ -1682,7 +1683,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
 
         iq_to_phase_filtered(st, &iq_data[offset * 2], chunk,
                              &st->phase_buf[st->phase_buf_len]);
-        st->phase_buf_len += (int)chunk;
+        st->phase_buf_len += (int32_t)chunk;
         offset += chunk;
     }
 
@@ -1691,7 +1692,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
     case GSM_SYNC_NONE:
     case GSM_SYNC_FCCH: {
         // Try to detect FCCH
-        if (st->phase_buf_len < (int)(150 * st->symbol_period)) break;
+        if (st->phase_buf_len < (int32_t)(150 * st->symbol_period)) break;
 
         float *freq_buf = st->work_soft; // reuse work buffer
         phase_to_freq(st->phase_buf, st->phase_buf_len, freq_buf);
@@ -1702,13 +1703,13 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
             static uint64_t fcch_dbg_last = 0;
             fcch_dbg_total += n_samples;
             if (fcch_dbg_total - fcch_dbg_last >= 10000000) {
-                int n_freq = st->phase_buf_len - 1;
+                int32_t n_freq = st->phase_buf_len - 1;
                 float carrier_rps_dbg = (float)(st->carrier_offset_hz * 2.0 * M_PI / st->cfg.sample_rate);
                 float expected = carrier_rps_dbg + (float)M_PI / (2.0f * (float)st->symbol_period);
                 float fmin = 1e9f, fmax = -1e9f;
                 double fsum = 0;
-                int near = 0;
-                for (int i = 0; i < n_freq; i++) {
+                int32_t near = 0;
+                for (int32_t i = 0; i < n_freq; i++) {
                     if (freq_buf[i] < fmin) fmin = freq_buf[i];
                     if (freq_buf[i] > fmax) fmax = freq_buf[i];
                     fsum += freq_buf[i];
@@ -1722,7 +1723,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
 
         double freq_off;
         float carrier_rps = (float)(st->carrier_offset_hz * 2.0 * M_PI / st->cfg.sample_rate);
-        int fcch_pos = detect_fcch(freq_buf, st->phase_buf_len - 1,
+        int32_t fcch_pos = detect_fcch(freq_buf, st->phase_buf_len - 1,
                                    (float)st->symbol_period, carrier_rps, &freq_off);
 
         // Debug: show best run regardless of detection
@@ -1733,11 +1734,11 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
             if (run_dbg - run_dbg_last >= 10000000) {
                 float exp2 = (float)(st->carrier_offset_hz * 2.0 * M_PI / st->cfg.sample_rate)
                            + (float)M_PI / (2.0f * (float)st->symbol_period);
-                int n_freq2 = st->phase_buf_len - 1;
-                int best_run = 0, cur_run = 0;
+                int32_t n_freq2 = st->phase_buf_len - 1;
+                int32_t best_run = 0, cur_run = 0;
                 float best_mean = 0;
                 double cur_sum = 0;
-                for (int i = 0; i < n_freq2; i++) {
+                for (int32_t i = 0; i < n_freq2; i++) {
                     if (fabsf(freq_buf[i] - exp2) < 0.15f) {
                         cur_run++;
                         cur_sum += freq_buf[i];
@@ -1751,7 +1752,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
                     }
                 }
                 if (cur_run > best_run) { best_run = cur_run; best_mean = (float)(cur_sum / cur_run); }
-                int min_needed = (int)(100 * st->symbol_period);
+                int32_t min_needed = (int32_t)(100 * st->symbol_period);
                 fprintf(stderr, "GSM FCCH: best_run=%d min_needed=%d (%.1f sym) best_mean=%.4f\n",
                         best_run, min_needed, best_run / st->symbol_period, best_mean);
                 run_dbg_last = run_dbg;
@@ -1774,22 +1775,22 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
              * FCCH run ~ 142 bits = ~524 samples. Frame period = 4615 samples.
              * So SCH start ~ fcch_end + (4615 - 524) = fcch_end + 4091.
              * Search fcch_end+3400..fcch_end+5100 to cover timing uncertainty. */
-            int fcch_end = fcch_pos;
+            int32_t fcch_end = fcch_pos;
             float burst_try[GSM_BURST_BITS];
             float best_q = 0;
-            int best_pos = 0;
+            int32_t best_pos = 0;
             float best_tadj = 0;
             float sps_f = (float)st->symbol_period;
             float frps = (float)((st->freq_offset + st->carrier_offset_hz) * 2.0 * M_PI / st->cfg.sample_rate);
-            int burst_len = (int)(156 * st->symbol_period);
-            int frame_samples = (int)(1250.0 * st->symbol_period + 0.5);
-            int search_start = fcch_end + frame_samples - 1200;
-            int search_end   = fcch_end + frame_samples + 500;
+            int32_t burst_len = (int32_t)(156 * st->symbol_period);
+            int32_t frame_samples = (int32_t)(1250.0 * st->symbol_period + 0.5);
+            int32_t search_start = fcch_end + frame_samples - 1200;
+            int32_t search_end   = fcch_end + frame_samples + 500;
             if (search_start < 1) search_start = 1;
             if (search_end + burst_len > st->phase_buf_len)
                 search_end = st->phase_buf_len - burst_len;
 
-            for (int pos = search_start; pos <= search_end; pos += (int)(sps_f)) {
+            for (int32_t pos = search_start; pos <= search_end; pos += (int32_t)(sps_f)) {
                 extract_burst_soft(st->phase_buf, st->phase_buf_len, pos, sps_f, frps, burst_try);
                 float q;
                 float tadj = correlate_training(burst_try, gsm_sb_training, 64, 42, &q);
@@ -1801,15 +1802,15 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
             }
 
             {
-                static int search_dbg = 0;
+                static int32_t search_dbg = 0;
                 if (++search_dbg <= 5) {
-                    int expected = fcch_end + frame_samples - 524;
+                    int32_t expected = fcch_end + frame_samples - 524;
                     fprintf(stderr, "GSM SCH search: fcch=%d exp=%d best=%d (delta=%d) q=%.3f tadj=%.1f range=[%d..%d]\n",
                             fcch_end, expected, best_pos, best_pos - fcch_end, best_q, best_tadj, search_start, search_end);
                     if (best_pos > 0 && best_pos + burst_len < st->phase_buf_len) {
                         extract_burst_soft(st->phase_buf, st->phase_buf_len, best_pos, sps_f, frps, burst_try);
                         fprintf(stderr, "  soft[39..52]=");
-                        for (int i = 39; i < 53; i++) fprintf(stderr, " %.2f", burst_try[i]);
+                        for (int32_t i = 39; i < 53; i++) fprintf(stderr, " %.2f", burst_try[i]);
                         fprintf(stderr, "\n");
                     }
                 }
@@ -1820,7 +1821,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
                 /* Initialize frame tracking from SCH burst position (with timing
                  * correction) so the tracking loop advances correctly. */
                 if (st->sync_state >= GSM_SYNC_SCH) {
-                    int adj = (int)(best_tadj * sps_f + 0.5f);
+                    int32_t adj = (int32_t)(best_tadj * sps_f + 0.5f);
                     st->frame_sample_pos = best_pos + adj;
                 }
             }
@@ -1834,7 +1835,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
         // Advance frame by frame and decode each burst on TS0.
 
         // Calculate where next frame starts
-        int frame_start = st->frame_sample_pos;
+        int32_t frame_start = st->frame_sample_pos;
 
         // Skip frames whose data is no longer in the buffer
         while (frame_start < 0 && frame_start + st->samples_per_frame < st->phase_buf_len) {
@@ -1843,7 +1844,7 @@ void gsm_process(struct gsm_state *st, const uint8_t *iq_data, uint32_t len)
         }
 
         while (frame_start + st->samples_per_frame < st->phase_buf_len) {
-            int fn_mod51 = (int)(st->fn % 51);
+            int32_t fn_mod51 = (int32_t)(st->fn % 51);
             gsm_chan_type_t chan = gsm_get_channel_type(fn_mod51);
 
             switch (chan) {

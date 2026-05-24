@@ -83,7 +83,7 @@ typedef struct {
 
     double   latitude;          // degrees
     double   longitude;         // degrees
-    int      altitude;          // meters above MSL (geoid corrected)
+    int32_t      altitude;          // meters above MSL (geoid corrected)
     float    speed;             // m/s ground speed
     float    course;            // degrees (0-360) ground track
     float    vs;                // m/s vertical speed
@@ -130,7 +130,7 @@ bool flarm_check_crc(const uint8_t *data, uint32_t len);
 uint16_t flarm_crc16(const uint8_t *data, uint32_t len);
 
 // Key accessors for panel display
-int flarm_keys_are_loaded(void);
+int32_t flarm_keys_are_loaded(void);
 void flarm_get_key_table(uint32_t out[12]);
 uint32_t flarm_get_key2(void);
 uint32_t flarm_get_key3(void);

@@ -15,9 +15,9 @@ extern "C" {
 #include "msg_queue.h"
 
 struct opensky_config {
-    int      enabled;
+    int32_t      enabled;
     char     host[128];
-    int      port;
+    int32_t      port;
     char     username[64];
     int32_t  serial;           // persistent serial from server, 0 = request new
     char     serial_file[256]; // path to persist serial number

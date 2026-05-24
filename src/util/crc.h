@@ -31,13 +31,13 @@ extern "C" {
 
 struct errorinfo {
     uint32_t syndrome;                 // CRC syndrome
-    int      errors;                   // number of errors
+    int32_t      errors;                   // number of errors
     int8_t   bit[MODES_MAX_BITERRORS]; // bit positions to fix (-1 = no bit)
 };
 
-void modesChecksumInit(int fixBits);
-uint32_t modesChecksum(const uint8_t *msg, int bitlen);
-struct errorinfo *modesChecksumDiagnose(uint32_t syndrome, int bitlen);
+void modesChecksumInit(int32_t fixBits);
+uint32_t modesChecksum(const uint8_t *msg, int32_t bitlen);
+struct errorinfo *modesChecksumDiagnose(uint32_t syndrome, int32_t bitlen);
 void modesChecksumFix(uint8_t *msg, struct errorinfo *info);
 
 #ifdef __cplusplus

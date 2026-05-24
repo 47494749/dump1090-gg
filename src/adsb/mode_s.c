@@ -50,6 +50,7 @@
 
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "ais_charset.h"
 
 /* for PRIX64 */
@@ -74,7 +75,7 @@
 // There are lots of unused codes in both category, so we can assume ICAO will stick to
 // these rules, meaning that the most significant bit of the DF indicates the length.
 //
-int modesMessageLenByType(int type) {
+int32_t modesMessageLenByType(int32_t type) {
     return (type & 0x10) ? MODES_LONG_MSG_BITS : MODES_SHORT_MSG_BITS ;
 }
 
@@ -93,8 +94,8 @@ int modesMessageLenByType(int type) {
 //
 // For more info: http://en.wikipedia.org/wiki/Gillham_code
 //
-static int decodeID13Field(int ID13Field) {
-    int hexGillham = 0;
+static int32_t decodeID13Field(int32_t ID13Field) {
+    int32_t hexGillham = 0;
 
     if (ID13Field & 0x1000) {hexGillham |= 0x0010;} // Bit 12 = C1
     if (ID13Field & 0x0800) {hexGillham |= 0x1000;} // Bit 11 = A1
@@ -119,22 +120,22 @@ static int decodeID13Field(int ID13Field) {
 // Decode the 13 bit AC altitude field (in DF 20 and others).
 // Returns the altitude, and set 'unit' to either UNIT_METERS or UNIT_FEET.
 //
-static int decodeAC13Field(int AC13Field, altitude_unit_t *unit) {
-    int m_bit  = AC13Field & 0x0040; // set = meters, clear = feet
-    int q_bit  = AC13Field & 0x0010; // set = 25 ft encoding, clear = Gillham Mode C encoding
+static int32_t decodeAC13Field(int32_t AC13Field, altitude_unit_t *unit) {
+    int32_t m_bit  = AC13Field & 0x0040; // set = meters, clear = feet
+    int32_t q_bit  = AC13Field & 0x0010; // set = 25 ft encoding, clear = Gillham Mode C encoding
 
     if (!m_bit) {
         *unit = UNIT_FEET;
         if (q_bit) {
             // N is the 11 bit integer resulting from the removal of bit Q and M
-            int n = ((AC13Field & 0x1F80) >> 2) |
+            int32_t n = ((AC13Field & 0x1F80) >> 2) |
                     ((AC13Field & 0x0020) >> 1) |
                      (AC13Field & 0x000F);
             // The final altitude is resulting number multiplied by 25, minus 1000.
             return ((n * 25) - 1000);
         } else {
             // N is an 11 bit Gillham coded altitude
-            int n = modeAToModeC(decodeID13Field(AC13Field));
+            int32_t n = modeAToModeC(decodeID13Field(AC13Field));
             if (n < -12) {
                 return INVALID_ALTITUDE;
             }
@@ -146,14 +147,14 @@ static int decodeAC13Field(int AC13Field, altitude_unit_t *unit) {
         // When M bit is set, the altitude is in meters.
         // Extract the 12-bit value (remove M bit at position 6).
         // The Q bit position is repurposed as a data bit.
-        int n = ((AC13Field & 0x1F80) >> 2) |
+        int32_t n = ((AC13Field & 0x1F80) >> 2) |
                 ((AC13Field & 0x0020) >> 1) |
                  (AC13Field & 0x000F);
         if (n == 0) {
             return INVALID_ALTITUDE;
         }
         // Value is in multiples of 7.62 meters (25 ft equivalent), minus 304.8m (1000 ft)
-        return (int)(n * 7.62 - 304.8 + 0.5);
+        return (int32_t)(n * 7.62 - 304.8 + 0.5);
     }
 }
 
@@ -162,19 +163,19 @@ static int decodeAC13Field(int AC13Field, altitude_unit_t *unit) {
 //
 // Decode the 12 bit AC altitude field (in DF 17 and others).
 //
-static int decodeAC12Field(int AC12Field, altitude_unit_t *unit) {
-    int q_bit  = AC12Field & 0x10; // Bit 48 = Q
+static int32_t decodeAC12Field(int32_t AC12Field, altitude_unit_t *unit) {
+    int32_t q_bit  = AC12Field & 0x10; // Bit 48 = Q
 
     *unit = UNIT_FEET;
     if (q_bit) {
         /// N is the 11 bit integer resulting from the removal of bit Q at bit 4
-        int n = ((AC12Field & 0x0FE0) >> 1) |
+        int32_t n = ((AC12Field & 0x0FE0) >> 1) |
                  (AC12Field & 0x000F);
         // The final altitude is the resulting number multiplied by 25, minus 1000.
         return ((n * 25) - 1000);
     } else {
         // Make N a 13 bit Gillham coded altitude by inserting M=0 at bit 6
-        int n = ((AC12Field & 0x0FC0) << 1) |
+        int32_t n = ((AC12Field & 0x0FC0) << 1) |
                  (AC12Field & 0x003F);
         n = modeAToModeC(decodeID13Field(n));
         if (n < -12) {
@@ -258,7 +259,7 @@ static bool isShortPIMessage(const uint8_t *msg)
 
 #define UNCHECKED_SYNDROME 0xFFFFFFFFU
 
-static int correctMessage(const uint8_t *in, uint8_t *out, uint32_t *short_syndrome, uint32_t *long_syndrome)
+static int32_t correctMessage(const uint8_t *in, uint8_t *out, uint32_t *short_syndrome, uint32_t *long_syndrome)
 {
     // Possible DF values of the first byte of a message that could be a valid DF11/17/18
     // message after correction. See tools/df-correction-arrays.py for generator code.
@@ -366,11 +367,11 @@ score_rank scoreModesMessage(const uint8_t *uncorrected)
     // try to produce a corrected DF11/17/18, including correcting the DF bits
     uint8_t corrected[14];
     uint32_t short_syndrome, long_syndrome;
-    int corrections = correctMessage(uncorrected, corrected, &short_syndrome, &long_syndrome);
+    int32_t corrections = correctMessage(uncorrected, corrected, &short_syndrome, &long_syndrome);
 
     uint32_t df = getbits(corrected, 1, 5); // Downlink Format
     switch (df) {
-    case 0:  // short air-air surveillance
+    case 0:  // int16_t air-air surveillance
     case 4:  // surveillance, altitude reply
     case 5:  // surveillance, altitude reply
         {
@@ -380,7 +381,7 @@ score_rank scoreModesMessage(const uint8_t *uncorrected)
             return recent ? SR_UNRELIABLE_KNOWN : SR_UNRELIABLE_UNKNOWN;
         }
 
-    case 16: // long air-air surveillance
+    case 16: // int64_t air-air surveillance
     case 20: // Comm-B, altitude reply
     case 21: // Comm-B, identity reply
         {
@@ -546,7 +547,7 @@ static void decodeExtendedSquitter(struct modesMessage *mm);
 // return 0 if all OK
 // <0 if it's a bad message
 //
-int decodeModesMessage(struct modesMessage *mm, const uint8_t *in)
+int32_t decodeModesMessage(struct modesMessage *mm, const uint8_t *in)
 {
     // score the message if needed (it might be coming off the network)
     if (mm->score == SR_NOT_SET)
@@ -562,7 +563,7 @@ int decodeModesMessage(struct modesMessage *mm, const uint8_t *in)
 
     // Apply corrections to our local copy
     uint32_t short_syndrome, long_syndrome;
-    int corrections = correctMessage(in, mm->msg, &short_syndrome, &long_syndrome);
+    int32_t corrections = correctMessage(in, mm->msg, &short_syndrome, &long_syndrome);
     const uint8_t *msg = mm->msg;
 
     // Get the message type ASAP as other operations depend on this
@@ -583,10 +584,10 @@ int decodeModesMessage(struct modesMessage *mm, const uint8_t *in)
 
     // Do checksum work and set fields that depend on the CRC
     switch (mm->msgtype) {
-    case 0: // short air-air surveillance
+    case 0: // int16_t air-air surveillance
     case 4: // surveillance, altitude reply
     case 5: // surveillance, identity reply
-    case 16: // long air-air surveillance
+    case 16: // int64_t air-air surveillance
         // These message types use Address/Parity
         // so we can't check the CRC and must infer the transmitter's address
         mm->source = SOURCE_MODE_S;
@@ -908,7 +909,7 @@ static void setIMF(struct modesMessage *mm)
     }
 }
 
-static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
+static void decodeESAirborneVelocity(struct modesMessage *mm, int32_t check_imf)
 {
     // Airborne Velocity Message
     uint8_t *me = mm->ME;
@@ -942,8 +943,8 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
             uint32_t ns_raw = getbits(me, 26, 35);
 
             if (ew_raw && ns_raw) {
-                int ew_vel = (ew_raw - 1) * (getbit(me, 14) ? -1 : 1) * ((mm->mesub == 2) ? 4 : 1);
-                int ns_vel = (ns_raw - 1) * (getbit(me, 25) ? -1 : 1) * ((mm->mesub == 2) ? 4 : 1);
+                int32_t ew_vel = (ew_raw - 1) * (getbit(me, 14) ? -1 : 1) * ((mm->mesub == 2) ? 4 : 1);
+                int32_t ns_vel = (ns_raw - 1) * (getbit(me, 25) ? -1 : 1) * ((mm->mesub == 2) ? 4 : 1);
 
                 // Compute velocity and angle from the two speed components
                 mm->gs.v0 = mm->gs.v2 = mm->gs.selected = sqrtf((ns_vel * ns_vel) + (ew_vel * ew_vel) + 0.5);
@@ -996,7 +997,7 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
     uint32_t vert_rate = getbits(me, 38, 46);
     uint32_t vert_rate_is_baro = getbit(me, 36);
     if (vert_rate) {
-        int rate = (vert_rate - 1) * (getbit(me, 37) ? -64 : 64);
+        int32_t rate = (vert_rate - 1) * (getbit(me, 37) ? -64 : 64);
         if (vert_rate_is_baro) {
             mm->baro_rate = rate;
             mm->baro_rate_valid = 1;
@@ -1017,7 +1018,7 @@ static void decodeESAirborneVelocity(struct modesMessage *mm, int check_imf)
     }
 }
 
-static void decodeESSurfacePosition(struct modesMessage *mm, int check_imf)
+static void decodeESSurfacePosition(struct modesMessage *mm, int32_t check_imf)
 {
     // Surface position and movement
     uint8_t *me = mm->ME;
@@ -1055,7 +1056,7 @@ static void decodeESSurfacePosition(struct modesMessage *mm, int check_imf)
     mm->cpr_lon = getbits(me, 40, 56);
 }
 
-static void decodeESAirbornePosition(struct modesMessage *mm, int check_imf)
+static void decodeESAirbornePosition(struct modesMessage *mm, int32_t check_imf)
 {
     // Airborne position and altitude
     uint8_t *me = mm->ME;
@@ -1126,7 +1127,7 @@ static void decodeESAirbornePosition(struct modesMessage *mm, int check_imf)
 
     if (AC12Field && mm->airground != AG_GROUND) {// Only attempt to decode if a valid (non zero) altitude is present and not on ground
         altitude_unit_t unit;
-        int alt = decodeAC12Field(AC12Field, &unit);
+        int32_t alt = decodeAC12Field(AC12Field, &unit);
         if (alt != INVALID_ALTITUDE) {
             // If we haven't set airground yet (e.g. DF18)
             // then we can at least set it to UNCERTAIN here
@@ -1153,7 +1154,7 @@ static void decodeESTestMessage(struct modesMessage *mm)
     mm->mesub = getbits(me, 6, 8);
 
     if (mm->mesub == 7) {               // (see 1090-WP-15-20)
-        int ID13Field = getbits(me, 9, 21);
+        int32_t ID13Field = getbits(me, 9, 21);
         if (ID13Field) {
             mm->squawk_valid = 1;
             mm->squawk   = decodeID13Field(ID13Field);
@@ -1161,7 +1162,7 @@ static void decodeESTestMessage(struct modesMessage *mm)
     }
 }
 
-static void decodeESAircraftStatus(struct modesMessage *mm, int check_imf)
+static void decodeESAircraftStatus(struct modesMessage *mm, int32_t check_imf)
 {
     // Extended Squitter Aircraft Status
     uint8_t *me = mm->ME;
@@ -1194,7 +1195,7 @@ static void decodeESAircraftStatus(struct modesMessage *mm, int check_imf)
     }
 }
 
-static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
+static void decodeESTargetStatus(struct modesMessage *mm, int32_t check_imf)
 {
     uint8_t *me = mm->ME;
 
@@ -1248,7 +1249,7 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
         }
 
         // 16-25: target altitude
-        int alt = -1000 + 100 * getbits(me, 16, 25);
+        int32_t alt = -1000 + 100 * getbits(me, 16, 25);
         switch (mm->nav.altitude_source) {
         case NAV_ALT_MCP:
             mm->nav.mcp_altitude_valid = 1;
@@ -1389,7 +1390,7 @@ static void decodeESTargetStatus(struct modesMessage *mm, int check_imf)
     }
 }
 
-static void decodeESOperationalStatus(struct modesMessage *mm, int check_imf)
+static void decodeESOperationalStatus(struct modesMessage *mm, int32_t check_imf)
 {
     uint8_t *me = mm->ME;
 
@@ -1525,7 +1526,7 @@ static void decodeCoarseTISB(struct modesMessage *mm)
     uint32_t alt_code = getbits(me, 2, 13);
     if (alt_code) {
         altitude_unit_t unit;
-        int alt = decodeAC12Field(alt_code, &unit);
+        int32_t alt = decodeAC12Field(alt_code, &unit);
         if (alt != INVALID_ALTITUDE) {
             mm->altitude_baro_valid = 1;
             mm->altitude_baro = alt;
@@ -1921,7 +1922,7 @@ static void print_hex_bytes(uint8_t *data, size_t len) {
     }
 }
 
-static int esTypeHasSubtype(uint32_t metype)
+static int32_t esTypeHasSubtype(uint32_t metype)
 {
     if (metype <= 18) {
         return 0;
@@ -2023,7 +2024,7 @@ static const char *esTypeName(uint32_t metype, uint32_t mesub)
 }
 
 void displayModesMessage(struct modesMessage *mm) {
-    int j;
+    int32_t j;
 
     // Handle only addresses mode first.
     if (Modes.onlyaddr) {
@@ -2474,7 +2475,7 @@ static void logTisbMessage(struct modesMessage *mm)
     // data fields are almost certainly CRC-24 collisions (random noise that
     // happens to have a valid checksum). Require at least one meaningful field.
     if (mm->CF != 4) {  // CF=4 management messages have no data fields by design
-        int has_data = mm->callsign_valid || mm->altitude_baro_valid ||
+        int32_t has_data = mm->callsign_valid || mm->altitude_baro_valid ||
                        mm->altitude_geom_valid || mm->gs_valid ||
                        mm->heading_valid || mm->cpr_valid ||
                        mm->squawk_valid || mm->ias_valid || mm->tas_valid;

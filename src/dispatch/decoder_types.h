@@ -61,14 +61,14 @@ typedef struct {
     // Position
     double            lat, lon;
     bool              position_valid;
-    int               altitude_ft;
+    int32_t               altitude_ft;
     bool              altitude_valid;
     bool              altitude_is_baro;  // true=barometric, false=GNSS
 
     // Velocity
-    int               ground_speed_kt;
-    int               heading_deg;
-    int               vert_rate_fpm;
+    int32_t               ground_speed_kt;
+    int32_t               heading_deg;
+    int32_t               vert_rate_fpm;
     bool              velocity_valid;
 
     // Squawk (ADS-B only)
@@ -87,9 +87,9 @@ typedef struct {
     struct {
         char          serial[16];      // sonde serial (e.g. "T1234567")
         char          sonde_type[8];   // "RS41", "DFM", etc.
-        int           frame_num;       // frame counter
-        int           rs_errors;       // RS corrections (-1=uncorrectable)
-        int           satellites;      // GPS satellites
+        int32_t           frame_num;       // frame counter
+        int32_t           rs_errors;       // RS corrections (-1=uncorrectable)
+        int32_t           satellites;      // GPS satellites
         double        vel_v;           // vertical velocity m/s
         float         freq_mhz;        // receive frequency
         bool          valid;
@@ -105,10 +105,10 @@ typedef struct {
 
     struct {
         double        lat, lon;
-        int           altitude_m;
+        int32_t           altitude_m;
         double        climb_ms;
         double        wind_speed_kmh;
-        int           wind_heading_deg;
+        int32_t           wind_heading_deg;
         uint8_t       confidence;
         bool          valid;
     } thermal;
@@ -131,9 +131,9 @@ typedef struct {
     uint32_t          addr;
     uint64_t          timestamp_ms;
     double            lat, lon;
-    int               altitude_m;
+    int32_t               altitude_m;
     double            speed_kmh;
-    int               heading_deg;
+    int32_t               heading_deg;
     uint8_t           ground_type;       // walking, vehicle, bike...
     char              name[32];
     double            signal_level;

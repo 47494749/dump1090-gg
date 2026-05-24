@@ -5,6 +5,7 @@
 // Thread-safe device list updated from IoT decoder callbacks.
 
 #include "iot_tracker.h"
+#include <cstdint>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,11 +44,11 @@ void iotTrackerDestroy(void)
 // Find existing device or allocate a new slot
 static iot_tracked_device_t *find_or_alloc(iot_protocol_t proto, uint32_t device_id, uint8_t channel)
 {
-    int free_slot = -1;
+    int32_t free_slot = -1;
     uint64_t oldest_time = UINT64_MAX;
-    int oldest_slot = 0;
+    int32_t oldest_slot = 0;
 
-    for (int i = 0; i < IOT_TRACKER_MAX_DEVICES; i++) {
+    for (int32_t i = 0; i < IOT_TRACKER_MAX_DEVICES; i++) {
         if (devices[i].active &&
             devices[i].protocol == proto &&
             devices[i].device_id == device_id &&
@@ -64,7 +65,7 @@ static iot_tracked_device_t *find_or_alloc(iot_protocol_t proto, uint32_t device
     }
 
     // Use free slot or evict oldest
-    int slot = (free_slot >= 0) ? free_slot : oldest_slot;
+    int32_t slot = (free_slot >= 0) ? free_slot : oldest_slot;
     memset(&devices[slot], 0, sizeof(devices[slot]));
     devices[slot].active = true;
     devices[slot].first_seen_ms = now_ms();
@@ -104,7 +105,7 @@ void iotTrackerUpdate(const iot_device_msg_t *msg)
     dev->last_seen_ms = msg->timestamp_ms ? msg->timestamp_ms : now_ms();
 
     if (msg->payload_len > 0) {
-        int copy = msg->payload_len < 64 ? msg->payload_len : 64;
+        int32_t copy = msg->payload_len < 64 ? msg->payload_len : 64;
         memcpy(dev->payload, msg->payload, copy);
         dev->payload_len = copy;
     }
@@ -112,14 +113,14 @@ void iotTrackerUpdate(const iot_device_msg_t *msg)
     pthread_mutex_unlock(&tracker_mutex);
 }
 
-int iotTrackerActiveCount(void)
+int32_t iotTrackerActiveCount(void)
 {
     uint64_t ts = now_ms();
     uint64_t cutoff = ts - (uint64_t)IOT_DEVICE_TIMEOUT * 1000;
-    int count = 0;
+    int32_t count = 0;
 
     pthread_mutex_lock(&tracker_mutex);
-    for (int i = 0; i < IOT_TRACKER_MAX_DEVICES; i++) {
+    for (int32_t i = 0; i < IOT_TRACKER_MAX_DEVICES; i++) {
         if (devices[i].active && devices[i].last_seen_ms >= cutoff)
             count++;
     }
@@ -133,7 +134,7 @@ static std::string sfmt(const char *fmt, ...) {
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int32_t n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n < 0) return {};
     if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
@@ -145,11 +146,11 @@ static std::string sfmt(const char *fmt, ...) {
 }
 
 // Convert payload to hex string
-static std::string hex_encode(const uint8_t *data, int len)
+static std::string hex_encode(const uint8_t *data, int32_t len)
 {
     std::string out;
     out.reserve(len * 2);
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         out += sfmt("%02x", data[i]);
     return out;
 }
@@ -163,8 +164,8 @@ std::string iotTrackerToJSON(void)
 
     pthread_mutex_lock(&tracker_mutex);
 
-    int first = 1;
-    for (int i = 0; i < IOT_TRACKER_MAX_DEVICES; i++) {
+    int32_t first = 1;
+    for (int32_t i = 0; i < IOT_TRACKER_MAX_DEVICES; i++) {
         iot_tracked_device_t *d = &devices[i];
         if (!d->active) continue;
 
@@ -198,7 +199,7 @@ std::string iotTrackerToJSON(void)
             isnan(d->power_w) ? -1.0 : (double)d->power_w,
             isnan(d->energy_kwh) ? -1.0 : (double)d->energy_kwh,
             isnan(d->battery_v) ? -1.0 : (double)d->battery_v,
-            (int)d->battery_ok,
+            (int32_t)d->battery_ok,
             (double)d->rssi_db, (double)d->freq_offset_hz, d->freq_hz / 1e6,
             (uint64_t)d->msg_count,
             d->first_seen_ms / 1000.0,

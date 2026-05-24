@@ -19,6 +19,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 
 #include "sdr_ifile.h"
 #ifdef ENABLE_RTLSDR
@@ -42,15 +43,15 @@ typedef struct {
     sdr_type_t sdr_type;
     void (*initConfig)();
     void (*showHelp)();
-    bool (*handleOption)(int, char**, int*);
+    bool (*handleOption)(int32_t, char**, int32_t*);
     bool (*open)();
     void (*run)();
     void (*stop)();
     void (*close)();
-    int (*getgain)();
-    int (*getmaxgain)();
-    double (*getgaindb)(int);
-    int (*setgain)(int);
+    int32_t (*getgain)();
+    int32_t (*getmaxgain)();
+    double (*getgaindb)(int32_t);
+    int32_t (*setgain)(int32_t);
 } sdr_handler;
 
 static void noInitConfig()
@@ -88,23 +89,23 @@ static void noClose()
 {
 }
 
-static int noGetGain()
+static int32_t noGetGain()
 {
     return -1;
 }
 
-static int noGetMaxGain()
+static int32_t noGetMaxGain()
 {
     return -1;
 }
 
-static double noGetGainDb(int step)
+static double noGetGainDb(int32_t step)
 {
     MODES_NOTUSED(step);
     return 0.0;
 }
 
-static int noSetGain(int step)
+static int32_t noSetGain(int32_t step)
 {
     MODES_NOTUSED(step);
     return 0;
@@ -146,7 +147,7 @@ void sdrInitConfig()
     // Default SDR is the first type available in the handlers array.
     Modes.sdr_type = sdr_handlers[0].sdr_type;
 
-    for (int i = 0; sdr_handlers[i].name; ++i) {
+    for (int32_t i = 0; sdr_handlers[i].name; ++i) {
         sdr_handlers[i].initConfig();
     }
 }
@@ -156,18 +157,18 @@ void sdrShowHelp()
     printf("--device-type <type>     Select SDR type (default: %s)\n", sdr_handlers[0].name);
     printf("\n");
 
-    for (int i = 0; sdr_handlers[i].name; ++i) {
+    for (int32_t i = 0; sdr_handlers[i].name; ++i) {
         sdr_handlers[i].showHelp();
     }
 }
 
 bool sdrHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     if (!strcmp(argv[j], "--device-type")) {
         if ((j+1) < argc) {
             ++j;
-            for (int i = 0; sdr_handlers[i].name; ++i) {
+            for (int32_t i = 0; sdr_handlers[i].name; ++i) {
                 if (!strcasecmp(sdr_handlers[i].name, argv[j])) {
                     Modes.sdr_type = sdr_handlers[i].sdr_type;
                     *jptr = j;
@@ -178,7 +179,7 @@ bool sdrHandleOption(int argc, char **argv, int *jptr)
         }
 
         fprintf(stderr, "Supported SDR types:\n");
-        for (int i = 0; sdr_handlers[i].name; ++i) {
+        for (int32_t i = 0; sdr_handlers[i].name; ++i) {
             fprintf(stderr, "  %s\n", sdr_handlers[i].name);
         }
 
@@ -186,7 +187,7 @@ bool sdrHandleOption(int argc, char **argv, int *jptr)
     }
 
     bool handled = false;
-    for (int i = 0; sdr_handlers[i].name; ++i) {
+    for (int32_t i = 0; sdr_handlers[i].name; ++i) {
         handled = sdr_handlers[i].handleOption(argc, argv, jptr) || handled;
     }
 
@@ -197,7 +198,7 @@ static sdr_handler *current_handler()
 {
     static sdr_handler unsupported_handler = { "unsupported", SDR_NONE, noInitConfig, noShowHelp, noHandleOption, unsupportedOpen, noRun, noStop, noClose, noGetGain, noGetMaxGain, noGetGainDb, noSetGain };
 
-    for (int i = 0; sdr_handlers[i].name; ++i) {
+    for (int32_t i = 0; sdr_handlers[i].name; ++i) {
         if (Modes.sdr_type == sdr_handlers[i].sdr_type) {
             return &sdr_handlers[i];
         }
@@ -256,22 +257,22 @@ void sdrUpdateCPUTime(struct timespec *addTo)
     pthread_mutex_unlock(&Modes.reader_cpu_mutex);
 }
 
-int sdrGetGain()
+int32_t sdrGetGain()
 {
     return current_handler()->getgain();
 }
 
-int sdrGetMaxGain()
+int32_t sdrGetMaxGain()
 {
     return current_handler()->getmaxgain();
 }
 
-double sdrGetGainDb(int step)
+double sdrGetGainDb(int32_t step)
 {
     return current_handler()->getgaindb(step);
 }
 
-int sdrSetGain(int step)
+int32_t sdrSetGain(int32_t step)
 {
     return current_handler()->setgain(step);
 }

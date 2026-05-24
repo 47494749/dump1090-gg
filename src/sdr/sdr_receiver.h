@@ -96,11 +96,11 @@ typedef struct {
     char    serial[64];             // RTL-SDR serial number (empty = auto, "FILE" = virtual)
     sdr_role_t role;                // receiver role
     sdr_backend_type_t backend;     // backend library preference (auto/rtlsdr/sdrgg)
-    int     freq;                   // center frequency in Hz
+    int32_t     freq;                   // center frequency in Hz
     float   gain;                   // gain in dB, or MODES_DEFAULT_GAIN / MODES_LEGACY_AUTO_GAIN
-    int     ppm_error;              // oscillator correction in PPM
+    int32_t     ppm_error;              // oscillator correction in PPM
     bool    digital_agc;            // enable digital AGC
-    int     direct_sampling;        // direct sampling mode (0=off)
+    int32_t     direct_sampling;        // direct sampling mode (0=off)
     double  sample_rate;            // sample rate in Hz
     char    ifile_path[512];        // IQ file path for virtual device (empty = real SDR)
 } rx_config_t;
@@ -111,15 +111,15 @@ typedef struct {
     iq_convert_fn   converter;
     struct converter_state *converter_state;
     uint8_t        *bounce_buffer;
-    int            *gains;          // sorted gain table
-    int             gain_steps;
-    int             current_gain;   // current gain step index
-    int             tuner_type;     // RTLSDR_TUNER_* enum, -1 if unknown
+    int32_t            *gains;          // sorted gain table
+    int32_t             gain_steps;
+    int32_t             current_gain;   // current gain step index
+    int32_t             tuner_type;     // RTLSDR_TUNER_* enum, -1 if unknown
 } rx_rtlsdr_t;
 
 // Main per-receiver structure
 typedef struct sdr_receiver {
-    int             id;             // receiver index 0..MAX_SDR_RECEIVERS-1
+    int32_t             id;             // receiver index 0..MAX_SDR_RECEIVERS-1
     rx_state_t      state;
     rx_config_t     config;
     const decoder_ops_t *decoder_ops; // decoder plugin for this role
@@ -146,7 +146,7 @@ typedef struct sdr_receiver {
     char            manufacturer[256];
     char            product[256];
     char            serial_actual[256];
-    int             dev_index;      // rtlsdr device index used to open
+    int32_t             dev_index;      // rtlsdr device index used to open
 
     // Internal decoder state for the assigned role.
     void           *decoder_state;  // Opaque pointer to decoder
@@ -163,7 +163,7 @@ typedef struct sdr_receiver {
     uint32_t        usb_error_total;    // total set_freq failures
 
     // Waterfall IQ tap (written by stream callback, read by panel thread)
-    volatile int     wf_tap_active;     // nonzero = tapping enabled
+    volatile int32_t     wf_tap_active;     // nonzero = tapping enabled
     uint8_t         *wf_tap_buf;        // IQ ring buffer (allocated by panel)
     volatile uint32_t wf_tap_wr;        // write offset (updated atomically by callback)
     uint32_t         wf_tap_size;       // buffer size in bytes
@@ -172,18 +172,18 @@ typedef struct sdr_receiver {
 // Global receiver manager state
 typedef struct {
     sdr_receiver_t  receivers[MAX_SDR_RECEIVERS];
-    int             count;          // number of configured receivers
+    int32_t             count;          // number of configured receivers
     pthread_mutex_t lock;           // protects count and receiver state changes
 } sdr_manager_t;
 
 extern sdr_manager_t SdrManager;
-extern int PocsagOutputEnabled;
-extern int GsmOutputEnabled;
-extern int LteOutputEnabled;
-extern int IotOutputEnabled;
-extern int FanetOutputEnabled;
-extern int SarsatOutputEnabled;
-extern int DvbDriverWarning;  // 1 if dvb_usb_rtl28xxu kernel module detected at startup
+extern int32_t PocsagOutputEnabled;
+extern int32_t GsmOutputEnabled;
+extern int32_t LteOutputEnabled;
+extern int32_t IotOutputEnabled;
+extern int32_t FanetOutputEnabled;
+extern int32_t SarsatOutputEnabled;
+extern int32_t DvbDriverWarning;  // 1 if dvb_usb_rtl28xxu kernel module detected at startup
 
 // FANET ground tracking entry (exposed for API serialization)
 typedef struct {
@@ -241,7 +241,7 @@ typedef struct {
     uint32_t addr;
     double   latitude;
     double   longitude;
-    int      altitude;
+    int32_t      altitude;
     float    climb;
     float    wind_speed;
     float    wind_heading;
@@ -272,19 +272,19 @@ void fanetGetAcks(void (*cb)(const fanet_ack_entry_t *e, void *ctx), void *ctx);
 void sdrManagerInit(void);
 
 // Add a receiver with the given config. Returns receiver index (0..N-1) or -1 on error.
-int sdrManagerAddReceiver(const rx_config_t *config);
+int32_t sdrManagerAddReceiver(const rx_config_t *config);
 
 // Update config of an existing receiver by index (role, freq, gain, ppm, sample_rate).
-void sdrManagerUpdateConfig(int index, const rx_config_t *config);
+void sdrManagerUpdateConfig(int32_t index, const rx_config_t *config);
 
 // Remove a receiver by index. Stops and closes it first if needed. Returns true on success.
-bool sdrManagerRemoveReceiver(int index);
+bool sdrManagerRemoveReceiver(int32_t index);
 
 // Open all configured receivers. Returns number successfully opened.
-int sdrManagerOpenAll(void);
+int32_t sdrManagerOpenAll(void);
 
 // Start reader threads on all open receivers. Returns number started.
-int sdrManagerStartAll(void);
+int32_t sdrManagerStartAll(void);
 
 // Drain decoded data from all running receivers (call from main thread).
 // Returns true if at least one receiver was drained.
@@ -327,25 +327,25 @@ void rxClose(sdr_receiver_t *rx);
 
 // Reconfigure a running receiver in-place (no device close/reopen).
 bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
-                   int new_ppm, uint32_t new_freq, double new_sample_rate);
+                   int32_t new_ppm, uint32_t new_freq, double new_sample_rate);
 
 // Gain control for a specific receiver
-int rxGetGain(sdr_receiver_t *rx);
-int rxGetMaxGain(sdr_receiver_t *rx);
-double rxGetGainDb(sdr_receiver_t *rx, int step);
-int rxSetGain(sdr_receiver_t *rx, int step);
+int32_t rxGetGain(sdr_receiver_t *rx);
+int32_t rxGetMaxGain(sdr_receiver_t *rx);
+double rxGetGainDb(sdr_receiver_t *rx, int32_t step);
+int32_t rxSetGain(sdr_receiver_t *rx, int32_t step);
 
 // ======================== Utility ========================
 
 // Enumerate connected RTL-SDR devices, return count.
 // Fills serials[] array with serial numbers (caller provides array of char[64]).
-int sdrEnumerateDevices(char serials[][64], int max_devices);
+int32_t sdrEnumerateDevices(char serials[][64], int32_t max_devices);
 
 // Find receiver by serial number. Returns index or -1.
-int sdrManagerFindBySerial(const char *serial);
+int32_t sdrManagerFindBySerial(const char *serial);
 
 // Get receiver pointer by index (NULL if invalid).
-sdr_receiver_t *sdrManagerGetReceiver(int index);
+sdr_receiver_t *sdrManagerGetReceiver(int32_t index);
 
 // ======================== Persistence ========================
 
@@ -354,7 +354,7 @@ bool sdrManagerSave(void);
 
 // Load receiver config from /etc/dump1090-gg/receivers.json (skips serials already added via CLI)
 // Returns number of receivers loaded.
-int sdrManagerLoad(void);
+int32_t sdrManagerLoad(void);
 
 // Return string name for role
 const char *sdrRoleName(sdr_role_t role);

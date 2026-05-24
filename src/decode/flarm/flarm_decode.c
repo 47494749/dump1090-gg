@@ -14,6 +14,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -77,7 +78,7 @@ static uint32_t flarm_KEY2 = 0;
 static uint32_t flarm_KEY3 = 0;
 static uint32_t flarm_KEY4 = 0;
 static uint32_t key5[4] = {0};
-static int flarm_keys_loaded = 0;
+static int32_t flarm_keys_loaded = 0;
 
 // Built-in keys from SoftRF Legacy.h (GPL-3.0, public domain knowledge)
 static const uint32_t BUILTIN_KEY_TABLE[12] = {
@@ -102,7 +103,7 @@ void flarm_load_keys_builtin(void)
     fprintf(stderr, "FLARM: using built-in decryption keys (SoftRF/OGN public)\n");
 }
 
-int flarm_keys_are_loaded(void) { return flarm_keys_loaded; }
+int32_t flarm_keys_are_loaded(void) { return flarm_keys_loaded; }
 void flarm_get_key_table(uint32_t out[12]) { memcpy(out, key_table, sizeof(key_table)); }
 uint32_t flarm_get_key2(void) { return flarm_KEY2; }
 uint32_t flarm_get_key3(void) { return flarm_KEY3; }
@@ -121,8 +122,8 @@ static void make_v6_key(uint32_t out_key[4], uint32_t timestamp, uint32_t addres
     // Address XOR format (verified from ogn-decode 0.3.2 disassembly):
     // UBFIZ W4, W2, #8, #0x10 → (addr & 0xFFFF) << 8
     uint32_t addr_xor = (address & 0xFFFF) << 8;
-    for (int i = 0; i < 4; i++) {
-        int ndx = ((timestamp >> 23) & 1) ? i + 4 : i;
+    for (int32_t i = 0; i < 4; i++) {
+        int32_t ndx = ((timestamp >> 23) & 1) ? i + 4 : i;
         out_key[i] = obscure(key_table[ndx] ^ ((timestamp >> 6) ^ addr_xor), flarm_KEY2) ^ flarm_KEY3;
     }
 }
@@ -130,7 +131,7 @@ static void make_v6_key(uint32_t out_key[4], uint32_t timestamp, uint32_t addres
 static void make_v7_key(uint32_t key[4])
 {
     uint8_t *bkeys = (uint8_t *)&key[0];
-    int p, q, x, y, z, sum;
+    int32_t p, q, x, y, z, sum;
 
     x = bkeys[15];
     sum = 0;
@@ -162,7 +163,7 @@ static uint32_t count_bits(uint8_t byte)
 
 // ======================== V7 helper: descale ========================
 
-static int descale(uint32_t value, uint32_t mbits, uint32_t ebits)
+static int32_t descale(uint32_t value, uint32_t mbits, uint32_t ebits)
 {
     uint32_t offset   = (1 << mbits);
     uint32_t signbit  = (offset << ebits);
@@ -178,7 +179,7 @@ static int descale(uint32_t value, uint32_t mbits, uint32_t ebits)
         value -= offset;
     }
 
-    return negative ? -(int)value : (int)value;
+    return negative ? -(int32_t)value : (int32_t)value;
 }
 
 // ======================== Longitude division table (V7) ========================
@@ -198,7 +199,7 @@ uint16_t flarm_crc16(const uint8_t *data, uint32_t len)
     uint16_t crc = 0xFFFF;
     for (uint32_t i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
-        for (int j = 0; j < 8; j++) {
+        for (int32_t j = 0; j < 8; j++) {
             if (crc & 0x8000)
                 crc = (crc << 1) ^ 0x1021;
             else
@@ -224,7 +225,7 @@ typedef struct {
     uint32_t addr_type:3;
     uint32_t _unk1:1;
 
-    int vs:10;
+    int32_t vs:10;
     uint32_t _unk2:2;
     uint32_t airborne:1;
     uint32_t stealth:1;
@@ -268,9 +269,9 @@ typedef struct {
 
     uint32_t lat:20;
     uint32_t lon:20;
-    int          turn:9;
+    int32_t          turn:9;
     uint32_t hs:10;
-    int          vs:9;
+    int32_t          vs:9;
     uint32_t course:10;
     uint32_t airborne:2;
 
@@ -300,7 +301,7 @@ bool flarm_load_keys(const char *path)
     }
 
     char line[512];
-    int got_table = 0, got_k2 = 0, got_k3 = 0, got_k4 = 0, got_k5 = 0;
+    int32_t got_table = 0, got_k2 = 0, got_k3 = 0, got_k4 = 0, got_k5 = 0;
 
     while (fgets(line, sizeof(line), f)) {
         // Strip trailing whitespace
@@ -311,7 +312,7 @@ bool flarm_load_keys(const char *path)
 
         if (strncmp(line, "key_table=", 10) == 0) {
             char *p = line + 10;
-            for (int i = 0; i < 12 && *p; i++) {
+            for (int32_t i = 0; i < 12 && *p; i++) {
                 key_table[i] = (uint32_t)strtoul(p, &p, 16);
                 if (*p == ',') p++;
             }
@@ -327,7 +328,7 @@ bool flarm_load_keys(const char *path)
             got_k4 = 1;
         } else if (strncmp(line, "key5=", 5) == 0) {
             char *p = line + 5;
-            for (int i = 0; i < 4 && *p; i++) {
+            for (int32_t i = 0; i < 4 && *p; i++) {
                 key5[i] = (uint32_t)strtoul(p, &p, 16);
                 if (*p == ',') p++;
             }
@@ -420,7 +421,7 @@ static bool decode_v6(const uint8_t *payload, double ref_lat, double ref_lon,
     out->no_track      = pkt.no_track;
     out->latitude      = (double)lat / 1e7;
     out->longitude     = (double)lon / 1e7;
-    out->altitude      = (int)((float)alt - ref_alt_geoid);
+    out->altitude      = (int32_t)((float)alt - ref_alt_geoid);
     out->speed         = speed4 / 4.0f;          // m/s
     out->course        = direction;
     out->vs            = (float)vs10 / 10.0f;    // m/s
@@ -487,7 +488,7 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
     lat = (lat + round_lat) * 52;
 
     // Longitude
-    int ilat = (int)fabs(ref_lat);
+    int32_t ilat = (int32_t)fabs(ref_lat);
     if (ilat > 89) ilat = 89;
     int32_t lon_div = (ilat < 14) ? 52 : lon_div_table[ilat - 14];
 
@@ -521,7 +522,7 @@ static bool decode_v7(const uint8_t *payload, double ref_lat, double ref_lon,
     out->no_track      = pkt.no_track;
     out->latitude      = (double)lat / 1e7;
     out->longitude     = (double)lon / 1e7;
-    out->altitude      = (int)((float)alt - ref_alt_geoid);
+    out->altitude      = (int32_t)((float)alt - ref_alt_geoid);
     out->speed         = (float)speed10 / 10.0f;   // m/s
     out->course        = course;
     out->vs            = (float)vs10 / 10.0f;       // m/s

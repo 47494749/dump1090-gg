@@ -53,6 +53,7 @@
 
 #ifndef ANET_H
 #define ANET_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,16 +67,16 @@ extern "C" {
 #define AF_LOCAL AF_UNIX
 #endif
 
-int anetTcpConnect(char *err, char *addr, char *service);
-int anetTcpNonBlockConnect(char *err, char *addr, char *service);
-int anetRead(int fd, char *buf, int count);
-int anetTcpServer(char *err, char *service, char *bindaddr, int *fds, int nfds);
-int anetTcpAccept(char *err, int serversock);
-int anetWrite(int fd, char *buf, int count);
-int anetNonBlock(char *err, int fd);
-int anetTcpNoDelay(char *err, int fd);
-int anetTcpKeepAlive(char *err, int fd);
-int anetSetSendBuffer(char *err, int fd, int buffsize);
+int32_t anetTcpConnect(char *err, char *addr, char *service);
+int32_t anetTcpNonBlockConnect(char *err, char *addr, char *service);
+int32_t anetRead(int32_t fd, char *buf, int32_t count);
+int32_t anetTcpServer(char *err, char *service, char *bindaddr, int32_t *fds, int32_t nfds);
+int32_t anetTcpAccept(char *err, int32_t serversock);
+int32_t anetWrite(int32_t fd, char *buf, int32_t count);
+int32_t anetNonBlock(char *err, int32_t fd);
+int32_t anetTcpNoDelay(char *err, int32_t fd);
+int32_t anetTcpKeepAlive(char *err, int32_t fd);
+int32_t anetSetSendBuffer(char *err, int32_t fd, int32_t buffsize);
 
 #ifdef __cplusplus
 }

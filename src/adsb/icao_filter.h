@@ -36,7 +36,7 @@ void icaoFilterInit();
 void icaoFilterAdd(uint32_t addr);
 
 // Test if the given address matches the filter
-int icaoFilterTest(uint32_t addr);
+int32_t icaoFilterTest(uint32_t addr);
 
 // Test if the top 16 bits match any previously added address.
 // If they do, returns an arbitrary one of the matched

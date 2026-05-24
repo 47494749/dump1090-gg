@@ -12,6 +12,8 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include <cstdint>
+#include <cinttypes>
 #include "dispatcher.h"
 #include "feeder_thread.h"
 #include "fa_mlat.h"
@@ -54,10 +56,10 @@ atomic_int net_available = 1;
 
 // Encode a modesMessage as Beast binary (verbatim mode).
 // buf must be at least 46 bytes.
-static int encode_beast_binary(const struct modesMessage *mm, uint8_t *buf, int bufsize) {
+static int32_t encode_beast_binary(const struct modesMessage *mm, uint8_t *buf, int32_t bufsize) {
     uint8_t *p = buf;
     uint8_t *end = buf + bufsize;
-    int msgLen = mm->msgbits / 8;
+    int32_t msgLen = mm->msgbits / 8;
 
     if (msgLen != MODES_SHORT_MSG_BYTES && msgLen != MODES_LONG_MSG_BYTES && msgLen != MODEAC_MSG_BYTES)
         return 0;
@@ -86,25 +88,25 @@ static int encode_beast_binary(const struct modesMessage *mm, uint8_t *buf, int 
     BEAST_PUSH((mm->timestampMsg >> 8) & 0xFF);
     BEAST_PUSH(mm->timestampMsg & 0xFF);
 
-    int sig = (int)(sqrt(mm->signalLevel) * 255 + 0.5);
+    int32_t sig = (int32_t)(sqrt(mm->signalLevel) * 255 + 0.5);
     if (mm->signalLevel > 0 && sig < 1) sig = 1;
     if (sig > 255) sig = 255;
     BEAST_PUSH(sig);
 
-    for (int i = 0; i < msgLen; i++) {
+    for (int32_t i = 0; i < msgLen; i++) {
         BEAST_PUSH(mm->verbatim[i]);
     }
 
 #undef BEAST_PUSH
 
-    return (int)(p - buf);
+    return (int32_t)(p - buf);
 }
 
 // ===================== TCP connect helper =====================
 
 static int feeder_tcp_connect(const char *host, int port) {
     struct addrinfo hints = {}, *res, *rp;
-    int fd = -1;
+    int32_t fd = -1;
 
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -129,7 +131,7 @@ static int feeder_tcp_connect(const char *host, int port) {
             FD_ZERO(&wfds);
             FD_SET(fd, &wfds);
             if (select(fd + 1, NULL, &wfds, NULL, &tv) > 0) {
-                int so_error;
+                int32_t so_error;
                 socklen_t len = sizeof(so_error);
                 getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len);
                 if (so_error == 0)
@@ -144,7 +146,7 @@ static int feeder_tcp_connect(const char *host, int port) {
 
     if (fd >= 0) {
         // Keep non-blocking, enable TCP keepalive
-        int val = 1;
+        int32_t val = 1;
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val));
     }
 
@@ -157,27 +159,27 @@ static const uint8_t beast_heartbeat[] = { 0x1a, '1', 0, 0, 0, 0, 0, 0, 0, 0, 0 
 
 // Encode a modesMessage as Raw ASCII hex: *<hex>;\n
 // Returns length, or 0 if not encodable.
-static int encode_raw_ascii(const struct modesMessage *mm, uint8_t *buf, int bufsize) {
-    int msgLen = mm->msgbits / 8;
+static int32_t encode_raw_ascii(const struct modesMessage *mm, uint8_t *buf, int32_t bufsize) {
+    int32_t msgLen = mm->msgbits / 8;
     if (msgLen != MODES_SHORT_MSG_BYTES && msgLen != MODES_LONG_MSG_BYTES)
         return 0;
     if (mm->source == SOURCE_MLAT && !Modes.forward_mlat)
         return 0;
 
     // Need: '*' + 2*msgLen hex chars + ';' + '\n' + NUL
-    int needed = 1 + 2 * msgLen + 2;
+    int32_t needed = 1 + 2 * msgLen + 2;
     if (needed >= bufsize) return 0;
 
     static const char hex[] = "0123456789ABCDEF";
     uint8_t *p = buf;
     *p++ = '*';
-    for (int i = 0; i < msgLen; i++) {
+    for (int32_t i = 0; i < msgLen; i++) {
         *p++ = hex[(mm->verbatim[i] >> 4) & 0x0F];
         *p++ = hex[mm->verbatim[i] & 0x0F];
     }
     *p++ = ';';
     *p++ = '\n';
-    return (int)(p - buf);
+    return (int32_t)(p - buf);
 }
 
 // Encode a modesMessage as SBS/BaseStation CSV line
@@ -192,7 +194,7 @@ static std::string encode_sbs_line(const struct modesMessage *mm) {
         return {};
 
     // Determine SBS message type from Mode S message type
-    int msgType;
+    int32_t msgType;
     switch (mm->msgtype) {
     case 4: case 20:   msgType = 5; break;
     case 5: case 21:   msgType = 6; break;
@@ -304,7 +306,7 @@ struct reduce_entry {
 static struct reduce_entry reduce_table[REDUCE_HASH_SIZE];
 
 // Is this a state-relevant message? (position, velocity, altitude)
-static inline int is_state_message(const struct modesMessage *mm) {
+static inline int32_t is_state_message(const struct modesMessage *mm) {
     if (mm->msgtype == 17 || mm->msgtype == 18) {
         return (mm->metype >= 5 && mm->metype <= 22);
     }
@@ -316,7 +318,7 @@ static inline int is_state_message(const struct modesMessage *mm) {
 
 // Check if a message should be sent to BeastReduce feeds.
 // Returns 1 if should send, 0 if should skip.
-static int beast_reduce_check(const struct modesMessage *mm, uint64_t now) {
+static int32_t beast_reduce_check(const struct modesMessage *mm, uint64_t now) {
     if (Modes.beast_reduce_interval <= 0) return 1;
     if (mm->addr == 0) return 1;
     if (mm->addr & MODES_NON_ICAO_ADDRESS) return 1;
@@ -343,24 +345,24 @@ static int beast_reduce_check(const struct modesMessage *mm, uint64_t now) {
 }
 
 struct beast_feed_conn {
-    int fd;
+    int32_t fd;
     uint64_t next_reconnect;
     uint64_t last_heartbeat;
-    int reconnect_count;  // suppress repeated log spam
-    int max_backoff_count;
+    int32_t reconnect_count;  // suppress repeated log spam
+    int32_t max_backoff_count;
 };
 
 static const uint64_t BEAST_FEED_RECONNECT_INITIAL_MS = 60000ULL;
 static const uint64_t BEAST_FEED_RECONNECT_MAX_MS = 48ULL * 60ULL * 60ULL * 1000ULL;
-static const int BEAST_FEED_MAX_48H_RETRIES = 3;
+static const int32_t BEAST_FEED_MAX_48H_RETRIES = 3;
 
-static uint64_t beast_feed_reconnect_delay_ms(int reconnect_count) {
+static uint64_t beast_feed_reconnect_delay_ms(int32_t reconnect_count) {
     uint64_t delay = BEAST_FEED_RECONNECT_INITIAL_MS;
 
     if (reconnect_count <= 1)
         return delay;
 
-    for (int attempt = 1; attempt < reconnect_count; ++attempt) {
+    for (int32_t attempt = 1; attempt < reconnect_count; ++attempt) {
         if (delay >= BEAST_FEED_RECONNECT_MAX_MS / 2) {
             delay = BEAST_FEED_RECONNECT_MAX_MS;
             break;
@@ -373,11 +375,11 @@ static uint64_t beast_feed_reconnect_delay_ms(int reconnect_count) {
 
 static void beast_feed_format_delay(uint64_t delay_ms, char *buf, size_t buf_len) {
     if (delay_ms % (60ULL * 60ULL * 1000ULL) == 0) {
-        snprintf(buf, buf_len, "%lluh", (unsigned long long)(delay_ms / (60ULL * 60ULL * 1000ULL)));
+        snprintf(buf, buf_len, "%" PRIu64 "h", (uint64_t)(delay_ms / (60ULL * 60ULL * 1000ULL)));
     } else if (delay_ms % (60ULL * 1000ULL) == 0) {
-        snprintf(buf, buf_len, "%llum", (unsigned long long)(delay_ms / (60ULL * 1000ULL)));
+        snprintf(buf, buf_len, "%" PRIu64 "m", (uint64_t)(delay_ms / (60ULL * 1000ULL)));
     } else {
-        snprintf(buf, buf_len, "%llus", (unsigned long long)(delay_ms / 1000ULL));
+        snprintf(buf, buf_len, "%" PRIu64 "s", (uint64_t)(delay_ms / 1000ULL));
     }
 }
 
@@ -459,7 +461,7 @@ static std::string https_get(const char *host, const char *path) {
     SSL_set1_host(ssl, host);
 
     if (SSL_connect(ssl) <= 0) {
-        unsigned long err = ERR_peek_last_error();
+        uint64_t err = ERR_peek_last_error();
         fprintf(stderr, "ADSBHub https_get: SSL_connect failed for %s: %s\n",
                 host, ERR_error_string(err, NULL));
         SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return {};
@@ -472,7 +474,7 @@ static std::string https_get(const char *host, const char *path) {
     if (SSL_write(ssl, req.data(), (int)req.size()) > 0) {
         char buf[4096];
         std::string resp;
-        int r;
+        int32_t r;
         while ((r = SSL_read(ssl, buf, sizeof(buf))) > 0)
             resp.append(buf, r);
         auto pos = resp.find("\r\n\r\n");
@@ -491,7 +493,7 @@ static std::string url_encode(const std::string &src) {
     static const char hex[] = "0123456789ABCDEF";
     std::string dst;
     dst.reserve(src.size() * 3);
-    for (unsigned char c : src) {
+    for (uint8_t c : src) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
             (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
             dst += static_cast<char>(c);
@@ -517,7 +519,7 @@ static std::string url_encode(const std::string &src) {
 #define NET_CHECK_OFFLINE_MS  10000   // check every 10s when offline
 #endif
 
-static int check_internet(void) {
+static int32_t check_internet(void) {
     struct addrinfo hints = {}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -530,7 +532,7 @@ static int check_internet(void) {
 }
 
 // Returns 0 on success, -1 on failure
-static int adsbhub_update_ckey(const char *ckey) {
+static int32_t adsbhub_update_ckey(const char *ckey) {
     // Step 1: get my IPv4
     std::string myip = https_get("ip4.adsbhub.org", "/getmyip.php");
     if (myip.size() < 7) {
@@ -562,7 +564,7 @@ static int adsbhub_update_ckey(const char *ckey) {
     static const char hexchars[] = "0123456789abcdef";
     std::string sessid;
     sessid.reserve(MD5_DIGEST_LENGTH * 2 + 2);
-    for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
+    for (int32_t i = 0; i < MD5_DIGEST_LENGTH; i++) {
         sessid += hexchars[md5_raw[i] >> 4];
         sessid += hexchars[md5_raw[i] & 0x0f];
     }
@@ -601,11 +603,11 @@ static int adsbhub_update_ckey(const char *ckey) {
 static void *beast_feed_thread_entry(void *arg) {
     MODES_NOTUSED(arg);
 
-    int n = Modes.beast_feed_count;
+    int32_t n = Modes.beast_feed_count;
     struct beast_feed_conn conns[MAX_BEAST_FEEDS];
     struct modesMessage mm;
 
-    for (int i = 0; i < n; i++) {
+    for (int32_t i = 0; i < n; i++) {
         conns[i].fd = -1;
         conns[i].next_reconnect = 0;
         conns[i].last_heartbeat = 0;
@@ -618,7 +620,7 @@ static void *beast_feed_thread_entry(void *arg) {
     #define CKEY_UPDATE_INTERVAL_MS (300000ULL) // 5 minutes
     if (Modes.adsbhub_ckey) {
         fprintf(stderr, "ADSBHub: updating dynamic IP via ckey...\n");
-        int rc = adsbhub_update_ckey(Modes.adsbhub_ckey);
+        int32_t rc = adsbhub_update_ckey(Modes.adsbhub_ckey);
         if (rc == 0) {
             fprintf(stderr, "ADSBHub: ckey IP update OK\n");
             if (PanelState.enabled) panelLog("ADSBHub: dynamic IP updated OK");
@@ -634,7 +636,7 @@ static void *beast_feed_thread_entry(void *arg) {
 
         // ADSBHub: periodic ckey update (every 5 min)
         if (Modes.adsbhub_ckey && now >= ckey_next_update) {
-            int rc = adsbhub_update_ckey(Modes.adsbhub_ckey);
+            int32_t rc = adsbhub_update_ckey(Modes.adsbhub_ckey);
             if (rc == 0) {
                 fprintf(stderr, "ADSBHub: ckey IP update OK\n");
             } else {
@@ -647,8 +649,8 @@ static void *beast_feed_thread_entry(void *arg) {
         // ---- Internet watchdog ----
         static uint64_t next_net_check = 0;
         if (now >= next_net_check) {
-            int was_online = atomic_load(&net_available);
-            int is_online = check_internet();
+            int32_t was_online = atomic_load(&net_available);
+            int32_t is_online = check_internet();
             atomic_store(&net_available, is_online);
             if (was_online && !is_online) {
                 fprintf(stderr, "NET: internet offline — pausing all feeders\n");
@@ -667,7 +669,7 @@ static void *beast_feed_thread_entry(void *arg) {
         }
 
         // Manage connections
-        for (int i = 0; i < n; i++) {
+        for (int32_t i = 0; i < n; i++) {
             uint64_t retry_delay;
             char retry_delay_buf[32];
 
@@ -686,7 +688,7 @@ static void *beast_feed_thread_entry(void *arg) {
                 if (PanelState.enabled && conns[i].reconnect_count <= 1)
                     panelLog("%s: connect FAILED %s:%d", Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
             } else {
-                int reconnect_count = conns[i].reconnect_count;
+                int32_t reconnect_count = conns[i].reconnect_count;
                 fprintf(stderr, "%s: connected to %s:%d\n",
                         Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
                 if (PanelState.enabled) {
@@ -700,29 +702,29 @@ static void *beast_feed_thread_entry(void *arg) {
         }
 
         // Check if any feed is connected
-        int any_connected = 0;
-        for (int i = 0; i < n; i++) {
+        int32_t any_connected = 0;
+        for (int32_t i = 0; i < n; i++) {
             if (conns[i].fd >= 0) { any_connected = 1; break; }
         }
 
         // Drain queue, send to all connected feeds
-        int sent = 0;
+        int32_t sent = 0;
         while (msg_queue_pop(beast_feed_queue, &mm)) {
             if (!any_connected) continue; // drain but don't send
 
             // BeastReduce: per-aircraft rate limiting (computed once per message)
-            int reduce_pass = -1; // -1 = not yet computed
+            int32_t reduce_pass = -1; // -1 = not yet computed
 
             // Encode once per format type (lazy)
             uint8_t beast_buf_enc[256];
-            int beast_len = -1; // -1 = not yet encoded
+            int32_t beast_len = -1; // -1 = not yet encoded
             uint8_t raw_buf[64];
-            int raw_len = -1;
+            int32_t raw_len = -1;
             std::string sbs_str;
 
-            for (int i = 0; i < n; i++) {
+            for (int32_t i = 0; i < n; i++) {
                 if (conns[i].fd < 0) continue;
-                int len;
+                int32_t len;
                 const void *buf;
 
                 if (Modes.beast_feeds[i].format == FEED_FORMAT_RAW) {
@@ -730,7 +732,7 @@ static void *beast_feed_thread_entry(void *arg) {
                     len = raw_len; buf = raw_buf;
                 } else if (Modes.beast_feeds[i].format == FEED_FORMAT_SBS) {
                     if (sbs_str.empty()) sbs_str = encode_sbs_line(&mm);
-                    len = (int)sbs_str.size(); buf = sbs_str.data();
+                    len = (int32_t)sbs_str.size(); buf = sbs_str.data();
                 } else if (Modes.beast_feeds[i].format == FEED_FORMAT_BEAST_REDUCE) {
                     // BeastReduce: apply per-aircraft rate limiting
                     if (reduce_pass < 0) reduce_pass = beast_reduce_check(&mm, now);
@@ -764,7 +766,7 @@ static void *beast_feed_thread_entry(void *arg) {
 
         // Heartbeats and server drain
         now = mstime();
-        for (int i = 0; i < n; i++) {
+        for (int32_t i = 0; i < n; i++) {
             if (conns[i].fd < 0) continue;
 
             // Heartbeat every 30s (Beast and BeastReduce format feeds)
@@ -830,7 +832,7 @@ static void *beast_feed_thread_entry(void *arg) {
         }
     }
 
-    for (int i = 0; i < n; i++) {
+    for (int32_t i = 0; i < n; i++) {
         if (conns[i].fd >= 0) close(conns[i].fd);
     }
     return NULL;
@@ -984,7 +986,7 @@ void feederThreadsStart(void) {
         if (pthread_create(&beast_feed_thread, NULL, beast_feed_thread_entry, NULL) != 0) {
             fprintf(stderr, "feeder: failed to create beast feed thread: %s\n", strerror(errno));
         } else {
-            for (int i = 0; i < Modes.beast_feed_count; i++)
+            for (int32_t i = 0; i < Modes.beast_feed_count; i++)
                 fprintf(stderr, "feeder: beast feed enabled: %s -> %s:%d\n",
                         Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
             fprintf(stderr, "feeder: beast feed thread started (%d feeds)\n", Modes.beast_feed_count);

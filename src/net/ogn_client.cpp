@@ -14,6 +14,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <cstdint>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
@@ -40,8 +41,8 @@
 #define OGN_ACFT_MAX_AGE      3600    // seconds
 
 static struct {
-    int           fd;
-    int           connected;
+    int32_t           fd;
+    int32_t           connected;
     uint64_t      next_reconnect;
     uint64_t      last_keepalive;
     uint64_t      last_beacon;
@@ -118,7 +119,7 @@ static int ogn_connect(void)
         return -1;
     }
 
-    int fd = -1;
+    int32_t fd = -1;
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
@@ -135,7 +136,7 @@ static int ogn_connect(void)
             FD_SET(fd, &wfds);
 
             if (select(fd + 1, NULL, &wfds, NULL, &tv) > 0) {
-                int so_error;
+                int32_t so_error;
                 socklen_t len = sizeof(so_error);
                 getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len);
                 if (so_error == 0) {
@@ -167,13 +168,13 @@ static int ogn_connect(void)
 
 // ======================== APRS Passcode ========================
 
-static int aprs_passcode(const char *callsign)
+static int32_t aprs_passcode(const char *callsign)
 {
-    int hash = 0x73e2;
+    int32_t hash = 0x73e2;
     std::string call;
 
     // Copy callsign without SSID (strip everything after '-'), uppercase
-    for (int i = 0; callsign[i] && callsign[i] != '-' && i < 15; i++)
+    for (int32_t i = 0; callsign[i] && callsign[i] != '-' && i < 15; i++)
         call += (char)toupper((uint8_t)callsign[i]);
 
     for (size_t i = 0; i < call.size(); i += 2) {
@@ -186,9 +187,9 @@ static int aprs_passcode(const char *callsign)
 
 // ======================== Login ========================
 
-static bool ogn_login(int fd)
+static bool ogn_login(int32_t fd)
 {
-    int passcode = aprs_passcode(FlarmConfig.ogn_station);
+    int32_t passcode = aprs_passcode(FlarmConfig.ogn_station);
     char tmp[256];
     snprintf(tmp, sizeof(tmp),
              "user %s pass %d vers dump1090-gg " MODES_DUMP1090_VERSION
@@ -252,30 +253,30 @@ static std::string format_aprs_position(const flarm_message_t *msg)
 
     // Latitude to DDMM.mm format
     double lat_abs = fabs(msg->latitude);
-    int lat_deg = (int)lat_abs;
+    int32_t lat_deg = (int32_t)lat_abs;
     double lat_min = (lat_abs - lat_deg) * 60.0;
     char lat_ns = (msg->latitude >= 0) ? 'N' : 'S';
 
     // Longitude to DDDMM.mm format
     double lon_abs = fabs(msg->longitude);
-    int lon_deg = (int)lon_abs;
+    int32_t lon_deg = (int32_t)lon_abs;
     double lon_min = (lon_abs - lon_deg) * 60.0;
     char lon_ew = (msg->longitude >= 0) ? 'E' : 'W';
 
     // Altitude in feet
-    int alt_feet = (int)(msg->altitude * 3.28084);
+    int32_t alt_feet = (int32_t)(msg->altitude * 3.28084);
     if (alt_feet < 0) alt_feet = 0;
 
     // Ground speed in knots
-    int speed_kts = (int)(msg->speed * 1.94384);
+    int32_t speed_kts = (int32_t)(msg->speed * 1.94384);
 
     // Course
-    int course = (int)msg->course;
+    int32_t course = (int32_t)msg->course;
     if (course < 0) course += 360;
     if (course > 360) course = 0;
 
     // Climb rate in fpm
-    int climb_fpm = (int)(msg->vs * 196.85);
+    int32_t climb_fpm = (int32_t)(msg->vs * 196.85);
 
     const char *prefix = flarm_addr_prefix(msg->addr_type);
     const char *symbol = flarm_acft_symbol(msg->aircraft_type);
@@ -303,7 +304,7 @@ static float read_cpu_temperature(void)
 {
     FILE *f = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
     if (!f) return 0;
-    int millideg = 0;
+    int32_t millideg = 0;
     if (fscanf(f, "%d", &millideg) != 1) millideg = 0;
     fclose(f);
     return millideg / 1000.0f;
@@ -325,7 +326,7 @@ static void read_ram_info(float *used_mb, float *total_mb)
     *total_mb = 0;
     struct sysinfo si;
     if (sysinfo(&si) == 0) {
-        unsigned long unit = si.mem_unit;
+        uint64_t unit = si.mem_unit;
         *total_mb = (float)(si.totalram * unit) / (1024.0f * 1024.0f);
         float free_mb = (float)((si.freeram + si.bufferram) * unit) / (1024.0f * 1024.0f);
         *used_mb = *total_mb - free_mb;
@@ -364,10 +365,10 @@ static void read_ntp_info(float *offset_ms, float *ppm)
     pclose(f);
 }
 
-static int count_unique_aircraft(void)
+static int32_t count_unique_aircraft(void)
 {
     time_t now = time(NULL);
-    int count = 0;
+    int32_t count = 0;
     for (uint32_t i = 0; i < OGN_ACFT_HASH_SIZE; i++) {
         if (OgnClient.acft[i].addr != 0 &&
             (now - OgnClient.acft[i].last_seen) < OGN_ACFT_MAX_AGE) {
@@ -389,18 +390,18 @@ static void ogn_send_station_beacon(void)
 
     // Latitude to DDMM.mm format
     double lat_abs = fabs(Modes.fUserLat);
-    int lat_deg = (int)lat_abs;
+    int32_t lat_deg = (int32_t)lat_abs;
     double lat_min = (lat_abs - lat_deg) * 60.0;
     char lat_ns = (Modes.fUserLat >= 0) ? 'N' : 'S';
 
     // Longitude to DDDMM.mm format
     double lon_abs = fabs(Modes.fUserLon);
-    int lon_deg = (int)lon_abs;
+    int32_t lon_deg = (int32_t)lon_abs;
     double lon_min = (lon_abs - lon_deg) * 60.0;
     char lon_ew = (Modes.fUserLon >= 0) ? 'E' : 'W';
 
     // Altitude in feet from MLAT config (--alt), fallback to 497m
-    int alt_feet = (MlatConfig.alt > 0) ? (int)(MlatConfig.alt * 3.28084) : 1631;
+    int32_t alt_feet = (MlatConfig.alt > 0) ? (int32_t)(MlatConfig.alt * 3.28084) : 1631;
 
     // Position beacon: symbol table 'I' (overlay IGate) + symbol '&' = OGN receiver
     char bcn_tmp[512];
@@ -433,8 +434,8 @@ static void ogn_send_station_beacon(void)
     read_ram_info(&ram_used, &ram_total);
     float ntp_offset, ntp_ppm;
     read_ntp_info(&ntp_offset, &ntp_ppm);
-    int acft_unique = count_unique_aircraft();
-    int acft_total = acft_unique; // unique in last hour
+    int32_t acft_unique = count_unique_aircraft();
+    int32_t acft_total = acft_unique; // unique in last hour
 
     // Signal stats from FLARM (dB)
     float signal_peak_db = -999;

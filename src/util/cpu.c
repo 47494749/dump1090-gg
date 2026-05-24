@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include <stdint.h>
 
 #include <stdbool.h>
 
@@ -28,7 +29,7 @@ static X86Info *x86_info()
 
 #endif
 
-int cpu_supports_avx(void)
+int32_t cpu_supports_avx(void)
 {
 #ifdef CPU_FEATURES_ARCH_X86
     return x86_info()->features.avx;
@@ -37,7 +38,7 @@ int cpu_supports_avx(void)
 #endif
 }
 
-int cpu_supports_avx2(void)
+int32_t cpu_supports_avx2(void)
 {
 #ifdef CPU_FEATURES_ARCH_X86
     return x86_info()->features.avx2;
@@ -68,7 +69,7 @@ static ArmInfo *arm_info()
 
 #endif
 
-int cpu_supports_armv7_neon_vfpv4(void)
+int32_t cpu_supports_armv7_neon_vfpv4(void)
 {
 #ifdef CPU_FEATURES_ARCH_ARM
     return arm_info()->architecture >= 7 && arm_info()->features.neon && arm_info()->features.vfpv4 && arm_info()->features.vfpd32;
@@ -99,7 +100,7 @@ static Aarch64Info *aarch64_info()
 
 #endif
 
-int cpu_supports_armv8_simd(void)
+int32_t cpu_supports_armv8_simd(void)
 {
 #ifdef CPU_FEATURES_ARCH_AARCH64
     return aarch64_info()->features.asimd;

@@ -54,7 +54,7 @@ struct MsgQueueImpl {
 
 extern "C" {
 
-msg_queue_t msg_queue_create(unsigned int item_size, unsigned int capacity) {
+msg_queue_t msg_queue_create(uint32_t item_size, uint32_t capacity) {
     auto *q = new (std::nothrow) MsgQueueImpl(item_size, capacity);
     if (q && !q->ring) { delete q; return nullptr; }
     return q;
@@ -64,11 +64,11 @@ void msg_queue_destroy(msg_queue_t q) {
     delete static_cast<MsgQueueImpl*>(q);
 }
 
-int msg_queue_push(msg_queue_t q, const void *item) {
+int32_t msg_queue_push(msg_queue_t q, const void *item) {
     return static_cast<MsgQueueImpl*>(q)->push(item) ? 1 : 0;
 }
 
-int msg_queue_pop(msg_queue_t q, void *item) {
+int32_t msg_queue_pop(msg_queue_t q, void *item) {
     return static_cast<MsgQueueImpl*>(q)->pop(item) ? 1 : 0;
 }
 

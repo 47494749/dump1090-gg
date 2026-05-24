@@ -121,7 +121,7 @@ iot_decoder_state_t *iotDecoderCreate(uint32_t sample_rate);
 void iotDecoderProcess(iot_decoder_state_t *state, const uint8_t *iq, uint32_t len);
 
 // Dequeue the next decoded message. Returns 1 if a message was retrieved, 0 if empty.
-int iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg);
+int32_t iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg);
 
 // Destroy decoder state.
 void iotDecoderDestroy(iot_decoder_state_t *state);

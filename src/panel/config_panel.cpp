@@ -15,6 +15,7 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include <cstdint>
 #include "config_panel.h"
 #include "sdr_rtlsdr.h"
 #include "sdr.h"
@@ -57,7 +58,7 @@ static std::string sfmt(const char *fmt, ...) {
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int32_t n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n < 0) return {};
     if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
@@ -75,8 +76,8 @@ static bool RadiosondyEnabled = false;
 static bool WettersondeEnabled = false;
 
 // Forward declarations for helpers defined later
-static void http_send(int fd, int code, const char *content_type, const char *body, int body_len);
-static void http_send_json(int fd, const char *json, int len);
+static void http_send(int32_t fd, int32_t code, const char *content_type, const char *body, int32_t body_len);
+static void http_send_json(int32_t fd, const char *json, int32_t len);
 
 // ============================= Stats History =============================
 
@@ -140,25 +141,25 @@ struct stats_file_header {
 
 static struct {
     bool enabled;
-    int retention_hours;       // configured retention
-    int interval_s;            // user-configured sampling interval
-    int max_entries;           // ring buffer capacity
+    int32_t retention_hours;       // configured retention
+    int32_t interval_s;            // user-configured sampling interval
+    int32_t max_entries;           // ring buffer capacity
     struct stats_snapshot *ring;
-    int head;                  // next write position
-    int count;                 // valid entries
+    int32_t head;                  // next write position
+    int32_t count;                 // valid entries
     uint64_t last_sample_ms;   // last snapshot time
-    int unsaved_count;         // snapshots since last save
+    int32_t unsaved_count;         // snapshots since last save
     pthread_mutex_t mutex;
 } StatsHistory = { false, 24, 60, 1440, NULL, 0, 0, 0, 0, PTHREAD_MUTEX_INITIALIZER };
 
 static void statsHistoryReconfigure(void)
 {
-    int h = StatsHistory.retention_hours;
-    int interval = StatsHistory.interval_s;
+    int32_t h = StatsHistory.retention_hours;
+    int32_t interval = StatsHistory.interval_s;
     if (interval < 10) interval = 10;
     if (interval > 3600) interval = 3600;
 
-    int entries = (h * 3600) / interval;
+    int32_t entries = (h * 3600) / interval;
     if (entries > STATS_HISTORY_MAX_ENTRIES) entries = STATS_HISTORY_MAX_ENTRIES;
     if (entries < 60) entries = 60;
 
@@ -186,9 +187,9 @@ static void statsHistorySaveLocked(void)
     if (!f) return;
 
     // Write snapshots in chronological order
-    int max_e = StatsHistory.max_entries;
-    int count = StatsHistory.count;
-    int start = (count < max_e) ? 0 : StatsHistory.head;
+    int32_t max_e = StatsHistory.max_entries;
+    int32_t count = StatsHistory.count;
+    int32_t start = (count < max_e) ? 0 : StatsHistory.head;
 
     struct stats_file_header hdr;
     memset(&hdr, 0, sizeof(hdr));
@@ -200,8 +201,8 @@ static void statsHistorySaveLocked(void)
 
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); unlink(tmppath); return; }
 
-    for (int i = 0; i < count; i++) {
-        int idx = (start + i) % max_e;
+    for (int32_t i = 0; i < count; i++) {
+        int32_t idx = (start + i) % max_e;
         if (fwrite(&StatsHistory.ring[idx], sizeof(struct stats_snapshot), 1, f) != 1) {
             fclose(f); unlink(tmppath); return;
         }
@@ -237,7 +238,7 @@ static void statsHistoryLoad(void)
     }
 
     // Read all snapshots from file
-    int file_count = hdr.count;
+    int32_t file_count = hdr.count;
     if (file_count > STATS_HISTORY_MAX_ENTRIES) file_count = STATS_HISTORY_MAX_ENTRIES;
 
     struct stats_snapshot *tmp = (struct stats_snapshot *)malloc((size_t)file_count * sizeof(struct stats_snapshot));
@@ -259,7 +260,7 @@ static void statsHistoryLoad(void)
     StatsHistory.count = 0;
     StatsHistory.last_sample_ms = 0;
 
-    for (int i = 0; i < actually_read; i++) {
+    for (int32_t i = 0; i < actually_read; i++) {
         if (tmp[i].ts < cutoff_ms) continue;  // too old
         if (tmp[i].ts > now_ms + 60000ULL) continue;  // future timestamp (clock drift guard)
 
@@ -307,13 +308,13 @@ static void statsHistoryTakeSnapshot(void)
                 char *cp = strrchr(sbuf, ')');
                 if (cp) {
                     cp += 2;
-                    for (int f = 0; f < 11 && *cp; f++) {
+                    for (int32_t f = 0; f < 11 && *cp; f++) {
                         while (*cp && *cp != ' ') cp++;
                         while (*cp == ' ') cp++;
                     }
-                    unsigned long u = 0, s = 0;
+                    uint64_t u = 0, s = 0;
                     sscanf(cp, "%lu %lu", &u, &s);
-                    long ticks = sysconf(_SC_CLK_TCK);
+                    int64_t ticks = sysconf(_SC_CLK_TCK);
                     snap.cpu_u = (float)u / (float)ticks;
                     snap.cpu_s = (float)s / (float)ticks;
                 }
@@ -403,15 +404,15 @@ static void statsHistoryTakeSnapshot(void)
     pthread_mutex_unlock(&StatsHistory.mutex);
 }
 
-static void api_get_stats_history(int fd)
+static void api_get_stats_history(int32_t fd)
 {
     // Take a snapshot now if due
     statsHistoryTakeSnapshot();
 
     pthread_mutex_lock(&StatsHistory.mutex);
 
-    int count = StatsHistory.count;
-    int max_e = StatsHistory.max_entries;
+    int32_t count = StatsHistory.count;
+    int32_t max_e = StatsHistory.max_entries;
 
     // Pre-calculate buffer size for serialized snapshots.
     size_t buf_cap = (size_t)count * 320 + 1024;
@@ -422,7 +423,7 @@ static void api_get_stats_history(int fd)
         return;
     }
 
-    int pos = 0;
+    int32_t pos = 0;
     pos += snprintf(buf + pos, buf_cap - (size_t)pos,
         "{\"config\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_s\":%d,\"entries\":%d},\"snapshots\":[",
         StatsHistory.enabled ? "true" : "false",
@@ -431,9 +432,9 @@ static void api_get_stats_history(int fd)
         count);
 
     // Read ring buffer in chronological order
-    int start = (count < max_e) ? 0 : StatsHistory.head;
-    for (int i = 0; i < count && (size_t)pos < buf_cap - 256; i++) {
-        int idx = (start + i) % max_e;
+    int32_t start = (count < max_e) ? 0 : StatsHistory.head;
+    for (int32_t i = 0; i < count && (size_t)pos < buf_cap - 256; i++) {
+        int32_t idx = (start + i) % max_e;
         struct stats_snapshot *s = &StatsHistory.ring[idx];
         if (i > 0) buf[pos++] = ',';
         pos += snprintf(buf + pos, buf_cap - (size_t)pos,
@@ -455,7 +456,7 @@ static void api_get_stats_history(int fd)
             s->cpu_u, s->cpu_s,
             s->rss, s->mem_avail,
             s->adsb_msg, s->adsb_trk,
-            s->adsb_noise, s->adsb_signal, (int)s->adsb_gain,
+            s->adsb_noise, s->adsb_signal, (int32_t)s->adsb_gain,
             s->flarm_det, s->flarm_dec,
             s->acars_dec, s->vdl2_dec,
             s->sonde_dec, s->pocsag_dec,
@@ -477,12 +478,12 @@ static void api_get_stats_history(int fd)
 
 // ============================= API: GET /api/warnings =====================
 
-static void api_get_warnings(int fd)
+static void api_get_warnings(int32_t fd)
 {
     std::string buf;
     buf.reserve(512);
     buf += "{\"warnings\":[";
-    int count = 0;
+    int32_t count = 0;
 
     if (DvbDriverWarning) {
         if (count > 0) buf += ",";
@@ -496,7 +497,7 @@ static void api_get_warnings(int fd)
     }
 
     buf += "]}";
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= SDR Diagnostics ============================
@@ -506,8 +507,8 @@ static void api_get_warnings(int fd)
 #define DIAG_MAX_SR_STEPS   12
 
 typedef struct {
-    int     freq_hz;
-    int     sample_rate;
+    int32_t     freq_hz;
+    int32_t     sample_rate;
     bool    pll_locked;
     float   noise_floor_db;     // average magnitude in dB
     float   dc_offset;          // DC bias (deviation from 127.5)
@@ -518,11 +519,11 @@ typedef struct {
     char    serial[64];
     char    tuner[32];
     char    freq_range[64];
-    int     tuner_type;
-    int     max_gain_steps;
+    int32_t     tuner_type;
+    int32_t     max_gain_steps;
     float   max_gain_db;
-    int     gain_list[64];      // supported gain values in 0.1 dB
-    int     num_measurements;
+    int32_t     gain_list[64];      // supported gain values in 0.1 dB
+    int32_t     num_measurements;
     diag_measurement_t measurements[DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS];
     bool    complete;
     char    error[128];
@@ -531,7 +532,7 @@ typedef struct {
 typedef struct {
     bool    running;
     bool    complete;
-    int     device_count;
+    int32_t     device_count;
     char    librtlsdr_version[64];
     diag_device_result_t devices[DIAG_MAX_DEVICES];
     pthread_mutex_t mutex;
@@ -543,11 +544,11 @@ static diag_state_t DiagState = {0};
 // Forward declarations
 static const char *tuner_name_sdr(sdr_tuner_type_t type);
 static const char *tuner_freq_range_sdr(sdr_tuner_type_t type);
-static void http_send(int fd, int code, const char *content_type, const char *body, int body_len);
-static void http_send_json(int fd, const char *json, int len);
+static void http_send(int32_t fd, int32_t code, const char *content_type, const char *body, int32_t body_len);
+static void http_send_json(int32_t fd, const char *json, int32_t len);
 
 // Run a single diagnostic measurement on an opened SDR device (via backend layer)
-static void diag_measure(sdr_device_t *dev, int freq, int sample_rate,
+static void diag_measure(sdr_device_t *dev, int32_t freq, int32_t sample_rate,
                          diag_measurement_t *out)
 {
     out->freq_hz = freq;
@@ -573,7 +574,7 @@ static void diag_measure(sdr_device_t *dev, int freq, int sample_rate,
 
     // Read a small buffer of IQ samples
     uint8_t buf[16384];
-    int n_read = 0;
+    int32_t n_read = 0;
     sdr_reset_buffer(dev);
     if (sdr_read_sync(dev, buf, sizeof(buf), &n_read) < 0 || n_read < 1024) {
         out->pll_locked = false;
@@ -584,9 +585,9 @@ static void diag_measure(sdr_device_t *dev, int freq, int sample_rate,
     double sum_i = 0, sum_q = 0;
     double sum_i2 = 0, sum_q2 = 0;
     double sum_mag = 0;
-    int samples = n_read / 2;
+    int32_t samples = n_read / 2;
 
-    for (int i = 0; i < n_read; i += 2) {
+    for (int32_t i = 0; i < n_read; i += 2) {
         double vi = (double)buf[i] - 127.5;
         double vq = (double)buf[i+1] - 127.5;
         sum_i += buf[i];
@@ -621,19 +622,19 @@ static void *diag_thread_entry(void *arg)
     (void)arg;
 
     // Test frequencies (Hz)
-    static const int test_freqs[] = {
+    static const int32_t test_freqs[] = {
         24000000, 50000000, 100000000, 200000000, 300000000,
         400000000, 404500000, 500000000, 600000000, 700000000,
         800000000, 868800000, 935000000, 1000000000, 1090000000,
         1200000000, 1400000000, 1600000000, 1766000000
     };
-    static const int num_freqs = 19;
+    static const int32_t num_freqs = 19;
 
     // Test sample rates (Hz)
-    static const int test_srs[] = {
+    static const int32_t test_srs[] = {
         250000, 1024000, 1600000, 2000000, 2400000, 3200000
     };
-    static const int num_srs = 6;
+    static const int32_t num_srs = 6;
 
     // Get librtlsdr version info
     pthread_mutex_lock(&DiagState.mutex);
@@ -642,7 +643,7 @@ static void *diag_thread_entry(void *arg)
     pthread_mutex_unlock(&DiagState.mutex);
 
     sdr_dev_info_t devinfo[DIAG_MAX_DEVICES];
-    int dev_count = sdrBackendEnumerateAll(devinfo, DIAG_MAX_DEVICES);
+    int32_t dev_count = sdrBackendEnumerateAll(devinfo, DIAG_MAX_DEVICES);
     if (dev_count <= 0) {
         pthread_mutex_lock(&DiagState.mutex);
         DiagState.running = false;
@@ -657,7 +658,7 @@ static void *diag_thread_entry(void *arg)
     DiagState.device_count = dev_count;
     pthread_mutex_unlock(&DiagState.mutex);
 
-    for (int d = 0; d < dev_count; d++) {
+    for (int32_t d = 0; d < dev_count; d++) {
         diag_device_result_t *dr = &DiagState.devices[d];
 
         pthread_mutex_lock(&DiagState.mutex);
@@ -668,7 +669,7 @@ static void *diag_thread_entry(void *arg)
         pthread_mutex_unlock(&DiagState.mutex);
 
         // Check if this device is currently in use by SdrManager
-        int rx_idx = sdrManagerFindBySerial(devinfo[d].serial);
+        int32_t rx_idx = sdrManagerFindBySerial(devinfo[d].serial);
         sdr_receiver_t *managed_rx = NULL;
         rx_state_t prev_state = RX_STATE_IDLE;
         rx_config_t saved_config = {0};
@@ -687,10 +688,10 @@ static void *diag_thread_entry(void *arg)
         // Open device via backend layer
         const sdr_backend_ops_t *ops;
         sdr_device_t *dev;
-        int ttype;
-        int gains[64];
-        int n_gains;
-        int meas_idx;
+        int32_t ttype;
+        int32_t gains[64];
+        int32_t n_gains;
+        int32_t meas_idx;
 
         ops = sdrBackendResolve(devinfo[d].backend);
         dev = ops ? ops->open_by_serial(devinfo[d].serial) : NULL;
@@ -716,8 +717,8 @@ static void *diag_thread_entry(void *arg)
         if (n_gains > 0) {
             dr->max_gain_steps = n_gains;
             dr->max_gain_db = gains[n_gains - 1] / 10.0f;
-            int copy = n_gains > 64 ? 64 : n_gains;
-            memcpy(dr->gain_list, gains, copy * sizeof(int));
+            int32_t copy = n_gains > 64 ? 64 : n_gains;
+            memcpy(dr->gain_list, gains, copy * sizeof(int32_t));
         }
 
         // Set max gain for testing
@@ -728,7 +729,7 @@ static void *diag_thread_entry(void *arg)
 
         // Run frequency sweep at default sample rate (2.4 MSPS)
         meas_idx = 0;
-        for (int f = 0; f < num_freqs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; f++) {
+        for (int32_t f = 0; f < num_freqs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; f++) {
             diag_measurement_t m = {0};
             diag_measure(dev, test_freqs[f], 2400000, &m);
 
@@ -739,7 +740,7 @@ static void *diag_thread_entry(void *arg)
         }
 
         // Run sample rate sweep at 404.5 MHz
-        for (int s = 0; s < num_srs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; s++) {
+        for (int32_t s = 0; s < num_srs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; s++) {
             diag_measurement_t m = {0};
             diag_measure(dev, 404500000, test_srs[s], &m);
 
@@ -750,7 +751,7 @@ static void *diag_thread_entry(void *arg)
         }
 
         // Run sample rate sweep at 1090 MHz
-        for (int s = 0; s < num_srs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; s++) {
+        for (int32_t s = 0; s < num_srs && meas_idx < DIAG_MAX_FREQ_STEPS * DIAG_MAX_SR_STEPS; s++) {
             diag_measurement_t m = {0};
             diag_measure(dev, 1090000000, test_srs[s], &m);
 
@@ -789,7 +790,7 @@ restore:
     return NULL;
 }
 
-static void api_get_diagnostics(int fd)
+static void api_get_diagnostics(int32_t fd)
 {
     std::string buf;
     buf.reserve(4096);
@@ -804,7 +805,7 @@ static void api_get_diagnostics(int fd)
         DiagState.device_count,
         DiagState.librtlsdr_version);
 
-    for (int d = 0; d < DiagState.device_count && d < DIAG_MAX_DEVICES; d++) {
+    for (int32_t d = 0; d < DiagState.device_count && d < DIAG_MAX_DEVICES; d++) {
         diag_device_result_t *dr = &DiagState.devices[d];
         if (d > 0) buf += ',';
         buf += sfmt(
@@ -814,7 +815,7 @@ static void api_get_diagnostics(int fd)
             dr->serial, dr->tuner, dr->freq_range,
             dr->tuner_type, dr->max_gain_db, dr->max_gain_steps);
 
-        for (int g = 0; g < dr->max_gain_steps && g < 64; g++) {
+        for (int32_t g = 0; g < dr->max_gain_steps && g < 64; g++) {
             if (g > 0) buf += ',';
             buf += sfmt("%.1f", dr->gain_list[g] / 10.0f);
         }
@@ -823,7 +824,7 @@ static void api_get_diagnostics(int fd)
             "],\"complete\":%s,\"error\":\"%s\",\"measurements\":[",
             dr->complete ? "true" : "false", dr->error);
 
-        for (int m = 0; m < dr->num_measurements; m++) {
+        for (int32_t m = 0; m < dr->num_measurements; m++) {
             diag_measurement_t *meas = &dr->measurements[m];
             if (m > 0) buf += ',';
             buf += sfmt(
@@ -841,10 +842,10 @@ static void api_get_diagnostics(int fd)
 
     pthread_mutex_unlock(&DiagState.mutex);
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
-static void api_post_diagnostics_start(int fd)
+static void api_post_diagnostics_start(int32_t fd)
 {
     pthread_mutex_lock(&DiagState.mutex);
     if (DiagState.running) {
@@ -886,7 +887,7 @@ void panelInitConfig(void)
 
 bool panelHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j + 1 < argc);
     std::string_view arg(argv[j]);
 
@@ -920,8 +921,8 @@ void panelLog(const char *fmt, ...)
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
     gmtime_r(&ts.tv_sec, &tm);
-    int off = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d ",
-                       tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts.tv_nsec / 1000000));
+    int32_t off = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d ",
+                       tm.tm_hour, tm.tm_min, tm.tm_sec, (int32_t)(ts.tv_nsec / 1000000));
 
     va_start(ap, fmt);
     vsnprintf(line + off, sizeof(line) - (size_t)off, fmt, ap);
@@ -929,7 +930,7 @@ void panelLog(const char *fmt, ...)
 
     // Store in ring buffer (no stderr — caller handles that)
     pthread_mutex_lock(&PanelState.log_mutex);
-    int idx = (PanelState.log_head + PanelState.log_count) % PANEL_LOG_LINES;
+    int32_t idx = (PanelState.log_head + PanelState.log_count) % PANEL_LOG_LINES;
     if (PanelState.log_count >= PANEL_LOG_LINES) {
         PanelState.log_head = (PanelState.log_head + 1) % PANEL_LOG_LINES;
     } else {
@@ -949,16 +950,16 @@ void panelLogMessage(const char *fmt, ...)
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
     gmtime_r(&ts.tv_sec, &tm);
-    int off = snprintf(line, sizeof(line), "%02d/%02d %02d:%02d:%02d.%03d ",
+    int32_t off = snprintf(line, sizeof(line), "%02d/%02d %02d:%02d:%02d.%03d ",
                        tm.tm_mday, tm.tm_mon + 1,
-                       tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts.tv_nsec / 1000000));
+                       tm.tm_hour, tm.tm_min, tm.tm_sec, (int32_t)(ts.tv_nsec / 1000000));
 
     va_start(ap, fmt);
     vsnprintf(line + off, sizeof(line) - (size_t)off, fmt, ap);
     va_end(ap);
 
     pthread_mutex_lock(&PanelState.msg_mutex);
-    int idx = (PanelState.msg_head + PanelState.msg_count) % PANEL_MSG_LINES;
+    int32_t idx = (PanelState.msg_head + PanelState.msg_count) % PANEL_MSG_LINES;
     if (PanelState.msg_count >= PANEL_MSG_LINES) {
         PanelState.msg_head = (PanelState.msg_head + 1) % PANEL_MSG_LINES;
     } else {
@@ -978,16 +979,16 @@ static void init_b64_table(void) {
     if (b64_table_init) return;
     memset(b64_table, 0, sizeof(b64_table));
     const char *chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    for (int i = 0; chars[i]; i++)
+    for (int32_t i = 0; chars[i]; i++)
         b64_table[(uint8_t)chars[i]] = (uint8_t)i;
     b64_table_init = true;
 }
 
-static int base64_decode(const char *in, char *out, int outlen)
+static int32_t base64_decode(const char *in, char *out, int32_t outlen)
 {
     init_b64_table();
-    int i = 0, o = 0;
-    int len = (int)strlen(in);
+    int32_t i = 0, o = 0;
+    int32_t len = (int32_t)strlen(in);
     while (i < len && o < outlen - 1) {
         if (i + 3 >= len) break;
         uint32_t a = b64_table[(uint8_t)in[i++]];
@@ -1005,9 +1006,9 @@ static int base64_decode(const char *in, char *out, int outlen)
 
 // ============================= WebSocket =================================
 
-static void ws_remove_client(int fd) {
+static void ws_remove_client(int32_t fd) {
     pthread_mutex_lock(&PanelState.ws_mutex);
-    for (int i = 0; i < PanelState.ws_count; i++) {
+    for (int32_t i = 0; i < PanelState.ws_count; i++) {
         if (PanelState.ws_fds[i] == fd) {
             close(fd);
             PanelState.ws_fds[i] = PanelState.ws_fds[--PanelState.ws_count];
@@ -1040,10 +1041,10 @@ static void ws_handle_read(int fd) {
 #include <math.h>
 
 // Base64 encode (for WebSocket handshake)
-static int base64_encode(const uint8_t *in, int inlen, char *out, int outlen) {
+static int32_t base64_encode(const uint8_t *in, int32_t inlen, char *out, int32_t outlen) {
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int o = 0;
-    for (int i = 0; i < inlen && o < outlen - 4; i += 3) {
+    int32_t o = 0;
+    for (int32_t i = 0; i < inlen && o < outlen - 4; i += 3) {
         uint32_t v = (uint32_t)in[i] << 16;
         if (i + 1 < inlen) v |= (uint32_t)in[i+1] << 8;
         if (i + 2 < inlen) v |= (uint32_t)in[i+2];
@@ -1057,13 +1058,13 @@ static int base64_encode(const uint8_t *in, int inlen, char *out, int outlen) {
 }
 
 // WebSocket handshake
-static bool ws_handshake(int fd, const char *request) {
+static bool ws_handshake(int32_t fd, const char *request) {
     const char *key_hdr = strstr(request, "Sec-WebSocket-Key:");
     if (!key_hdr) return false;
     key_hdr += 18;
     while (*key_hdr == ' ') key_hdr++;
     char key[64] = {0};
-    int ki = 0;
+    int32_t ki = 0;
     while (key_hdr[ki] && key_hdr[ki] != '\r' && key_hdr[ki] != '\n' && ki < 63)
         { key[ki] = key_hdr[ki]; ki++; }
     key[ki] = '\0';
@@ -1079,7 +1080,7 @@ static bool ws_handshake(int fd, const char *request) {
     base64_encode(sha, 20, accept_b64, sizeof(accept_b64));
 
     char resp[512];
-    int rlen = snprintf(resp, sizeof(resp),
+    int32_t rlen = snprintf(resp, sizeof(resp),
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
@@ -1090,9 +1091,9 @@ static bool ws_handshake(int fd, const char *request) {
 }
 
 // Send a WebSocket binary frame
-static bool ws_send_binary(int fd, const uint8_t *data, int len) {
+static bool ws_send_binary(int32_t fd, const uint8_t *data, int32_t len) {
     uint8_t hdr[10];
-    int hlen = 0;
+    int32_t hlen = 0;
     hdr[0] = 0x82; // FIN + binary opcode
     if (len < 126) {
         hdr[1] = (uint8_t)len;
@@ -1111,9 +1112,9 @@ static bool ws_send_binary(int fd, const uint8_t *data, int len) {
 }
 
 // Send a WebSocket text frame
-static bool ws_send_text(int fd, const char *text, int len) {
+static bool ws_send_text(int32_t fd, const char *text, int32_t len) {
     uint8_t hdr[10];
-    int hlen = 0;
+    int32_t hlen = 0;
     hdr[0] = 0x81; // FIN + text opcode
     if (len < 126) {
         hdr[1] = (uint8_t)len;
@@ -1133,14 +1134,14 @@ static bool ws_send_text(int fd, const char *text, int len) {
 
 // Read and decode a WebSocket frame (client-to-server, masked)
 // Returns payload length or -1 on error/close. Writes opcode to *op.
-static int ws_read_frame(int fd, uint8_t *out, int max_out, uint8_t *op) {
+static int32_t ws_read_frame(int32_t fd, uint8_t *out, int32_t max_out, uint8_t *op) {
     uint8_t hdr[2];
     ssize_t n = recv(fd, hdr, 2, MSG_DONTWAIT);
     if (n <= 0) return -1;
     if (n < 2) return -1;
     *op = hdr[0] & 0x0F;
     bool masked = (hdr[1] & 0x80) != 0;
-    int plen = hdr[1] & 0x7F;
+    int32_t plen = hdr[1] & 0x7F;
     if (plen == 126) {
         uint8_t ext[2];
         if (recv(fd, ext, 2, 0) != 2) return -1;
@@ -1149,13 +1150,13 @@ static int ws_read_frame(int fd, uint8_t *out, int max_out, uint8_t *op) {
     if (plen > max_out) return -1;
     uint8_t mask[4] = {0};
     if (masked) { if (recv(fd, mask, 4, 0) != 4) return -1; }
-    int rd = 0;
+    int32_t rd = 0;
     while (rd < plen) {
         ssize_t r = recv(fd, out + rd, plen - rd, 0);
         if (r <= 0) return -1;
-        rd += (int)r;
+        rd += (int32_t)r;
     }
-    if (masked) { for (int i = 0; i < plen; i++) out[i] ^= mask[i & 3]; }
+    if (masked) { for (int32_t i = 0; i < plen; i++) out[i] ^= mask[i & 3]; }
     return plen;
 }
 
@@ -1169,7 +1170,7 @@ static bool wf_tables_init = false;
 
 static void wf_init_tables(void) {
     if (wf_tables_init) return;
-    for (int i = 0; i < WF_FFT_SIZE; i++) {
+    for (int32_t i = 0; i < WF_FFT_SIZE; i++) {
         double angle = -2.0 * M_PI * i / WF_FFT_SIZE;
         wf_sin_table[i] = (float)sin(angle);
         wf_cos_table[i] = (float)cos(angle);
@@ -1180,8 +1181,8 @@ static void wf_init_tables(void) {
 
 static void wf_fft256(float *re, float *im) {
     // Bit-reversal permutation
-    for (int i = 1, j = 0; i < WF_FFT_SIZE; i++) {
-        int bit = WF_FFT_SIZE >> 1;
+    for (int32_t i = 1, j = 0; i < WF_FFT_SIZE; i++) {
+        int32_t bit = WF_FFT_SIZE >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
         if (i < j) {
@@ -1190,12 +1191,12 @@ static void wf_fft256(float *re, float *im) {
         }
     }
     // Butterfly stages
-    for (int size = 2; size <= WF_FFT_SIZE; size <<= 1) {
-        int half = size >> 1;
-        int step = WF_FFT_SIZE / size;
-        for (int i = 0; i < WF_FFT_SIZE; i += size) {
-            for (int k = 0; k < half; k++) {
-                int idx = k * step;
+    for (int32_t size = 2; size <= WF_FFT_SIZE; size <<= 1) {
+        int32_t half = size >> 1;
+        int32_t step = WF_FFT_SIZE / size;
+        for (int32_t i = 0; i < WF_FFT_SIZE; i += size) {
+            for (int32_t k = 0; k < half; k++) {
+                int32_t idx = k * step;
                 float wr = wf_cos_table[idx];
                 float wi = wf_sin_table[idx];
                 float tr = wr * re[i+k+half] - wi * im[i+k+half];
@@ -1214,8 +1215,8 @@ static void wf_fft256(float *re, float *im) {
 #define WF_MAX_FPS       20
 
 struct wf_state {
-    int      ws_fd;          // WebSocket client fd (-1 = none)
-    int      rx_id;          // receiver being tapped (-1 = none)
+    int32_t      ws_fd;          // WebSocket client fd (-1 = none)
+    int32_t      rx_id;          // receiver being tapped (-1 = none)
     bool     owned;          // true = we took ownership (decoder disabled)
     sdr_role_t saved_role;   // original role before take ownership
     uint32_t saved_freq;     // original frequency
@@ -1240,7 +1241,7 @@ static void wf_stop_tap(void) {
 
 static void wf_release_ownership(void) {
     if (!WF.owned || WF.rx_id < 0) return;
-    int saved_rx_id = WF.rx_id;
+    int32_t saved_rx_id = WF.rx_id;
     sdr_receiver_t *rx = &SdrManager.receivers[saved_rx_id];
     sdr_role_t saved_role = WF.saved_role;
     double saved_gain = WF.saved_gain;
@@ -1302,7 +1303,7 @@ static void wf_disconnect(void) {
 }
 
 // Start tapping a receiver (observe mode - decoder keeps running)
-static bool wf_start_tap(int rx_id) {
+static bool wf_start_tap(int32_t rx_id) {
     if (rx_id < 0 || rx_id >= SdrManager.count) return false;
     sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
     if (rx->state != RX_STATE_RUNNING) return false;
@@ -1368,7 +1369,7 @@ static bool wf_restart_owned_stream(sdr_receiver_t *rx, double gain_db,
 }
 
 // Take ownership: stop decoder, switch to waterfall-only mode
-static bool wf_take_ownership(int rx_id) {
+static bool wf_take_ownership(int32_t rx_id) {
     if (rx_id < 0 || rx_id >= SdrManager.count) return false;
     sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
     if (rx->state != RX_STATE_RUNNING) return false;
@@ -1405,10 +1406,10 @@ static bool wf_tune(uint32_t freq_hz) {
     if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
 
     __atomic_store_n(&rx->pending_freq, freq_hz, __ATOMIC_RELEASE);
-    for (int attempt = 0; attempt < 250; attempt++) {
+    for (int32_t attempt = 0; attempt < 250; attempt++) {
         uint32_t pending = __atomic_load_n(&rx->pending_freq, __ATOMIC_ACQUIRE);
-        int applied = __atomic_load_n(&rx->config.freq, __ATOMIC_ACQUIRE);
-        if (pending == 0 && applied == (int)freq_hz) {
+        int32_t applied = __atomic_load_n(&rx->config.freq, __ATOMIC_ACQUIRE);
+        if (pending == 0 && applied == (int32_t)freq_hz) {
             return true;
         }
         usleep(1000);
@@ -1418,7 +1419,7 @@ static bool wf_tune(uint32_t freq_hz) {
 }
 
 // Set gain — works in both owned and observe mode
-static bool wf_set_gain(int gain_tenth_db) {
+static bool wf_set_gain(int32_t gain_tenth_db) {
     if (WF.rx_id < 0) return false;
     sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
     if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
@@ -1431,13 +1432,13 @@ static bool wf_set_gain(int gain_tenth_db) {
     } else {
         // Observe mode: live gain change without stopping decoder
         if (!rx->rtl.gains || rx->rtl.gain_steps < 2) return false;
-        int best = 0;
-        for (int i = 0; i < rx->rtl.gain_steps; i++) {
+        int32_t best = 0;
+        for (int32_t i = 0; i < rx->rtl.gain_steps; i++) {
             if (abs(rx->rtl.gains[i] - gain_tenth_db) <
                 abs(rx->rtl.gains[best] - gain_tenth_db))
                 best = i;
         }
-        int result = rxSetGain(rx, best);
+        int32_t result = rxSetGain(rx, best);
         if (result < 0) return false;
         rx->config.gain = rx->rtl.gains[result] / 10.0;
         return true;
@@ -1481,7 +1482,7 @@ static void wf_process_and_send(void) {
 
     wf_init_tables();
     float re[WF_FFT_SIZE], im[WF_FFT_SIZE];
-    for (int i = 0; i < WF_FFT_SIZE; i++) {
+    for (int32_t i = 0; i < WF_FFT_SIZE; i++) {
         uint32_t idx = (rd + i * 2) % sz;
         float I = ((float)WF.tap_buf[idx] - 127.5f) / 128.0f;
         float Q = ((float)WF.tap_buf[(idx + 1) % sz] - 127.5f) / 128.0f;
@@ -1495,9 +1496,9 @@ static void wf_process_and_send(void) {
 
     // Compute power spectrum in dB, reorder (DC in center)
     uint8_t spectrum[WF_FFT_SIZE];
-    for (int i = 0; i < WF_FFT_SIZE; i++) {
+    for (int32_t i = 0; i < WF_FFT_SIZE; i++) {
         // Reorder: move DC to center
-        int fi = (i + WF_FFT_SIZE / 2) % WF_FFT_SIZE;
+        int32_t fi = (i + WF_FFT_SIZE / 2) % WF_FFT_SIZE;
         float pwr = re[fi] * re[fi] + im[fi] * im[fi];
         float db = 10.0f * log10f(pwr + 1e-10f);
         // Map dB range [-60, 0] to [0, 255]
@@ -1517,7 +1518,7 @@ static void wf_process_and_send(void) {
 }
 
 // Handle incoming WebSocket message from waterfall client
-static void wf_handle_message(const char *msg, int len) {
+static void wf_handle_message(const char *msg, int32_t len) {
     // Parse JSON commands: {"cmd":"start","rx":0}, {"cmd":"stop"}, {"cmd":"take","rx":0},
     //                      {"cmd":"release"}, {"cmd":"tune","freq":1090000000},
     //                      {"cmd":"gain","value":350}, {"cmd":"rate","value":2400000}
@@ -1528,23 +1529,23 @@ static void wf_handle_message(const char *msg, int len) {
     p = strstr(msg, "\"cmd\":\"");
     if (!p) return;
     p += 7;
-    int ci = 0;
+    int32_t ci = 0;
     while (*p && *p != '"' && ci < 30) cmd[ci++] = *p++;
     cmd[ci] = '\0';
 
     if (strcmp(cmd, "start") == 0) {
-        int rx_id = 0;
+        int32_t rx_id = 0;
         const char *r = strstr(msg, "\"rx\":");
         if (r) rx_id = atoi(r + 5);
         if (wf_start_tap(rx_id)) {
             sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
             char resp[512];
-            int rlen = snprintf(resp, sizeof(resp),
+            int32_t rlen = snprintf(resp, sizeof(resp),
                 "{\"status\":\"ok\",\"freq\":%d,\"rate\":%.0f,\"gain\":%.1f,\"role\":\"%s\",\"gain_list\":[",
                 rx->config.freq, rx->config.sample_rate, rx->config.gain,
                 sdrRoleName(rx->config.role));
             if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
-                for (int g = 0; g < rx->rtl.gain_steps && rlen < 480; g++) {
+                for (int32_t g = 0; g < rx->rtl.gain_steps && rlen < 480; g++) {
                     rlen += snprintf(resp + rlen, sizeof(resp) - rlen,
                         "%s%.1f", g ? "," : "", rx->rtl.gains[g] / 10.0);
                 }
@@ -1553,50 +1554,50 @@ static void wf_handle_message(const char *msg, int len) {
             ws_send_text(WF.ws_fd, resp, rlen);
         } else {
             const char *e = "{\"status\":\"error\",\"msg\":\"Cannot tap receiver (not sdrgg or not running)\"}";
-            ws_send_text(WF.ws_fd, e, (int)strlen(e));
+            ws_send_text(WF.ws_fd, e, (int32_t)strlen(e));
         }
     } else if (strcmp(cmd, "stop") == 0) {
         wf_stop_tap();
         const char *e = "{\"status\":\"stopped\"}";
-        ws_send_text(WF.ws_fd, e, (int)strlen(e));
+        ws_send_text(WF.ws_fd, e, (int32_t)strlen(e));
     } else if (strcmp(cmd, "take") == 0) {
-        int rx_id = WF.rx_id;
+        int32_t rx_id = WF.rx_id;
         const char *r = strstr(msg, "\"rx\":");
         if (r) rx_id = atoi(r + 5);
         if (wf_take_ownership(rx_id)) {
             sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
             char resp[256];
-            int rlen = snprintf(resp, sizeof(resp),
+            int32_t rlen = snprintf(resp, sizeof(resp),
                 "{\"status\":\"owned\",\"freq\":%d,\"rate\":%.0f,\"gain\":%.1f}",
                 rx->config.freq, rx->config.sample_rate, rx->config.gain);
             ws_send_text(WF.ws_fd, resp, rlen);
         } else {
             const char *e = "{\"status\":\"error\",\"msg\":\"Cannot take ownership\"}";
-            ws_send_text(WF.ws_fd, e, (int)strlen(e));
+            ws_send_text(WF.ws_fd, e, (int32_t)strlen(e));
         }
     } else if (strcmp(cmd, "release") == 0) {
         wf_release_ownership();
         const char *e = "{\"status\":\"released\"}";
-        ws_send_text(WF.ws_fd, e, (int)strlen(e));
+        ws_send_text(WF.ws_fd, e, (int32_t)strlen(e));
     } else if (strcmp(cmd, "tune") == 0) {
         const char *f = strstr(msg, "\"freq\":");
         if (f) {
             uint32_t freq = (uint32_t)strtoul(f + 7, NULL, 10);
             bool ok = wf_tune(freq);
             char resp[128];
-            int rlen = snprintf(resp, sizeof(resp),
+            int32_t rlen = snprintf(resp, sizeof(resp),
                 "{\"status\":\"%s\",\"freq\":%u}", ok?"ok":"error", freq);
             ws_send_text(WF.ws_fd, resp, rlen);
         }
     } else if (strcmp(cmd, "gain") == 0) {
         const char *v = strstr(msg, "\"value\":");
         if (v) {
-            int g = atoi(v + 8);
+            int32_t g = atoi(v + 8);
             bool ok = wf_set_gain(g);
             sdr_receiver_t *rx = (WF.rx_id >= 0) ? &SdrManager.receivers[WF.rx_id] : NULL;
             double actual_db = rx ? rx->config.gain : g / 10.0;
             char resp[128];
-            int rlen = snprintf(resp, sizeof(resp),
+            int32_t rlen = snprintf(resp, sizeof(resp),
                 "{\"status\":\"%s\",\"gain_tenth_db\":%d,\"gain_db\":%.1f}",
                 ok?"ok":"error", g, actual_db);
             ws_send_text(WF.ws_fd, resp, rlen);
@@ -1607,7 +1608,7 @@ static void wf_handle_message(const char *msg, int len) {
             uint32_t rate = (uint32_t)strtoul(v + 8, NULL, 10);
             bool ok = wf_set_sample_rate(rate);
             char resp[128];
-            int rlen = snprintf(resp, sizeof(resp),
+            int32_t rlen = snprintf(resp, sizeof(resp),
                 "{\"status\":\"%s\",\"rate\":%u}", ok?"ok":"error", rate);
             ws_send_text(WF.ws_fd, resp, rlen);
         }
@@ -1619,7 +1620,7 @@ static void wf_handle_ws_read(void) {
     if (WF.ws_fd < 0) return;
     uint8_t buf[1024];
     uint8_t opcode;
-    int plen = ws_read_frame(WF.ws_fd, buf, sizeof(buf) - 1, &opcode);
+    int32_t plen = ws_read_frame(WF.ws_fd, buf, sizeof(buf) - 1, &opcode);
     if (plen < 0) {
         wf_disconnect();
         return;
@@ -1639,7 +1640,7 @@ static void wf_handle_ws_read(void) {
 
 // ============================= HTTP Helpers ===============================
 
-static void http_send(int fd, int code, const char *content_type, const char *body, int body_len)
+static void http_send(int32_t fd, int32_t code, const char *content_type, const char *body, int32_t body_len)
 {
     char header[512];
     const char *status_text = (code == 200) ? "OK" :
@@ -1647,7 +1648,7 @@ static void http_send(int fd, int code, const char *content_type, const char *bo
                               (code == 404) ? "Not Found" :
                               (code == 500) ? "Internal Server Error" : "OK";
 
-    int hlen = snprintf(header, sizeof(header),
+    int32_t hlen = snprintf(header, sizeof(header),
         "HTTP/1.0 %d %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %d\r\n"
@@ -1664,7 +1665,7 @@ static void http_send(int fd, int code, const char *content_type, const char *bo
     }
 }
 
-static void http_send_json(int fd, const char *json, int len)
+static void http_send_json(int32_t fd, const char *json, int32_t len)
 {
     http_send(fd, 200, "application/json; charset=utf-8", json, len);
 }
@@ -1690,17 +1691,17 @@ static bool check_auth(const char *request)
 
     auth += 21;
     char encoded[256] = {0};
-    int i = 0;
+    int32_t i = 0;
     while (auth[i] && auth[i] != '\r' && auth[i] != '\n' && i < 255)
         encoded[i] = auth[i], i++;
     encoded[i] = '\0';
 
     char decoded[256];
-    int dec_len = base64_decode(encoded, decoded, sizeof(decoded));
+    int32_t dec_len = base64_decode(encoded, decoded, sizeof(decoded));
 
     // Expected: "admin:<password>"
     char expected[320];
-    int exp_len = snprintf(expected, sizeof(expected), "admin:%s", PanelState.password);
+    int32_t exp_len = snprintf(expected, sizeof(expected), "admin:%s", PanelState.password);
     if (dec_len != exp_len) return false;
     return timing_safe_equal(decoded, expected, (size_t)exp_len);
 }
@@ -1711,10 +1712,10 @@ static bool check_auth(const char *request)
 // Uses write() to a pipe: kernel returns EFAULT for invalid addresses.
 static bool ptr_readable(const void *p) {
     if (!p) return false;
-    int pfd[2];
+    int32_t pfd[2];
     if (pipe(pfd) < 0) return false;
     ssize_t r = write(pfd[1], p, 1);
-    int saved_errno = errno;
+    int32_t saved_errno = errno;
     close(pfd[0]);
     close(pfd[1]);
     if (r < 0 && saved_errno == EFAULT) return false;
@@ -1723,10 +1724,10 @@ static bool ptr_readable(const void *p) {
 
 // ============================= JSON Escape ================================
 
-static char *json_escape(char *out, int outlen, const char *in)
+static char *json_escape(char *out, int32_t outlen, const char *in)
 {
-    int o = 0;
-    for (int i = 0; in[i] && o < outlen - 8; i++) {
+    int32_t o = 0;
+    for (int32_t i = 0; in[i] && o < outlen - 8; i++) {
         uint8_t c = (uint8_t)in[i];
         switch (c) {
             case '"':  out[o++] = '\\'; out[o++] = '"'; break;
@@ -1773,7 +1774,7 @@ static double json_get_double(const char *json, const char *key, double def)
     return atof(v);
 }
 
-static int json_get_int(const char *json, const char *key, int def)
+static int32_t json_get_int(const char *json, const char *key, int32_t def)
 {
     const char *v = json_find_key(json, key);
     if (!v) return def;
@@ -1825,7 +1826,7 @@ static void panelApplyConfig(const char *body)
                 const char *e = strchr(v, '"');
                 if (e && (e - v) > 0 && (e - v) < 64) {
                     free(MlatConfig.user);
-                    int nlen = (int)(e - v);
+                    int32_t nlen = (int32_t)(e - v);
                     MlatConfig.user = (char*)malloc(nlen + 1);
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
                     panelLog("Panel: station name set to '%s'", MlatConfig.user);
@@ -1869,7 +1870,7 @@ static void panelApplyConfig(const char *body)
             if (*v == '"') {
                 v++;
                 const char *e = strchr(v, '"');
-                if (e && (e - v) < (int)sizeof(FlarmConfig.ogn_server) - 1) {
+                if (e && (e - v) < (int32_t)sizeof(FlarmConfig.ogn_server) - 1) {
                     memcpy(FlarmConfig.ogn_server, v, e - v);
                     FlarmConfig.ogn_server[e - v] = '\0';
                 }
@@ -1879,7 +1880,7 @@ static void panelApplyConfig(const char *body)
     }
 
     // Beast feeds enabled/disabled
-    for (int i = 0; i < Modes.beast_feed_count; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count; i++) {
         std::string needle = std::string("\"name\":\"") + Modes.beast_feeds[i].name + "\"";
         const char *pos = strstr(body, needle.c_str());
         if (!pos) continue;
@@ -1916,7 +1917,7 @@ static void panelApplyConfig(const char *body)
                 const char *e = strchr(v, '"');
                 if (e && (e - v) > 0 && (e - v) < 256) {
                     free(Modes.adsbhub_ckey);
-                    int clen = (int)(e - v);
+                    int32_t clen = (int32_t)(e - v);
                     Modes.adsbhub_ckey = (char*)malloc(clen + 1);
                     if (Modes.adsbhub_ckey) { memcpy(Modes.adsbhub_ckey, v, clen); Modes.adsbhub_ckey[clen] = '\0'; }
                     panelLog("Panel: ADSBHub ckey updated");
@@ -2001,7 +2002,7 @@ static void panelApplyConfig(const char *body)
             if (*sid == '"') {
                 sid++;
                 const char *e = strchr(sid, '"');
-                if (e && (e - sid) < (int)sizeof(Modes.airframes_station_id) - 1) {
+                if (e && (e - sid) < (int32_t)sizeof(Modes.airframes_station_id) - 1) {
                     memcpy(Modes.airframes_station_id, sid, e - sid);
                     Modes.airframes_station_id[e - sid] = '\0';
                 }
@@ -2011,7 +2012,7 @@ static void panelApplyConfig(const char *body)
         // ACARS feed
         const char *af_acars = json_find_obj(airframes, "acars");
         if (af_acars) {
-            int was_enabled = Modes.airframes_acars_feed.enabled;
+            int32_t was_enabled = Modes.airframes_acars_feed.enabled;
             Modes.airframes_acars_feed.enabled = json_get_bool(af_acars, "enabled", Modes.airframes_acars_feed.enabled) ? 1 : 0;
             if (was_enabled != Modes.airframes_acars_feed.enabled) {
                 panelLog("Panel: Airframes ACARS feed %s",
@@ -2024,7 +2025,7 @@ static void panelApplyConfig(const char *body)
         // VDL2 feed
         const char *af_vdl2 = json_find_obj(airframes, "vdl2");
         if (af_vdl2) {
-            int was_enabled = Modes.airframes_vdl2_feed.enabled;
+            int32_t was_enabled = Modes.airframes_vdl2_feed.enabled;
             Modes.airframes_vdl2_feed.enabled = json_get_bool(af_vdl2, "enabled", Modes.airframes_vdl2_feed.enabled) ? 1 : 0;
             if (was_enabled != Modes.airframes_vdl2_feed.enabled) {
                 panelLog("Panel: Airframes VDL2 feed %s",
@@ -2040,13 +2041,13 @@ static void panelApplyConfig(const char *body)
     if (shist) {
         bool was_enabled = StatsHistory.enabled;
         StatsHistory.enabled = json_get_bool(shist, "enabled", StatsHistory.enabled);
-        int hours = json_get_int(shist, "retention_hours", StatsHistory.retention_hours);
+        int32_t hours = json_get_int(shist, "retention_hours", StatsHistory.retention_hours);
         if (hours < 1) hours = 1;
         if (hours > 2160) hours = 2160;  // max 90 days
-        int interval_min = json_get_int(shist, "interval_minutes", StatsHistory.interval_s / 60);
+        int32_t interval_min = json_get_int(shist, "interval_minutes", StatsHistory.interval_s / 60);
         if (interval_min < 1) interval_min = 1;
         if (interval_min > 60) interval_min = 60;
-        int new_interval_s = interval_min * 60;
+        int32_t new_interval_s = interval_min * 60;
         bool need_reconfig = (hours != StatsHistory.retention_hours) || (new_interval_s != StatsHistory.interval_s) || (!was_enabled && StatsHistory.enabled);
         StatsHistory.retention_hours = hours;
         StatsHistory.interval_s = new_interval_s;
@@ -2066,15 +2067,15 @@ static void panelApplyConfig(const char *body)
 // ============================= Beast feed helpers =========================
 
 // Add or find a beast feed by name (mirrors addBeastFeed in dump1090.c)
-static int panelAddBeastFeed(const char *name, const char *host, int port, int format)
+static int32_t panelAddBeastFeed(const char *name, const char *host, int32_t port, int32_t format)
 {
     // Check if already exists
-    for (int i = 0; i < Modes.beast_feed_count; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count; i++) {
         if (!strcmp(Modes.beast_feeds[i].name, name))
             return i;
     }
     if (Modes.beast_feed_count >= MAX_BEAST_FEEDS) return -1;
-    int idx = Modes.beast_feed_count++;
+    int32_t idx = Modes.beast_feed_count++;
     snprintf(Modes.beast_feeds[idx].name, sizeof(Modes.beast_feeds[idx].name), "%s", name);
     Modes.beast_feeds[idx].host = strdup(host);
     Modes.beast_feeds[idx].port = port;
@@ -2086,7 +2087,7 @@ static int panelAddBeastFeed(const char *name, const char *host, int port, int f
 // Pre-configured beast feeds for well-known aggregators
 void panelEnsureDefaultBeastFeeds(void)
 {
-    static const struct { const char *name; const char *host; int port; int format; } defaults[] = {
+    static const struct { const char *name; const char *host; int32_t port; int32_t format; } defaults[] = {
         { "ADSBx",          "feed.adsbexchange.com",   30005, FEED_FORMAT_BEAST_REDUCE },
         { "adsb.fi",        "feed.adsb.fi",            30004, FEED_FORMAT_BEAST_REDUCE },
         { "FlyItaly",       "dati.flyitalyadsb.com",   4905,  FEED_FORMAT_BEAST_REDUCE },
@@ -2099,7 +2100,7 @@ void panelEnsureDefaultBeastFeeds(void)
         { "AVDelphi",       "data.avdelphi.com",       24999, FEED_FORMAT_BEAST_REDUCE },
         { "ADSBHub",        "data.adsbhub.org",        5001,  FEED_FORMAT_RAW   },
     };
-    for (int i = 0; i < (int)(sizeof(defaults)/sizeof(defaults[0])); i++) {
+    for (int32_t i = 0; i < (int32_t)(sizeof(defaults)/sizeof(defaults[0])); i++) {
         panelAddBeastFeed(defaults[i].name, defaults[i].host, defaults[i].port, defaults[i].format);
     }
 }
@@ -2112,7 +2113,7 @@ void panelLoadBeastFeedState(void)
     if (!f) return;
 
     fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
+    int64_t sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0 || sz > 131072) { fclose(f); return; }
 
@@ -2123,7 +2124,7 @@ void panelLoadBeastFeedState(void)
     data[rd] = '\0';
 
     // For each beast feed, look for its name in saved config and restore enabled state
-    for (int i = 0; i < Modes.beast_feed_count; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count; i++) {
         // Search for "name":"<feedname>" in the JSON
         std::string needle = std::string("\"name\":\"") + Modes.beast_feeds[i].name + "\"";
         const char *pos = strstr(data, needle.c_str());
@@ -2159,7 +2160,7 @@ void panelLoadBeastFeedState(void)
                 const char *e = strchr(v, '"');
                 if (e && (e - v) > 0 && (e - v) < 64) {
                     free(MlatConfig.user);
-                    int nlen = (int)(e - v);
+                    int32_t nlen = (int32_t)(e - v);
                     MlatConfig.user = (char*)malloc(nlen + 1);
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
                     strncpy(FlarmConfig.ogn_station, MlatConfig.user, sizeof(FlarmConfig.ogn_station) - 1);
@@ -2184,13 +2185,13 @@ void panelLoadBeastFeedState(void)
             if (*v == '"') {
                 v++;
                 const char *e = strchr(v, '"');
-                if (e && (e - v) > 0 && (e - v) < (int)sizeof(FlarmConfig.ogn_server) - 1) {
+                if (e && (e - v) > 0 && (e - v) < (int32_t)sizeof(FlarmConfig.ogn_server) - 1) {
                     memcpy(FlarmConfig.ogn_server, v, e - v);
                     FlarmConfig.ogn_server[e - v] = '\0';
                 }
             }
         }
-        int port = json_get_int(ogn, "port", 0);
+        int32_t port = json_get_int(ogn, "port", 0);
         if (port > 0 && port < 65536) FlarmConfig.ogn_port = port;
     }
 
@@ -2225,7 +2226,7 @@ void panelLoadBeastFeedState(void)
             if (*sid == '"') {
                 sid++;
                 const char *e = strchr(sid, '"');
-                if (e && (e - sid) < (int)sizeof(Modes.airframes_station_id) - 1) {
+                if (e && (e - sid) < (int32_t)sizeof(Modes.airframes_station_id) - 1) {
                     memcpy(Modes.airframes_station_id, sid, e - sid);
                     Modes.airframes_station_id[e - sid] = '\0';
                 }
@@ -2249,11 +2250,11 @@ void panelLoadBeastFeedState(void)
     const char *shist = json_find_obj(data, "stats_history");
     if (shist) {
         StatsHistory.enabled = json_get_bool(shist, "enabled", false);
-        int hours = json_get_int(shist, "retention_hours", 24);
+        int32_t hours = json_get_int(shist, "retention_hours", 24);
         if (hours < 1) hours = 1;
         if (hours > 2160) hours = 2160;
         StatsHistory.retention_hours = hours;
-        int interval_min = json_get_int(shist, "interval_minutes", StatsHistory.interval_s / 60);
+        int32_t interval_min = json_get_int(shist, "interval_minutes", StatsHistory.interval_s / 60);
         if (interval_min < 1) interval_min = 1;
         if (interval_min > 60) interval_min = 60;
         StatsHistory.interval_s = interval_min * 60;
@@ -2270,7 +2271,7 @@ void panelLoadBeastFeedState(void)
 
 // ============================= API: GET /api/config ======================
 
-static void api_get_config(int fd)
+static void api_get_config(int32_t fd)
 {
     std::string buf;
     buf.reserve(8192);
@@ -2288,7 +2289,7 @@ static void api_get_config(int fd)
 
     // Beast feeds
     buf += "\"beast_feeds\":[\n";
-    for (int i = 0; i < Modes.beast_feed_count; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count; i++) {
         buf += sfmt(
             "%s{\"name\":\"%s\",\"host\":\"%s\",\"port\":%d,\"format\":\"%s\",\"enabled\":%s}",
             i ? "," : "",
@@ -2323,8 +2324,8 @@ static void api_get_config(int fd)
 
     // Radiosonde SDR status (derived from SdrManager)
     {
-        int sonde_active = 0;
-        for (int i = 0; i < SdrManager.count; i++) {
+        int32_t sonde_active = 0;
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_RADIOSONDE) {
                 sonde_active = 1;
                 break;
@@ -2337,9 +2338,9 @@ static void api_get_config(int fd)
 
     // POCSAG SDR status (derived from SdrManager)
     {
-        int pocsag_active = 0;
+        int32_t pocsag_active = 0;
         double pocsag_freq = 466.150;
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_POCSAG) {
                 pocsag_active = 1;
                 pocsag_freq = SdrManager.receivers[i].config.freq / 1e6;
@@ -2355,9 +2356,9 @@ static void api_get_config(int fd)
 
     // GSM SDR status (derived from SdrManager)
     {
-        int gsm_active = 0;
+        int32_t gsm_active = 0;
         double gsm_freq = 935.200;
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_GSM) {
                 gsm_active = 1;
                 gsm_freq = SdrManager.receivers[i].config.freq / 1e6;
@@ -2374,9 +2375,9 @@ static void api_get_config(int fd)
 
     // LTE SDR status
     {
-        int lte_active = 0;
+        int32_t lte_active = 0;
         double lte_freq = 806.0;
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_LTE) {
                 lte_active = 1;
                 lte_freq = SdrManager.receivers[i].config.freq / 1e6;
@@ -2393,9 +2394,9 @@ static void api_get_config(int fd)
 
     // IoT 868 MHz SDR status
     {
-        int iot_active = 0;
+        int32_t iot_active = 0;
         double iot_freq = 868.300;
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_IOT868) {
                 iot_active = 1;
                 iot_freq = SdrManager.receivers[i].config.freq / 1e6;
@@ -2412,9 +2413,9 @@ static void api_get_config(int fd)
 
     // FANET SDR status
     {
-        int fanet_active = 0;
+        int32_t fanet_active = 0;
         double fanet_freq = 868.200;
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_FANET) {
                 fanet_active = 1;
                 fanet_freq = SdrManager.receivers[i].config.freq / 1e6;
@@ -2430,9 +2431,9 @@ static void api_get_config(int fd)
 
     // Sarsat SDR status
     {
-        int sarsat_active = 0;
+        int32_t sarsat_active = 0;
         double sarsat_freq = 406.040;
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_SARSAT) {
                 sarsat_active = 1;
                 sarsat_freq = SdrManager.receivers[i].config.freq / 1e6;
@@ -2460,16 +2461,16 @@ static void api_get_config(int fd)
 
     // MLAT
     buf += "\"mlat\":{\"servers\":[\n";
-    int mlat_count = MlatConfig.server_count;
+    int32_t mlat_count = MlatConfig.server_count;
     if (mlat_count < 0 || mlat_count > MAX_MLAT_SERVERS) mlat_count = 0;
-    for (int i = 0; i < mlat_count; i++) {
+    for (int32_t i = 0; i < mlat_count; i++) {
         const char *host = MlatConfig.servers[i].host;
         buf += sfmt(
             "%s{\"host\":\"%s\",\"port\":%d,\"state\":%d}",
             i ? "," : "",
             (host && ptr_readable(host)) ? json_escape(esc, sizeof(esc), host) : "",
             MlatConfig.servers[i].port,
-            (int)MlatConfig.servers[i].state);
+            (int32_t)MlatConfig.servers[i].state);
     }
     buf += sfmt(
         "],\"alt\":%.0f,\"return_results\":%s},\n",
@@ -2504,8 +2505,8 @@ static void api_get_config(int fd)
 
     // Airframes.io ACARS/VDL2 feeds
     {
-        int acars_active = 0, vdl2_active = 0;
-        for (int i = 0; i < SdrManager.count; i++) {
+        int32_t acars_active = 0, vdl2_active = 0;
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_ACARS)
                 acars_active = 1;
             if (SdrManager.receivers[i].config.role == SDR_ROLE_VDL2)
@@ -2541,12 +2542,12 @@ static void api_get_config(int fd)
 
     buf += "}\n";
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= API: GET /api/status ======================
 
-static void api_get_status(int fd)
+static void api_get_status(int32_t fd)
 {
     std::string buf;
     buf.reserve(4096);
@@ -2555,7 +2556,7 @@ static void api_get_status(int fd)
     buf += "{\"feeders\":[\n";
 
     // Beast feeds
-    for (int i = 0; i < Modes.beast_feed_count; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count; i++) {
         buf += sfmt(
             "%s{\"name\":\"%s\",\"type\":\"beast\",\"enabled\":%s,"
             "\"host\":\"%s\",\"port\":%d}",
@@ -2566,7 +2567,7 @@ static void api_get_status(int fd)
             Modes.beast_feeds[i].port);
     }
 
-    int need_comma = (Modes.beast_feed_count > 0);
+    int32_t need_comma = (Modes.beast_feed_count > 0);
 
     // FR24, PlaneFinder, RadarBox feeders removed in light version
 
@@ -2586,7 +2587,7 @@ static void api_get_status(int fd)
     // PiAware — always show with enabled/disabled state
     {
         const char *pa_states[] = {"disconnected","connecting","tls_handshake","awaiting_login","logged_in"};
-        int si = PiawareClient.state;
+        int32_t si = PiawareClient.state;
         if (si < 0 || si > 4) si = 0;
         buf += sfmt(
             "%s{\"name\":\"PiAware / FlightAware\",\"type\":\"native\",\"enabled\":%s,"
@@ -2600,11 +2601,11 @@ static void api_get_status(int fd)
     }
 
     // MLAT servers
-    int mlat_count2 = MlatConfig.server_count;
+    int32_t mlat_count2 = MlatConfig.server_count;
     if (mlat_count2 < 0 || mlat_count2 > MAX_MLAT_SERVERS) mlat_count2 = 0;
-    for (int i = 0; i < mlat_count2; i++) {
+    for (int32_t i = 0; i < mlat_count2; i++) {
         const char *ml_states[] = {"disconnected","connecting","handshaking","ready"};
-        int mi = (int)MlatConfig.servers[i].state;
+        int32_t mi = (int32_t)MlatConfig.servers[i].state;
         if (mi < 0 || mi > 3) mi = 0;
         const char *host = MlatConfig.servers[i].host;
         bool host_ok = (host && ptr_readable(host));
@@ -2621,8 +2622,8 @@ static void api_get_status(int fd)
 
     // FLARM/OGN — derive state from SdrManager
     {
-        int flarm_running = 0;
-        for (int i = 0; i < SdrManager.count; i++) {
+        int32_t flarm_running = 0;
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_FLARM &&
                 SdrManager.receivers[i].state == RX_STATE_RUNNING) {
                 flarm_running = 1;
@@ -2642,8 +2643,8 @@ static void api_get_status(int fd)
 
     // Airframes.io ACARS feed
     {
-        int acars_active = 0;
-        for (int i = 0; i < SdrManager.count; i++) {
+        int32_t acars_active = 0;
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_ACARS) { acars_active = 1; break; }
         }
         buf += sfmt(
@@ -2660,8 +2661,8 @@ static void api_get_status(int fd)
 
     // Airframes.io VDL2 feed
     {
-        int vdl2_active = 0;
-        for (int i = 0; i < SdrManager.count; i++) {
+        int32_t vdl2_active = 0;
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (SdrManager.receivers[i].config.role == SDR_ROLE_VDL2) { vdl2_active = 1; break; }
         }
         buf += sfmt(
@@ -2679,12 +2680,12 @@ static void api_get_status(int fd)
     buf += sfmt(
         "],\"version\":\"" MODES_DUMP1090_VERSION "\",\"variant\":\"" MODES_DUMP1090_VARIANT "\"}\n");
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= API: GET /api/aircraft =====================
 
-static void api_get_aircraft(int fd)
+static void api_get_aircraft(int32_t fd)
 {
     // Read aircraft.json from disk (already generated by dump1090)
     if (!Modes.json_dir) {
@@ -2701,7 +2702,7 @@ static void api_get_aircraft(int fd)
     }
 
     fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
+    int64_t fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
 
     if (fsize <= 0 || fsize > 1048576) {
@@ -2715,31 +2716,31 @@ static void api_get_aircraft(int fd)
     fclose(f);
     data.resize(nread);
 
-    http_send_json(fd, data.c_str(), (int)data.size());
+    http_send_json(fd, data.c_str(), (int32_t)data.size());
 }
 
 // ============================= API: GET /api/gsm =========================
 
-static void api_get_gsm(int fd)
+static void api_get_gsm(int32_t fd)
 {
     std::string json = gsmTrackerToJSON();
-    http_send_json(fd, json.c_str(), (int)json.size());
+    http_send_json(fd, json.c_str(), (int32_t)json.size());
 }
 
 // ============================= API: GET /api/lte =========================
 
-static void api_get_lte(int fd)
+static void api_get_lte(int32_t fd)
 {
     std::string json = lteTrackerToJSON();
-    http_send_json(fd, json.c_str(), (int)json.size());
+    http_send_json(fd, json.c_str(), (int32_t)json.size());
 }
 
 // ============================= API: GET /api/iot868 =======================
 
-static void api_get_iot868(int fd)
+static void api_get_iot868(int32_t fd)
 {
     std::string json = iotTrackerToJSON();
-    http_send_json(fd, json.c_str(), (int)json.size());
+    http_send_json(fd, json.c_str(), (int32_t)json.size());
 }
 
 // ============================= API: GET /api/fanet ========================
@@ -2747,14 +2748,14 @@ static void api_get_iot868(int fd)
 // Callback for ground track serialization
 struct fanet_ground_json_ctx {
     std::string *buf;
-    int count;
+    int32_t count;
 };
 
 static void fanet_ground_json_cb(const fanet_ground_entry_t *e, void *ctx)
 {
     struct fanet_ground_json_ctx *c = (struct fanet_ground_json_ctx *)ctx;
     uint64_t now = mstime();
-    int age_sec = (int)((now - e->last_seen) / 1000);
+    int32_t age_sec = (int32_t)((now - e->last_seen) / 1000);
     char esc_name[64];
     *c->buf += sfmt(
         "%s{\"addr\":\"%06X\",\"lat\":%.5f,\"lon\":%.5f,\"type\":%u,\"name\":\"%s\",\"age\":%d}",
@@ -2764,11 +2765,11 @@ static void fanet_ground_json_cb(const fanet_ground_entry_t *e, void *ctx)
 }
 
 // Callback for name serialization
-struct fanet_name_json_ctx { std::string *buf; int count; };
+struct fanet_name_json_ctx { std::string *buf; int32_t count; };
 static void fanet_name_json_cb(const fanet_name_entry_t *e, void *ctx)
 {
     struct fanet_name_json_ctx *c = (struct fanet_name_json_ctx *)ctx;
-    int age = (int)((mstime() - e->last_seen) / 1000);
+    int32_t age = (int32_t)((mstime() - e->last_seen) / 1000);
     char esc[64];
     *c->buf += sfmt("%s{\"addr\":\"%06X\",\"name\":\"%s\",\"age\":%d}",
         c->count ? "," : "", e->addr, json_escape(esc, sizeof(esc), e->name), age);
@@ -2776,11 +2777,11 @@ static void fanet_name_json_cb(const fanet_name_entry_t *e, void *ctx)
 }
 
 // Callback for message serialization
-struct fanet_msg_json_ctx { std::string *buf; int count; };
+struct fanet_msg_json_ctx { std::string *buf; int32_t count; };
 static void fanet_msg_json_cb(const fanet_msg_entry_t *e, void *ctx)
 {
     struct fanet_msg_json_ctx *c = (struct fanet_msg_json_ctx *)ctx;
-    int age = (int)((mstime() - e->last_seen) / 1000);
+    int32_t age = (int32_t)((mstime() - e->last_seen) / 1000);
     char esc[256];
     *c->buf += sfmt("%s{\"addr\":\"%06X\",\"subtype\":%u,\"text\":\"%s\",\"age\":%d}",
         c->count ? "," : "", e->addr, (uint32_t)e->subtype,
@@ -2789,11 +2790,11 @@ static void fanet_msg_json_cb(const fanet_msg_entry_t *e, void *ctx)
 }
 
 // Callback for weather serialization
-struct fanet_wx_json_ctx { std::string *buf; int count; };
+struct fanet_wx_json_ctx { std::string *buf; int32_t count; };
 static void fanet_wx_json_cb(const fanet_wx_entry_t *e, void *ctx)
 {
     struct fanet_wx_json_ctx *c = (struct fanet_wx_json_ctx *)ctx;
-    int age = (int)((mstime() - e->last_seen) / 1000);
+    int32_t age = (int32_t)((mstime() - e->last_seen) / 1000);
     char esc[64];
     *c->buf += sfmt("%s{\"addr\":\"%06X\",\"name\":\"%s\",\"age\":%d",
         c->count ? "," : "", e->addr, json_escape(esc, sizeof(esc), e->name), age);
@@ -2809,11 +2810,11 @@ static void fanet_wx_json_cb(const fanet_wx_entry_t *e, void *ctx)
 }
 
 // Callback for thermal serialization
-struct fanet_thermal_json_ctx { std::string *buf; int count; };
+struct fanet_thermal_json_ctx { std::string *buf; int32_t count; };
 static void fanet_thermal_json_cb(const fanet_thermal_entry_t *e, void *ctx)
 {
     struct fanet_thermal_json_ctx *c = (struct fanet_thermal_json_ctx *)ctx;
-    int age = (int)((mstime() - e->last_seen) / 1000);
+    int32_t age = (int32_t)((mstime() - e->last_seen) / 1000);
     *c->buf += sfmt("%s{\"addr\":\"%06X\",\"lat\":%.5f,\"lon\":%.5f,\"alt\":%d,"
         "\"climb\":%.1f,\"wind\":%.1f,\"wdir\":%.0f,\"conf\":%u,\"age\":%d}",
         c->count ? "," : "", e->addr, e->latitude, e->longitude, e->altitude,
@@ -2822,24 +2823,24 @@ static void fanet_thermal_json_cb(const fanet_thermal_entry_t *e, void *ctx)
 }
 
 // Callback for ACK serialization
-struct fanet_ack_json_ctx { std::string *buf; int count; };
+struct fanet_ack_json_ctx { std::string *buf; int32_t count; };
 static void fanet_ack_json_cb(const fanet_ack_entry_t *e, void *ctx)
 {
     struct fanet_ack_json_ctx *c = (struct fanet_ack_json_ctx *)ctx;
-    int age = (int)((mstime() - e->timestamp) / 1000);
+    int32_t age = (int32_t)((mstime() - e->timestamp) / 1000);
     *c->buf += sfmt("%s{\"src\":\"%06X\",\"dst\":\"%06X\",\"age\":%d}",
         c->count ? "," : "", e->src_addr, e->dst_addr, age);
     c->count++;
 }
 
-static void api_get_fanet(int fd)
+static void api_get_fanet(int32_t fd)
 {
     std::string buf;
     buf.reserve(8192);
     fanet_stats_t stats = {0};
 
     // Find the FANET receiver and get stats
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         if (SdrManager.receivers[i].config.role == SDR_ROLE_FANET &&
             SdrManager.receivers[i].decoder_state) {
             fanet_get_stats((const fanet_state_t *)SdrManager.receivers[i].decoder_state, &stats);
@@ -2906,19 +2907,19 @@ static void api_get_fanet(int fd)
     { struct fanet_ack_json_ctx c = { &buf, 0 }; fanetGetAcks(fanet_ack_json_cb, &c); }
     buf += "]}";
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= API: GET /api/connections ==================
 
-static void api_get_connections(int fd)
+static void api_get_connections(int32_t fd)
 {
     std::string buf;
     buf.reserve(4096);
 
     buf += "{\"services\":[\n";
 
-    int first_svc = 1;
+    int32_t first_svc = 1;
     struct net_service *svc;
     for (svc = Modes.services; svc; svc = svc->next) {
         if (!first_svc) buf += ',';
@@ -2931,7 +2932,7 @@ static void api_get_connections(int fd)
             svc->connections);
 
         // Emit listener ports
-        for (int i = 0; i < svc->listener_count; i++) {
+        for (int32_t i = 0; i < svc->listener_count; i++) {
             struct sockaddr_in sa;
             socklen_t slen = sizeof(sa);
             if (getsockname(svc->listener_fds[i], (struct sockaddr *)&sa, &slen) == 0) {
@@ -2941,7 +2942,7 @@ static void api_get_connections(int fd)
         buf += "],\"clients\":[";
 
         // Walk client list and find clients belonging to this service
-        int first_cli = 1;
+        int32_t first_cli = 1;
         struct client *c;
         for (c = Modes.clients; c; c = c->next) {
             if (c->service != svc) continue;
@@ -2972,12 +2973,12 @@ static void api_get_connections(int fd)
 
     buf += "]}\n";
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= API: GET /api/stats =======================
 
-static void api_get_stats(int fd)
+static void api_get_stats(int32_t fd)
 {
     if (!Modes.json_dir) {
         http_send(fd, 404, "text/plain", "No JSON dir", 11);
@@ -2993,7 +2994,7 @@ static void api_get_stats(int fd)
     }
 
     fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
+    int64_t fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
 
     if (fsize <= 0 || fsize > 1048576) {
@@ -3007,12 +3008,12 @@ static void api_get_stats(int fd)
     fclose(f);
     data.resize(nread);
 
-    http_send_json(fd, data.c_str(), (int)data.size());
+    http_send_json(fd, data.c_str(), (int32_t)data.size());
 }
 
 // ============================= API: GET /api/logs ========================
 
-static void api_get_logs(int fd)
+static void api_get_logs(int32_t fd)
 {
     std::string buf;
     buf.reserve(4096);
@@ -3023,15 +3024,15 @@ static void api_get_logs(int fd)
     buf += sfmt("{\"seq\":%d,\"lines\":[\n", PanelState.log_seq);
 
     // Return last N lines (max 200 per request)
-    int count = PanelState.log_count;
-    int start_offset = 0;
+    int32_t count = PanelState.log_count;
+    int32_t start_offset = 0;
     if (count > 200) {
         start_offset = count - 200;
         count = 200;
     }
 
-    for (int i = 0; i < count; i++) {
-        int idx = (PanelState.log_head + start_offset + i) % PANEL_LOG_LINES;
+    for (int32_t i = 0; i < count; i++) {
+        int32_t idx = (PanelState.log_head + start_offset + i) % PANEL_LOG_LINES;
         buf += sfmt("%s\"%s\"",
                     i ? "," : "",
                     json_escape(esc, sizeof(esc), PanelState.log_buf[idx]));
@@ -3041,12 +3042,12 @@ static void api_get_logs(int fd)
 
     buf += "]}\n";
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= API: GET /api/messages =====================
 
-static void api_get_messages(int fd)
+static void api_get_messages(int32_t fd)
 {
     std::string buf;
     buf.reserve(8192);
@@ -3056,15 +3057,15 @@ static void api_get_messages(int fd)
 
     buf += sfmt("{\"seq\":%d,\"messages\":[\n", PanelState.msg_seq);
 
-    int count = PanelState.msg_count;
-    int start_offset = 0;
+    int32_t count = PanelState.msg_count;
+    int32_t start_offset = 0;
     if (count > 2000) {
         start_offset = count - 2000;
         count = 2000;
     }
 
-    for (int i = 0; i < count; i++) {
-        int idx = (PanelState.msg_head + start_offset + i) % PANEL_MSG_LINES;
+    for (int32_t i = 0; i < count; i++) {
+        int32_t idx = (PanelState.msg_head + start_offset + i) % PANEL_MSG_LINES;
         buf += sfmt("%s\"%s\"",
                     i ? "," : "",
                     json_escape(esc, sizeof(esc), PanelState.msg_buf[idx]));
@@ -3074,34 +3075,34 @@ static void api_get_messages(int fd)
 
     buf += "]}\n";
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= Input Validation ==========================
 
 // Validate that a string is plausible JSON (basic structural check)
 // Rejects obviously malformed or dangerous payloads
-static bool is_valid_json_object(const char *body, int maxlen)
+static bool is_valid_json_object(const char *body, int32_t maxlen)
 {
     if (!body || maxlen <= 0) return false;
-    int len = (int)strnlen(body, (size_t)maxlen);
+    int32_t len = (int32_t)strnlen(body, (size_t)maxlen);
     if (len < 2 || len >= maxlen) return false;
 
     // Must start with { and end with }
     // Skip leading whitespace
-    int start = 0;
+    int32_t start = 0;
     while (start < len && (body[start] == ' ' || body[start] == '\t'
            || body[start] == '\r' || body[start] == '\n')) start++;
-    int end = len - 1;
+    int32_t end = len - 1;
     while (end > start && (body[end] == ' ' || body[end] == '\t'
            || body[end] == '\r' || body[end] == '\n' || body[end] == '\0')) end--;
 
     if (body[start] != '{' || body[end] != '}') return false;
 
     // Check balanced braces and brackets
-    int braces = 0, brackets = 0;
+    int32_t braces = 0, brackets = 0;
     bool in_string = false;
-    for (int i = start; i <= end; i++) {
+    for (int32_t i = start; i <= end; i++) {
         if (body[i] == '\\' && in_string) { i++; continue; }
         if (body[i] == '"') { in_string = !in_string; continue; }
         if (in_string) continue;
@@ -3122,16 +3123,16 @@ static bool sanitize_json_config(const char *body)
     bool in_key = false;       // true when inside a JSON key (before ':')
     bool skip_value = false;   // true when current string value is whitelisted
     char last_key[32] = {0};
-    int key_pos = 0;
+    int32_t key_pos = 0;
 
-    for (int i = 0; body[i]; i++) {
+    for (int32_t i = 0; body[i]; i++) {
         if (body[i] == '\\' && in_string) { i++; continue; }  // skip escaped
         if (body[i] == '"') {
             if (!in_string) {
                 // Starting a string — determine if it's a key or value
                 in_string = true;
                 // Look back: if preceded by '{' or ',' (skipping whitespace), it's a key
-                int j = i - 1;
+                int32_t j = i - 1;
                 while (j >= 0 && (body[j] == ' ' || body[j] == '\t' || body[j] == '\n' || body[j] == '\r')) j--;
                 if (j < 0 || body[j] == '{' || body[j] == ',' || body[j] == '[') {
                     in_key = true;
@@ -3153,7 +3154,7 @@ static bool sanitize_json_config(const char *body)
         if (in_string) {
             if (in_key) {
                 // Accumulate key name
-                if (key_pos < (int)sizeof(last_key) - 1)
+                if (key_pos < (int32_t)sizeof(last_key) - 1)
                     last_key[key_pos++] = body[i];
             } else if (!skip_value) {
                 uint8_t c = (uint8_t)body[i];
@@ -3175,12 +3176,12 @@ static bool sanitize_json_config(const char *body)
 
 // ============================= API: POST /api/config =====================
 
-static void api_post_config(int fd, const char *body)
+static void api_post_config(int32_t fd, const char *body)
 {
     // Validate: must be valid JSON object
     if (!is_valid_json_object(body, 65536)) {
         const char *err = "{\"error\":\"Invalid JSON format\"}";
-        http_send(fd, 400, "application/json", err, (int)strlen(err));
+        http_send(fd, 400, "application/json", err, (int32_t)strlen(err));
         panelLog("Panel: rejected config POST — invalid JSON structure");
         return;
     }
@@ -3188,7 +3189,7 @@ static void api_post_config(int fd, const char *body)
     // Sanitize: reject shell metacharacters and HTML injection in string values
     if (!sanitize_json_config(body)) {
         const char *err = "{\"error\":\"Config contains forbidden characters\"}";
-        http_send(fd, 400, "application/json", err, (int)strlen(err));
+        http_send(fd, 400, "application/json", err, (int32_t)strlen(err));
         panelLog("Panel: rejected config POST — dangerous characters in values");
         return;
     }
@@ -3197,7 +3198,7 @@ static void api_post_config(int fd, const char *body)
     size_t body_len = strlen(body);
     if (body_len > 32768) {
         const char *err = "{\"error\":\"Config too large\"}";
-        http_send(fd, 400, "application/json", err, (int)strlen(err));
+        http_send(fd, 400, "application/json", err, (int32_t)strlen(err));
         return;
     }
 
@@ -3205,7 +3206,7 @@ static void api_post_config(int fd, const char *body)
     FILE *f = fopen(PANEL_CONF_PATH, "w");
     if (!f) {
         const char *err = "{\"error\":\"Cannot write config file\"}";
-        http_send_json(fd, err, (int)strlen(err));
+        http_send_json(fd, err, (int32_t)strlen(err));
         return;
     }
     fprintf(f, "%s", body);
@@ -3215,14 +3216,14 @@ static void api_post_config(int fd, const char *body)
     panelApplyConfig(body);
 
     const char *ok = "{\"status\":\"saved\",\"applied\":true}";
-    http_send_json(fd, ok, (int)strlen(ok));
+    http_send_json(fd, ok, (int32_t)strlen(ok));
 
     panelLog("Panel: configuration saved to %s and applied live", PANEL_CONF_PATH);
 }
 
 // ============================= File Serving ===============================
 
-static void serve_file(int fd, const char *filename)
+static void serve_file(int32_t fd, const char *filename)
 {
     // Reject obviously dangerous filenames
     if (!filename || filename[0] == '\0' || filename[0] == '/') {
@@ -3238,7 +3239,7 @@ static void serve_file(int fd, const char *filename)
     }
 
     // Only allow safe filename characters
-    for (int i = 0; filename[i]; i++) {
+    for (int32_t i = 0; filename[i]; i++) {
         uint8_t c = (uint8_t)filename[i];
         if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z')
             && !(c >= '0' && c <= '9') && c != '.' && c != '-'
@@ -3278,12 +3279,12 @@ static void serve_file(int fd, const char *filename)
             "<a href='/api/devices'>/api/devices</a></p>"
             "<p><a href='/devices.html' style='color:#4fc3f7;font-size:1.2em'>&#x1f4e1; SDR Devices Page</a></p>"
             "</body></html>", path.c_str(), PanelState.html_dir);
-        http_send(fd, 200, "text/html; charset=utf-8", buf.c_str(), (int)buf.size());
+        http_send(fd, 200, "text/html; charset=utf-8", buf.c_str(), (int32_t)buf.size());
         return;
     }
 
     fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
+    int64_t fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
 
     if (fsize <= 0 || fsize > 2097152) { // 2MB max
@@ -3308,7 +3309,7 @@ static void serve_file(int fd, const char *filename)
     else if (fn.find(".png") != std::string_view::npos) ct = "image/png";
     else if (fn.find(".svg") != std::string_view::npos) ct = "image/svg+xml";
 
-    http_send(fd, 200, ct, data, (int)nread);
+    http_send(fd, 200, ct, data, (int32_t)nread);
     free(data);
 }
 
@@ -3317,20 +3318,20 @@ static void serve_file(int fd, const char *filename)
 // Tuner type cache: maps serial -> tuner_type to survive across API calls
 // (probing fails when devices are already open by the legacy decoder)
 #define MAX_TUNER_CACHE 16
-static struct { char serial[64]; int tuner_type; } tuner_cache[MAX_TUNER_CACHE];
-static int tuner_cache_count = 0;
+static struct { char serial[64]; int32_t tuner_type; } tuner_cache[MAX_TUNER_CACHE];
+static int32_t tuner_cache_count = 0;
 
-static int tuner_cache_lookup(const char *serial) {
-    for (int i = 0; i < tuner_cache_count; i++)
+static int32_t tuner_cache_lookup(const char *serial) {
+    for (int32_t i = 0; i < tuner_cache_count; i++)
         if (!strcmp(tuner_cache[i].serial, serial))
             return tuner_cache[i].tuner_type;
     return -1;
 }
 
-static void tuner_cache_store(const char *serial, int tuner_type) {
+static void tuner_cache_store(const char *serial, int32_t tuner_type) {
     if (tuner_type < 0) return;
     // Update existing entry
-    for (int i = 0; i < tuner_cache_count; i++) {
+    for (int32_t i = 0; i < tuner_cache_count; i++) {
         if (!strcmp(tuner_cache[i].serial, serial)) {
             tuner_cache[i].tuner_type = tuner_type;
             return;
@@ -3350,18 +3351,18 @@ static void tuner_cache_store(const char *serial, int tuner_type) {
 void panelProbeAllTuners(void)
 {
     sdr_dev_info_t devs[MAX_SDR_RECEIVERS];
-    int count = sdrBackendEnumerateAll(devs, MAX_SDR_RECEIVERS);
+    int32_t count = sdrBackendEnumerateAll(devs, MAX_SDR_RECEIVERS);
     if (count <= 0) return;
 
     // Open all devices via backend to read tuner type, then close
-    for (int i = 0; i < count; i++) {
+    for (int32_t i = 0; i < count; i++) {
         const sdr_backend_ops_t *ops = sdrBackendResolve(devs[i].backend);
         if (!ops) continue;
         sdr_device_t *dev = ops->open_by_serial(devs[i].serial);
         if (!dev) continue;
         dev->ops = ops;
 
-        int t = sdr_get_tuner_type(dev);
+        int32_t t = sdr_get_tuner_type(dev);
         tuner_cache_store(devs[i].serial, t);
         fprintf(stderr, "Panel: device #%d SN=%s tuner=%s (%d) via %s\n",
                 i, devs[i].serial, tuner_name_sdr((sdr_tuner_type_t)t), t, ops->name);
@@ -3394,20 +3395,20 @@ static const char *tuner_freq_range_sdr(sdr_tuner_type_t type) {
     }
 }
 
-static void api_get_receivers(int fd)
+static void api_get_receivers(int32_t fd)
 {
     std::string buf;
     buf.reserve(4096);
 
     buf += "{\"receivers\":[";
 
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         if (i > 0) buf += ',';
 
         // Resolve tuner name: prefer tuner_cache (SDR_TUNER enum from probe), fallback to backend_dev
         const char *tname = "unknown", *trange = "unknown";
-        int cached = tuner_cache_lookup(rx->serial_actual[0] ? rx->serial_actual : rx->config.serial);
+        int32_t cached = tuner_cache_lookup(rx->serial_actual[0] ? rx->serial_actual : rx->config.serial);
         if (cached >= 0) {
             tname = tuner_name_sdr((sdr_tuner_type_t)cached);
             trange = tuner_freq_range_sdr((sdr_tuner_type_t)cached);
@@ -3432,7 +3433,7 @@ static void api_get_receivers(int fd)
 
         // Emit supported gain values in dB
         if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
-            for (int g = 0; g < rx->rtl.gain_steps; g++) {
+            for (int32_t g = 0; g < rx->rtl.gain_steps; g++) {
                 if (g > 0) buf += ',';
                 buf += sfmt("%.1f", rx->rtl.gains[g] / 10.0);
             }
@@ -3445,7 +3446,7 @@ static void api_get_receivers(int fd)
     buf += sfmt("],\"count\":%d,\"max\":%d,\"backends_available\":%d}",
                 SdrManager.count, MAX_SDR_RECEIVERS, sdrBackendAvailable());
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 static void rx_set_freq_for_role(rx_config_t *cfg)
@@ -3468,11 +3469,11 @@ static void rx_set_freq_for_role(rx_config_t *cfg)
 
 // ============================= API: GET /api/stats/quick =================
 // Returns a quick snapshot of demod counters + per-receiver IQ noise for auto-gain sweep.
-static void api_get_stats_quick(int fd)
+static void api_get_stats_quick(int32_t fd)
 {
     // Sum alltime + current for monotonically-increasing totals
     uint32_t demod_total = 0;
-    for (int i = 0; i <= MODES_MAX_BITERRORS; i++) {
+    for (int32_t i = 0; i <= MODES_MAX_BITERRORS; i++) {
         demod_total += Modes.stats_alltime.demod_accepted[i];
         demod_total += Modes.stats_current.demod_accepted[i];
     }
@@ -3485,7 +3486,7 @@ static void api_get_stats_quick(int fd)
     p += snprintf(p, (size_t)(end - p),
         "{\"demod_total\":%u,\"strong_signals\":%u,\"rx_noise\":[", demod_total, strong);
 
-    for (int i = 0; i < SdrManager.count && p < end - 128; i++) {
+    for (int32_t i = 0; i < SdrManager.count && p < end - 128; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         uint64_t sum = __atomic_load_n(&rx->ag_iq_sum, __ATOMIC_RELAXED);
         uint64_t cnt = __atomic_load_n(&rx->ag_iq_count, __ATOMIC_RELAXED);
@@ -3496,12 +3497,12 @@ static void api_get_stats_quick(int fd)
     }
 
     p += snprintf(p, (size_t)(end - p), "]}");
-    http_send_json(fd, buf, (int)(p - buf));
+    http_send_json(fd, buf, (int32_t)(p - buf));
 }
 
 // ============================= API: GET /api/system-stats =================
 // Reads /proc to provide native system and process statistics.
-static void api_get_system_stats(int fd)
+static void api_get_system_stats(int32_t fd)
 {
     char buf[8192];
     char *p = buf;
@@ -3513,7 +3514,7 @@ static void api_get_system_stats(int fd)
 
     // --- Process memory from /proc/self/status ---
     uint64_t vm_rss = 0, vm_size = 0, vm_peak = 0;
-    int threads = 0;
+    int32_t threads = 0;
     fp = fopen("/proc/self/status", "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
@@ -3544,8 +3545,8 @@ static void api_get_system_stats(int fd)
         ",\"mem_available_kb\":%" PRIu64 "}", mem_total, mem_free, mem_available);
 
     // --- Process CPU from /proc/self/stat ---
-    unsigned long proc_utime = 0, proc_stime = 0;
-    long clock_ticks = sysconf(_SC_CLK_TCK);
+    uint64_t proc_utime = 0, proc_stime = 0;
+    int64_t clock_ticks = sysconf(_SC_CLK_TCK);
     fp = fopen("/proc/self/stat", "r");
     if (fp) {
         // Fields: pid (comm) state ppid ... field14=utime field15=stime
@@ -3556,7 +3557,7 @@ static void api_get_system_stats(int fd)
             if (cp) {
                 cp += 2; // skip ") "
                 // Now skip 11 fields (state, ppid, pgrp, session, tty_nr, tpgid, flags, minflt, cminflt, majflt, cmajflt)
-                for (int f = 0; f < 11 && *cp; f++) {
+                for (int32_t f = 0; f < 11 && *cp; f++) {
                     while (*cp && *cp != ' ') cp++;
                     while (*cp == ' ') cp++;
                 }
@@ -3574,7 +3575,7 @@ static void api_get_system_stats(int fd)
     // --- Per-thread CPU from /proc/self/task/ ---
     p += snprintf(p, (size_t)(end - p), ",\"threads_detail\":[");
     DIR *taskdir = opendir("/proc/self/task");
-    int first_thread = 1;
+    int32_t first_thread = 1;
     if (taskdir) {
         struct dirent *de;
         while ((de = readdir(taskdir)) != NULL && p < end - 256) {
@@ -3594,7 +3595,7 @@ static void api_get_system_stats(int fd)
             }
 
             // Read thread CPU
-            unsigned long t_utime = 0, t_stime = 0;
+            uint64_t t_utime = 0, t_stime = 0;
             snprintf(tpath, sizeof(tpath), "/proc/self/task/%s/stat", de->d_name);
             fp = fopen(tpath, "r");
             if (fp) {
@@ -3603,7 +3604,7 @@ static void api_get_system_stats(int fd)
                     char *cp = strrchr(tbuf, ')');
                     if (cp) {
                         cp += 2;
-                        for (int f = 0; f < 11 && *cp; f++) {
+                        for (int32_t f = 0; f < 11 && *cp; f++) {
                             while (*cp && *cp != ' ') cp++;
                             while (*cp == ' ') cp++;
                         }
@@ -3634,15 +3635,15 @@ static void api_get_system_stats(int fd)
     p += snprintf(p, (size_t)(end - p), ",\"uptime_s\":%.1f", uptime);
 
     p += snprintf(p, (size_t)(end - p), "}");
-    http_send_json(fd, buf, (int)(p - buf));
+    http_send_json(fd, buf, (int32_t)(p - buf));
 }
 
 // ============================= API: GET /api/decoder-stats ================
-static void api_get_decoder_stats(int fd)
+static void api_get_decoder_stats(int32_t fd)
 {
     char *json = rxGetDecoderStatsJSON();
     if (json) {
-        http_send_json(fd, json, (int)strlen(json));
+        http_send_json(fd, json, (int32_t)strlen(json));
         free(json);
     } else {
         http_send_json(fd, "{}", 2);
@@ -3652,10 +3653,10 @@ static void api_get_decoder_stats(int fd)
 // ============================= API: POST /api/receivers/setgain ==========
 // Fast gain change on a running receiver (no stop/restart).
 // Body: {"serial":"00000101","step":15}
-static void api_post_setgain(int fd, const char *body)
+static void api_post_setgain(int32_t fd, const char *body)
 {
     char serial[64] = {0};
-    int step = -1;
+    int32_t step = -1;
 
     const char *p;
     if ((p = strstr(body, "\"serial\"")) != NULL) {
@@ -3673,7 +3674,7 @@ static void api_post_setgain(int fd, const char *body)
         return;
     }
 
-    int idx = sdrManagerFindBySerial(serial);
+    int32_t idx = sdrManagerFindBySerial(serial);
     if (idx < 0) {
         http_send(fd, 404, "application/json",
             "{\"ok\":false,\"error\":\"receiver not found\"}", 40);
@@ -3692,7 +3693,7 @@ static void api_post_setgain(int fd, const char *body)
         return;
     }
 
-    int result = rxSetGain(rx, step);
+    int32_t result = rxSetGain(rx, step);
     if (result < 0) {
         http_send(fd, 500, "application/json",
             "{\"ok\":false,\"error\":\"gain change failed\"}", 41);
@@ -3703,14 +3704,14 @@ static void api_post_setgain(int fd, const char *body)
     rx->config.gain = gain_db;
 
     char buf[256];
-    int len = snprintf(buf, sizeof(buf),
+    int32_t len = snprintf(buf, sizeof(buf),
         "{\"ok\":true,\"gain_db\":%.1f,\"step\":%d}", gain_db, result);
     http_send_json(fd, buf, len);
 }
 
 // ============================= Toggle (start/stop) a receiver ==============
 
-static void api_post_receiver_toggle(int fd, const char *body)
+static void api_post_receiver_toggle(int32_t fd, const char *body)
 {
     // Body: {"serial":"00000101","action":"start"} or {"action":"stop"}
     char serial[64] = {0};
@@ -3734,10 +3735,10 @@ static void api_post_receiver_toggle(int fd, const char *body)
         return;
     }
 
-    int idx = sdrManagerFindBySerial(serial);
+    int32_t idx = sdrManagerFindBySerial(serial);
     if (idx < 0) {
         char resp[128];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"ok\":false,\"message\":\"Receiver %s not found\"}", serial);
         http_send(fd, 404, "application/json", resp, rlen);
         return;
@@ -3745,7 +3746,7 @@ static void api_post_receiver_toggle(int fd, const char *body)
 
     sdr_receiver_t *rx = &SdrManager.receivers[idx];
     char resp[256];
-    int rlen;
+    int32_t rlen;
 
     std::string_view action_sv(action);
     if (action_sv == "stop") {
@@ -3791,7 +3792,7 @@ static void api_post_receiver_toggle(int fd, const char *body)
     }
 }
 
-static void api_post_receiver_assign(int fd, const char *body)
+static void api_post_receiver_assign(int32_t fd, const char *body)
 {
     // Body format: {"serial":"00000101","role":"adsb","gain":40.0}
     // or           {"serial":"00000101","role":"none"} to unassign
@@ -3799,7 +3800,7 @@ static void api_post_receiver_assign(int fd, const char *body)
     char serial[64] = {0};
     char role_str[16] = {0};
     float gain = MODES_DEFAULT_GAIN;
-    int ppm = 0;
+    int32_t ppm = 0;
 
     // Simple JSON parsing (no library)
     const char *p;
@@ -3822,7 +3823,7 @@ static void api_post_receiver_assign(int fd, const char *body)
     sdr_backend_type_t backend = sdrBackendParse("");  // default: sdrgg if available
     if ((p = strstr(body, "\"backend\"")) != NULL) {
         p = strchr(p + 9, '"'); if (p) { p++; const char *e = strchr(p, '"');
-        if (e) { char bstr[16] = {0}; int blen = (int)(e - p); if (blen > 15) blen = 15;
+        if (e) { char bstr[16] = {0}; int32_t blen = (int32_t)(e - p); if (blen > 15) blen = 15;
         memcpy(bstr, p, blen); backend = sdrBackendParse(bstr); }
         }
     }
@@ -3846,7 +3847,7 @@ static void api_post_receiver_assign(int fd, const char *body)
     else if (!strcasecmp(role_str, "sarsat")) role = SDR_ROLE_SARSAT;
 
     // Check if this serial is already managed
-    int idx = sdrManagerFindBySerial(serial);
+    int32_t idx = sdrManagerFindBySerial(serial);
 
     if (role == SDR_ROLE_NONE) {
         // Unassign: remove SdrManager receiver if it exists
@@ -3859,7 +3860,7 @@ static void api_post_receiver_assign(int fd, const char *body)
 
         sdrManagerSave();
         char resp[256];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"ok\":true,\"message\":\"Receiver %s removed\"}", serial);
         http_send(fd, 200, "application/json", resp, rlen);
         return;
@@ -3914,7 +3915,7 @@ static void api_post_receiver_assign(int fd, const char *body)
 
         sdrManagerSave();
         char resp[256];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"ok\":%s,\"message\":\"Receiver %s reassigned to %s\",\"state\":\"%s\"}",
             ok ? "true" : "false", serial, sdrRoleName(role), rxStateName(rx->state));
         http_send(fd, 200, "application/json", resp, rlen);
@@ -3945,7 +3946,7 @@ static void api_post_receiver_assign(int fd, const char *body)
 
         sdrManagerSave();
         char resp[256];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"ok\":%s,\"message\":\"Receiver %s assigned to %s\",\"state\":\"%s\"}",
             ok ? "true" : "false", serial, sdrRoleName(role), rxStateName(rx->state));
         http_send(fd, ok ? 200 : 500, "application/json", resp, rlen);
@@ -3954,7 +3955,7 @@ static void api_post_receiver_assign(int fd, const char *body)
 
 // ============================= API: GET /api/decoders =====================
 
-static void api_get_decoders(int fd)
+static void api_get_decoders(int32_t fd)
 {
     std::string buf;
     buf.reserve(8192);
@@ -4042,14 +4043,14 @@ static void api_get_decoders(int fd)
     // ACARS decoder config
     buf += sfmt("\"acars\":{\"enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
         DecoderConfigs.acars.enabled ? "true" : "false", DecoderConfigs.acars.center_freq);
-    for (int i = 0; i < DecoderConfigs.acars.num_channels; i++)
+    for (int32_t i = 0; i < DecoderConfigs.acars.num_channels; i++)
         buf += sfmt("%s%.0f", i ? "," : "", DecoderConfigs.acars.channel_freqs[i]);
     buf += "]},\n";
 
     // VDL2 decoder config
     buf += sfmt("\"vdl2\":{\"enabled\":%s,\"center_freq\":%.0f,\"squelch_level\":%.1f,\"channels\":[",
         DecoderConfigs.vdl2.enabled ? "true" : "false", DecoderConfigs.vdl2.center_freq, DecoderConfigs.vdl2.squelch_level);
-    for (int i = 0; i < DecoderConfigs.vdl2.num_channels; i++)
+    for (int32_t i = 0; i < DecoderConfigs.vdl2.num_channels; i++)
         buf += sfmt("%s%.0f", i ? "," : "", DecoderConfigs.vdl2.channel_freqs[i]);
     buf += "]},\n";
 
@@ -4070,7 +4071,7 @@ static void api_get_decoders(int fd)
         DecoderConfigs.pocsag.enabled ? "true" : "false",
         DecoderConfigs.pocsag.output_enabled ? "true" : "false",
         DecoderConfigs.pocsag.center_freq);
-    for (int i = 0; i < DecoderConfigs.pocsag.num_channels; i++)
+    for (int32_t i = 0; i < DecoderConfigs.pocsag.num_channels; i++)
         buf += sfmt("%s%.0f", i ? "," : "", DecoderConfigs.pocsag.channel_freqs[i]);
     buf += "]},\n";
 
@@ -4113,7 +4114,7 @@ static void api_get_decoders(int fd)
     // Dongles (from SDR Manager)
     buf += "\"dongles\":[\n";
     pthread_mutex_lock(&SdrManager.lock);
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         const char *role_str = "none";
         switch (rx->config.role) {
@@ -4138,12 +4139,12 @@ static void api_get_decoders(int fd)
     pthread_mutex_unlock(&SdrManager.lock);
     buf += "\n]\n}\n";
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= API: POST /api/decoders ====================
 
-static void api_post_decoders(int fd, const char *body)
+static void api_post_decoders(int32_t fd, const char *body)
 {
     if (!body || !is_valid_json_object(body, 32768)) {
         http_send(fd, 400, "application/json", "{\"error\":\"invalid JSON\"}", 23);
@@ -4174,7 +4175,7 @@ static void api_post_decoders(int fd, const char *body)
     http_send(fd, 200, "application/json", "{\"ok\":true}", 11);
 }
 
-static void api_get_devices(int fd)
+static void api_get_devices(int32_t fd)
 {
     std::string buf;
     buf.reserve(4096);
@@ -4182,8 +4183,8 @@ static void api_get_devices(int fd)
     buf += "{\"sdr_devices\":[";
 
     sdr_dev_info_t all_devs[MAX_SDR_RECEIVERS];
-    int count = sdrBackendEnumerateAll(all_devs, MAX_SDR_RECEIVERS);
-    for (int i = 0; i < count; i++) {
+    int32_t count = sdrBackendEnumerateAll(all_devs, MAX_SDR_RECEIVERS);
+    for (int32_t i = 0; i < count; i++) {
         const char *serial = all_devs[i].serial;
         const char *vendor = all_devs[i].manufacturer;
         const char *product = all_devs[i].product;
@@ -4192,10 +4193,10 @@ static void api_get_devices(int fd)
         // Check SdrManager for this device
         const char *role = "none";
         const char *state = "idle";
-        int tuner_type = -1;
+        int32_t tuner_type = -1;
         sdr_tuner_type_t sdr_tuner = SDR_TUNER_UNKNOWN;
 
-        for (int r = 0; r < SdrManager.count; r++) {
+        for (int32_t r = 0; r < SdrManager.count; r++) {
             sdr_receiver_t *rx = &SdrManager.receivers[r];
             if (rx->state >= RX_STATE_OPEN &&
                 (!strcmp(rx->serial_actual, serial) || !strcmp(rx->config.serial, serial))) {
@@ -4234,8 +4235,8 @@ static void api_get_devices(int fd)
 
     // Append virtual (file) devices from SdrManager
     {
-        int need_comma = (count > 0);
-        for (int r = 0; r < SdrManager.count; r++) {
+        int32_t need_comma = (count > 0);
+        for (int32_t r = 0; r < SdrManager.count; r++) {
             sdr_receiver_t *rx = &SdrManager.receivers[r];
             if (rx->config.ifile_path[0] == '\0') continue;  // skip real SDR
             if (need_comma) buf += ',';
@@ -4258,10 +4259,10 @@ static void api_get_devices(int fd)
     FILE *fp = popen("lsusb 2>/dev/null", "r");
     if (fp) {
         char line[512];
-        int first = 1;
+        int32_t first = 1;
         while (fgets(line, sizeof(line), fp)) {
             // Strip newline
-            int llen = (int)strlen(line);
+            int32_t llen = (int32_t)strlen(line);
             while (llen > 0 && (line[llen-1] == '\n' || line[llen-1] == '\r'))
                 line[--llen] = '\0';
             // Skip root hubs
@@ -4278,12 +4279,12 @@ static void api_get_devices(int fd)
         "],\"rx_count\":%d,\"rx_max\":%d}",
         SdrManager.count, MAX_SDR_RECEIVERS);
 
-    http_send_json(fd, buf.c_str(), (int)buf.size());
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
 }
 
 // ============================= GSM Cells Page ============================
 
-static void serve_gsm_page(int fd)
+static void serve_gsm_page(int32_t fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -4459,10 +4460,10 @@ static void serve_gsm_page(int fd)
         "}).catch(()=>{});"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
-    http_send(fd, 200, "text/html", html, (int)strlen(html));
+    http_send(fd, 200, "text/html", html, (int32_t)strlen(html));
 }
 
-static void serve_lte_page(int fd)
+static void serve_lte_page(int32_t fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -4645,10 +4646,10 @@ static void serve_lte_page(int fd)
         "}).catch(()=>{});"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
-    http_send(fd, 200, "text/html", html, (int)strlen(html));
+    http_send(fd, 200, "text/html", html, (int32_t)strlen(html));
 }
 
-static void serve_iot868_page(int fd)
+static void serve_iot868_page(int32_t fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -4826,10 +4827,10 @@ static void serve_iot868_page(int fd)
         "}).catch(()=>{});"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
-    http_send(fd, 200, "text/html", html, (int)strlen(html));
+    http_send(fd, 200, "text/html", html, (int32_t)strlen(html));
 }
 
-static void serve_fanet_page(int fd)
+static void serve_fanet_page(int32_t fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -5059,10 +5060,10 @@ static void serve_fanet_page(int fd)
         "}).catch(()=>{});"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
-    http_send(fd, 200, "text/html", html, (int)strlen(html));
+    http_send(fd, 200, "text/html", html, (int32_t)strlen(html));
 }
 
-static void serve_devices_page(int fd)
+static void serve_devices_page(int32_t fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -5464,12 +5465,12 @@ static void serve_devices_page(int fd)
         "load();"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
-    http_send(fd, 200, "text/html; charset=utf-8", html, (int)strlen(html));
+    http_send(fd, 200, "text/html; charset=utf-8", html, (int32_t)strlen(html));
 }
 
 // ============================= SDR Diagnostics Page ============================
 
-static void serve_diagnostics_page(int fd)
+static void serve_diagnostics_page(int32_t fd)
 {
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -5787,12 +5788,12 @@ static void serve_diagnostics_page(int fd)
         "}).catch(function(){});"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
-    http_send(fd, 200, "text/html; charset=utf-8", html, (int)strlen(html));
+    http_send(fd, 200, "text/html; charset=utf-8", html, (int32_t)strlen(html));
 }
 
 // ============================= GSM PPM Calibration API ============================
 
-static void api_post_calibrate_ppm(int fd, const char *body)
+static void api_post_calibrate_ppm(int32_t fd, const char *body)
 {
     char serial[64] = {0};
     char backend_str[32] = {0};
@@ -5813,24 +5814,24 @@ static void api_post_calibrate_ppm(int fd, const char *body)
 
     if (!serial[0]) {
         char resp[256];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"error\":\"missing serial\"}");
         http_send(fd, 400, "application/json", resp, rlen);
         return;
     }
 
     // Find the receiver in SdrManager
-    int idx = sdrManagerFindBySerial(serial);
+    int32_t idx = sdrManagerFindBySerial(serial);
     if (idx < 0) {
         char resp[256];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"error\":\"No receiver with serial %s\"}", serial);
         http_send(fd, 404, "application/json", resp, rlen);
         return;
     }
 
     sdr_receiver_t *rx = &SdrManager.receivers[idx];
-    int current_ppm = rx->config.ppm_error;
+    int32_t current_ppm = rx->config.ppm_error;
     float gain = rx->config.gain;
     sdr_role_t role = rx->config.role;
 
@@ -5853,8 +5854,8 @@ static void api_post_calibrate_ppm(int fd, const char *body)
     gsm_cal_result_t cal = gsm_calibrate(serial, current_ppm, gain, cal_backend);
 
     if (cal.success) {
-        int new_ppm = (int)round(cal.corrected_ppm);
-        int apply = (cal.rms < 5.0f);  // only auto-apply if RMS < 5 ppm
+        int32_t new_ppm = (int32_t)round(cal.corrected_ppm);
+        int32_t apply = (cal.rms < 5.0f);  // only auto-apply if RMS < 5 ppm
 
         if (apply) {
             rx->config.ppm_error = new_ppm;
@@ -5875,7 +5876,7 @@ static void api_post_calibrate_ppm(int fd, const char *body)
         if (apply) sdrManagerSave();
 
         char resp[512];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"ok\":true,\"ppm\":%d,\"old_ppm\":%d,"
             "\"applied\":%s,\"backend\":\"%s\","
             "\"offset\":%.3f,\"rms\":%.3f,\"samples\":%d%s%s%s}",
@@ -5899,7 +5900,7 @@ static void api_post_calibrate_ppm(int fd, const char *body)
         }
 
         char resp[512];
-        int rlen = snprintf(resp, sizeof(resp),
+        int32_t rlen = snprintf(resp, sizeof(resp),
             "{\"ok\":false,\"backend\":\"%s\",\"error\":\"%s\"}",
             backend_str[0] ? backend_str : "rtlsdr", cal.error);
         http_send(fd, 200, "application/json", resp, rlen);
@@ -5908,7 +5909,7 @@ static void api_post_calibrate_ppm(int fd, const char *body)
 
 // ============================= Request Router ============================
 
-static void handle_request(int fd, const char *request, int reqlen)
+static void handle_request(int32_t fd, const char *request, int32_t reqlen)
 {
     (void)reqlen;
 
@@ -6064,11 +6065,11 @@ static void *panel_thread_entry(void *arg)
         fds[0].fd = PanelState.listen_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
-        int n_ws = 0;
+        int32_t n_ws = 0;
 
         pthread_mutex_lock(&PanelState.ws_mutex);
         n_ws = PanelState.ws_count;
-        for (int i = 0; i < n_ws; i++) {
+        for (int32_t i = 0; i < n_ws; i++) {
             fds[1 + i].fd = PanelState.ws_fds[i];
             fds[1 + i].events = POLLIN;
             fds[1 + i].revents = 0;
@@ -6076,7 +6077,7 @@ static void *panel_thread_entry(void *arg)
         pthread_mutex_unlock(&PanelState.ws_mutex);
 
         // Waterfall WebSocket in the poll set
-        int wf_poll_idx = -1;
+        int32_t wf_poll_idx = -1;
         if (WF.ws_fd >= 0) {
             wf_poll_idx = 1 + n_ws;
             fds[wf_poll_idx].fd = WF.ws_fd;
@@ -6084,8 +6085,8 @@ static void *panel_thread_entry(void *arg)
             fds[wf_poll_idx].revents = 0;
         }
 
-        int poll_count = 1 + n_ws + (wf_poll_idx >= 0 ? 1 : 0);
-        int poll_timeout = (WF.ws_fd >= 0 && WF.rx_id >= 0) ? 50 : 1000;
+        int32_t poll_count = 1 + n_ws + (wf_poll_idx >= 0 ? 1 : 0);
+        int32_t poll_timeout = (WF.ws_fd >= 0 && WF.rx_id >= 0) ? 50 : 1000;
         int pret = poll(fds, poll_count, poll_timeout);
         if (pret <= 0) {
             statsHistoryTakeSnapshot();
@@ -6105,7 +6106,7 @@ static void *panel_thread_entry(void *arg)
         if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();
 
         // Handle WebSocket client events (close, ping, disconnect)
-        for (int i = 0; i < n_ws; i++) {
+        for (int32_t i = 0; i < n_ws; i++) {
             if (fds[1 + i].revents & POLLNVAL) {
                 continue; // FD already closed by broadcast thread
             } else if (fds[1 + i].revents & (POLLHUP | POLLERR)) {
@@ -6146,7 +6147,7 @@ static void *panel_thread_entry(void *arg)
         // Read request (up to 64KB for POST bodies)
         std::string reqbuf(65536, '\0');
         {
-            int total = 0;
+            int32_t total = 0;
             while (total < 65535) {
                 int n = (int)read(client_fd, reqbuf.data() + total, (size_t)(65535 - total));
                 if (n <= 0) break;
@@ -6159,11 +6160,11 @@ static void *panel_thread_entry(void *arg)
                     // For POST, check Content-Length
                     const char *cl = strstr(reqbuf.c_str(), "Content-Length:");
                     if (cl) {
-                        long content_len = strtol(cl + 15, NULL, 10);
+                        int64_t content_len = strtol(cl + 15, NULL, 10);
                         if (content_len < 0 || content_len > 65000) break;  // reject absurd sizes
                         const char *body_start = strstr(reqbuf.c_str(), "\r\n\r\n") + 4;
-                        int header_len = (int)(body_start - reqbuf.c_str());
-                        if (total >= header_len + (int)content_len) break;
+                        int32_t header_len = (int32_t)(body_start - reqbuf.c_str());
+                        if (total >= header_len + (int32_t)content_len) break;
                     } else {
                         break;
                     }
@@ -6222,7 +6223,7 @@ void panelStart(void)
     setsockopt(PanelState.listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     // Dual-stack: allow IPv4 connections on IPv6 socket
-    int v6only = 0;
+    int32_t v6only = 0;
     setsockopt(PanelState.listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 
     struct sockaddr_in6 addr;
@@ -6288,7 +6289,7 @@ void panelStop(void)
 
     // Close all WebSocket clients
     pthread_mutex_lock(&PanelState.ws_mutex);
-    for (int i = 0; i < PanelState.ws_count; i++)
+    for (int32_t i = 0; i < PanelState.ws_count; i++)
         close(PanelState.ws_fds[i]);
     PanelState.ws_count = 0;
     pthread_mutex_unlock(&PanelState.ws_mutex);

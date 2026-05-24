@@ -18,13 +18,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "adaptive.h"
 
 //
 // gain limits
 //
-static int adaptive_gain_min;
-static int adaptive_gain_max;
+static int32_t adaptive_gain_min;
+static int32_t adaptive_gain_max;
 
 // gain steps relative to current gain
 static float adaptive_gain_up_db;
@@ -110,21 +111,21 @@ static double adaptive_range_smoothed;                 // smoothed noise floor e
 static enum { RANGE_SCAN_IDLE, RANGE_SCAN_UP, RANGE_SCAN_DOWN, RANGE_RESCAN_UP, RANGE_RESCAN_DOWN } adaptive_range_state = RANGE_SCAN_UP;
 static uint32_t adaptive_range_change_timer;           // countdown inhibiting control after changing gain
 static uint32_t adaptive_range_rescan_timer;           // countdown to next upwards gain reprobe
-static int adaptive_range_gain_limit;                  // probed maximum gain step with acceptable dynamic range
+static int32_t adaptive_range_gain_limit;                  // probed maximum gain step with acceptable dynamic range
 
 static void adaptive_range_update(uint16_t *buf, uint32_t length);
 static void adaptive_range_end_of_block();
 
 // Try to change the SDR gain to 'step' and tell the user about it,
 // with 'why' as the reason to show. Return true if the gain actually changed.
-static bool adaptive_set_gain(int step, const char *why)
+static bool adaptive_set_gain(int32_t step, const char *why)
 {
     if (step < adaptive_gain_min)
         step = adaptive_gain_min;
     if (step > adaptive_gain_max)
         step = adaptive_gain_max;
 
-    int current_gain = sdrGetGain();
+    int32_t current_gain = sdrGetGain();
     if (current_gain == step)
         return false;
 
@@ -133,7 +134,7 @@ static bool adaptive_set_gain(int step, const char *why)
     if (PanelState.enabled)
         panelLog("adaptive: gain %.1f→%.1fdB: %s", sdrGetGainDb(current_gain), sdrGetGainDb(step), why);
 
-    int new_gain = sdrSetGain(step);
+    int32_t new_gain = sdrSetGain(step);
     bool changed = (current_gain != new_gain);
     if (changed)
         ++Modes.stats_current.adaptive_gain_changes;
@@ -144,7 +145,7 @@ static bool adaptive_set_gain(int step, const char *why)
 // (usually after adaptive_set_gain returns true, but also called during init)
 static void adaptive_gain_changed()
 {
-    int new_gain = sdrGetGain();
+    int32_t new_gain = sdrGetGain();
     adaptive_gain_up_db = sdrGetGainDb(new_gain + 1) - sdrGetGainDb(new_gain);
     adaptive_gain_down_db = sdrGetGainDb(new_gain) - sdrGetGainDb(new_gain - 1);
     
@@ -160,7 +161,7 @@ static void adaptive_gain_changed()
 // External init entry point
 void adaptive_init()
 {
-    int maxgain = sdrGetMaxGain();
+    int32_t maxgain = sdrGetMaxGain();
 
     // If the SDR doesn't support gain control, disable ourselves
     if (maxgain < 0) {
@@ -472,7 +473,7 @@ static void adaptive_end_of_block()
     Modes.stats_current.adaptive_valid = true;
     Modes.stats_current.adaptive_range_gain_limit = adaptive_range_gain_limit;
 
-    int current = sdrGetGain();
+    int32_t current = sdrGetGain();
     if (current >= 0)
         ++Modes.stats_current.adaptive_gain_seconds[current < STATS_GAIN_COUNT ? current : STATS_GAIN_COUNT-1];
 }
@@ -490,7 +491,7 @@ static void adaptive_control_update()
     const char *gain_down_reason = NULL;
     bool gain_not_up = false;
 
-    int current_gain = sdrGetGain();
+    int32_t current_gain = sdrGetGain();
 
     if (adaptive_burst_change_timer)
         --adaptive_burst_change_timer;

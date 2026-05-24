@@ -40,41 +40,41 @@ extern const uint8_t OGNTP_SYNCWORD[OGNTP_SYNCWORD_SIZE];
 
 typedef struct {
     uint32_t addr;          // 24-bit address
-    int      addr_type;     // 0=random, 1=ICAO, 2=FLARM, 3=OGN
-    int      version;       // 1=OGN1, 2=OGN2
-    int      relay;         // relay count (OGN1) or flag (OGN2)
-    int      nonpos;        // non-zero = non-position packet
-    int      encrypted;     // non-zero = encrypted/custom payload
-    int      emergency;     // non-zero = emergency flag set
-    int      other_system;  // OGN2 NonOGN bit, zero for OGN1
-    int      report_type;   // non-position report type, -1 for position packets
-    int      position_valid;
-    int      status_valid;
-    int      aircraft_type; // 0-15 (same numbering as FLARM aircraft types)
-    int      stealth;       // non-zero = stealth flag set
+    int32_t      addr_type;     // 0=random, 1=ICAO, 2=FLARM, 3=OGN
+    int32_t      version;       // 1=OGN1, 2=OGN2
+    int32_t      relay;         // relay count (OGN1) or flag (OGN2)
+    int32_t      nonpos;        // non-zero = non-position packet
+    int32_t      encrypted;     // non-zero = encrypted/custom payload
+    int32_t      emergency;     // non-zero = emergency flag set
+    int32_t      other_system;  // OGN2 NonOGN bit, zero for OGN1
+    int32_t      report_type;   // non-position report type, -1 for position packets
+    int32_t      position_valid;
+    int32_t      status_valid;
+    int32_t      aircraft_type; // 0-15 (same numbering as FLARM aircraft types)
+    int32_t      stealth;       // non-zero = stealth flag set
     double   latitude;      // decimal degrees
     double   longitude;     // decimal degrees
-    int      altitude;      // meters MSL
+    int32_t      altitude;      // meters MSL
     float    speed;         // m/s ground speed
     float    course;        // degrees (0-359.9)
     float    vs;            // m/s vertical speed (positive = climbing)
     float    turnrate;      // deg/s (0 if unknown)
-    int      fix_quality;   // 0=none, 1=GPS, 2=DGPS
+    int32_t      fix_quality;   // 0=none, 1=GPS, 2=DGPS
     struct {
-        int   time_seconds;
-        int   fix_quality;
-        int   hardware;
-        int   firmware;
-        int   satellites;
-        int   tx_power_dbm;
-        int   pulse_bpm;
-        int   oxygen_percent;
-        int   sat_snr_db;
-        int   rx_rate_per_min;
-        int   audio_noise_db;
-        int   has_temperature;
-        int   has_humidity;
-        int   has_pressure;
+        int32_t   time_seconds;
+        int32_t   fix_quality;
+        int32_t   hardware;
+        int32_t   firmware;
+        int32_t   satellites;
+        int32_t   tx_power_dbm;
+        int32_t   pulse_bpm;
+        int32_t   oxygen_percent;
+        int32_t   sat_snr_db;
+        int32_t   rx_rate_per_min;
+        int32_t   audio_noise_db;
+        int32_t   has_temperature;
+        int32_t   has_humidity;
+        int32_t   has_pressure;
         float radio_noise_dbm;
         float pressure_hpa;
         float voltage_v;
@@ -82,7 +82,7 @@ typedef struct {
         float humidity_percent;
     } status;
     float    signal_level;  // 0-1 relative signal level
-    int      valid;         // non-zero = message is valid and fully decoded
+    int32_t      valid;         // non-zero = message is valid and fully decoded
 } ogntp_message_t;
 
 // ======================== Functions ========================

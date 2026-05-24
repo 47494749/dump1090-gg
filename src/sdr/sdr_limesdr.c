@@ -48,6 +48,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_limesdr.h"
 
 #include <lime/LimeSuite.h>
@@ -63,12 +64,12 @@ static struct {
     float lpfbw;
     float bw;
     lms_info_str_t serial;
-    int bytes_in_sample;
+    int32_t bytes_in_sample;
     iq_convert_fn converter;
     struct converter_state *converter_state;
 } LimeSDR;
 
-static void limesdrLogHandler(int lvl, const char *msg)
+static void limesdrLogHandler(int32_t lvl, const char *msg)
 {
     if (lvl > LimeSDR.verbosity) {
         return;
@@ -130,7 +131,7 @@ void limesdrShowHelp()
 
 bool limesdrHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j + 1 < argc);
 
     if (!strcmp(argv[j], "--limesdr-verbosity") && more) {
@@ -160,7 +161,7 @@ static size_t selectAntenna()
     ssize_t result = -1;
     lms_name_t *names = NULL;
 
-    int numAntennas = LMS_GetAntennaList(LimeSDR.dev, LMS_CH_RX, LimeSDR.stream.channel, NULL);
+    int32_t numAntennas = LMS_GetAntennaList(LimeSDR.dev, LMS_CH_RX, LimeSDR.stream.channel, NULL);
     if (numAntennas <= 0) {
         limesdrLogHandler(LMS_LOG_ERROR, "unable to get antenna list");
         goto done;
@@ -178,7 +179,7 @@ static size_t selectAntenna()
         goto done;
     }
 
-    for (int i = 0; i < numAntennas; ++i) {
+    for (int32_t i = 0; i < numAntennas; ++i) {
         lms_range_t range;
         if (LMS_GetAntennaBW(LimeSDR.dev, LMS_CH_RX, LimeSDR.stream.channel, i, &range) < 0) {
             fprintf(stderr, "limesdr: unable to get antenna bandwidth for antenna %d (%s)\n", i, names[i]);
@@ -207,7 +208,7 @@ bool limesdrOpen(void)
 {
     const size_t devCountMax = 8;
     lms_info_str_t list[devCountMax];
-    const int devCount = LMS_GetDeviceList(list);
+    const int32_t devCount = LMS_GetDeviceList(list);
     if (devCount < 0) {
         limesdrLogHandler(LMS_LOG_ERROR, "unable to get a number of connected devices");
         goto error;
@@ -219,14 +220,14 @@ bool limesdrOpen(void)
     }
 
     limesdrLogHandler(LMS_LOG_INFO, "connected devices:");
-    for (int i = 0; i < devCount; ++i) {
+    for (int32_t i = 0; i < devCount; ++i) {
         limesdrLogHandler(LMS_LOG_INFO, list[i]);
     }
 
     bool isDevMatched = !strlen(LimeSDR.serial);
-    int devIndex = 0;
+    int32_t devIndex = 0;
     const char *serialTag = "serial=";
-    for (int i = 0; i < devCount && !isDevMatched; ++i) {
+    for (int32_t i = 0; i < devCount && !isDevMatched; ++i) {
         const char *serial = strstr(list[i], serialTag);
         if (serial) {
             if (strstr(serial + strlen(serialTag), LimeSDR.serial)) {
@@ -336,7 +337,7 @@ bool limesdrOpen(void)
 
 static void limesdrCallback(uint8_t *buf, uint32_t len, void *ctx)
 {
-    static int dropped = 0;
+    static int32_t dropped = 0;
     static uint64_t sampleCounter = 0;
 
     MODES_NOTUSED(ctx);
@@ -401,7 +402,7 @@ void limesdrRun()
     LMS_StartStream(&LimeSDR.stream);
 
     while (!Modes.exit) {
-        int sampleCnt = LMS_RecvStream(&LimeSDR.stream, buffer, MODES_MAG_BUF_SAMPLES, NULL, 1000);
+        int32_t sampleCnt = LMS_RecvStream(&LimeSDR.stream, buffer, MODES_MAG_BUF_SAMPLES, NULL, 1000);
         if (sampleCnt < 0) {
             limesdrLogHandler(LMS_LOG_ERROR, "LMS_RecvStream failed");
             break;

@@ -9,6 +9,7 @@
 
 #ifndef LTE_TRACKER_H
 #define LTE_TRACKER_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,7 +24,7 @@ void lteTrackerInit(void);
 void lteTrackerUpdate(const lte_cell_info_t *cell);
 
 // Get number of tracked cells
-int lteTrackerCount(void);
+int32_t lteTrackerCount(void);
 
 // Clean up
 void lteTrackerDestroy(void);

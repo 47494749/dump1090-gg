@@ -45,12 +45,12 @@ typedef struct {
     double   vel_v;                  // Vertical velocity (m/s)
     double   temp;                   // Temperature (°C)
     double   humidity;               // Relative humidity (%)
-    int      frame_num;              // Frame counter
+    int32_t      frame_num;              // Frame counter
     float    freq;                   // Receive frequency (MHz)
     float    snr;                    // Signal-to-noise ratio (dB)
     bool     valid_pos;              // Position data valid
-    int      rs_errors;              // RS errors corrected (-1 if uncorrectable)
-    int      satellites;             // GPS satellites used
+    int32_t      rs_errors;              // RS errors corrected (-1 if uncorrectable)
+    int32_t      satellites;             // GPS satellites used
 } sonde_msg_t;
 
 // Callback for decoded messages

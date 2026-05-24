@@ -72,14 +72,14 @@ typedef struct {
     const char  *proto_name; // Human-readable protocol name
     vdl2_addr_t src;
     vdl2_addr_t dst;
-    int      info_len;
+    int32_t      info_len;
     char     reg[8];
     char     flight[7];
     char     label[3];
     const char  *label_description; // Human-readable label description (NULL if unknown)
-    int      label_category;    // ACARS category (acars_category_t values)
+    int32_t      label_category;    // ACARS category (acars_category_t values)
     char     text[VDL2_MAX_MSG_LEN + 1];
-    int      text_len;
+    int32_t      text_len;
 } vdl2_msg_t;
 
 // Callback for decoded messages
@@ -90,7 +90,7 @@ typedef struct {
     double   center_freq;
     double   sample_rate;
     double   channel_freqs[VDL2_MAX_CHANNELS]; // VDL2 channel frequencies (Hz)
-    int      num_channels;     // Number of channels to monitor
+    int32_t      num_channels;     // Number of channels to monitor
     float    squelch_level;    // Squelch level in dBFS
     vdl2_msg_cb callback;
     void    *callback_ctx;

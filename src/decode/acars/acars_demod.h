@@ -38,10 +38,10 @@ typedef enum {
 
 // Decoded ACARS message
 typedef struct {
-    int      channel;              // Channel index
+    int32_t      channel;              // Channel index
     double   freq;                 // Frequency (Hz)
     float    level;                // Signal level (dB)
-    int      errors;               // Parity errors corrected
+    int32_t      errors;               // Parity errors corrected
     char     mode;                 // Mode character
     char     reg[8];               // Aircraft registration
     char     ack;                  // ACK character
@@ -55,7 +55,7 @@ typedef struct {
     char     sublabel[3];          // Optional 2-char sublabel after msgno/flight
     char     mfi[3];               // Optional 2-char message function identifier
     char     text[ACARS_MAX_MSGLEN + 1]; // Message text
-    int      text_len;             // Text length
+    int32_t      text_len;             // Text length
     // Label semantic fields (populated by label lookup)
     const char         *label_description;  // Human-readable label description (NULL if unknown)
     acars_msg_category_t label_category;    // Message category classification
@@ -69,7 +69,7 @@ typedef struct {
     double   center_freq;          // RTL-SDR center frequency (Hz)
     double   sample_rate;          // RTL-SDR sample rate (Hz)
     double   channel_freqs[ACARS_MAX_CHANNELS]; // ACARS channel frequencies (Hz)
-    int      num_channels;         // Number of channels to monitor
+    int32_t      num_channels;         // Number of channels to monitor
     acars_msg_cb callback;         // Message callback
     void    *callback_ctx;         // User context for callback
 } acars_config_t;

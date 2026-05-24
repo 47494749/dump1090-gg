@@ -2,9 +2,10 @@
 // but don't use the dispatcher infrastructure.
 
 #include "dispatcher.h"
+#include <stdint.h>
 #include <stddef.h>
 
-int dispatcher_push_adsb(adsb_queue_handle_t q, const struct modesMessage *mm) {
+int32_t dispatcher_push_adsb(adsb_queue_handle_t q, const struct modesMessage *mm) {
     (void)q; (void)mm;
     return 0;
 }

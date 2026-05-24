@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_hackrf.h"
 
 #include <libhackrf/hackrf.h>
@@ -26,12 +27,12 @@
 static struct {
     hackrf_device *device;
     uint64_t freq;
-    int enable_amp;
-    int enable_ant_pwr;
-    int lna_gain;
-    int vga_gain;
-    int rate;
-    int ppm;
+    int32_t enable_amp;
+    int32_t enable_ant_pwr;
+    int32_t lna_gain;
+    int32_t vga_gain;
+    int32_t rate;
+    int32_t ppm;
 
     iq_convert_fn converter;
     struct converter_state *converter_state;
@@ -53,7 +54,7 @@ void hackRFInitConfig()
 
 bool hackRFHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j+1 < argc);
     if (!strcmp(argv[j], "--lna-gain") && more) {
         HackRF.lna_gain = atoi(argv[++j]);
@@ -132,7 +133,7 @@ bool hackRFOpen()
         HackRF.freq = HackRF.freq * (1000000 - HackRF.ppm)/1000000;
     }
 
-    int status;
+    int32_t status;
 
     status = hackrf_init();
     if (status != 0) {
@@ -210,7 +211,7 @@ bool hackRFOpen()
     return true;
 }
 
-static int handle_hackrf_samples(hackrf_transfer *transfer)
+static int32_t handle_hackrf_samples(hackrf_transfer *transfer)
 {
     static uint32_t dropped = 0;
     static uint64_t sampleCounter = 0;
@@ -281,7 +282,7 @@ void hackRFRun()
         return;
     }
 
-    int status = hackrf_start_rx(HackRF.device, &handle_hackrf_samples, NULL);
+    int32_t status = hackrf_start_rx(HackRF.device, &handle_hackrf_samples, NULL);
 
     if (status != 0) { 
         fprintf(stderr, "hackrf_start_rx failed\n");

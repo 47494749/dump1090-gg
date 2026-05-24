@@ -46,12 +46,12 @@ typedef struct {
     uint32_t addr;          // 24-bit PilotAware address
     double   latitude;      // degrees
     double   longitude;     // degrees
-    int      altitude;      // metres GNSS
+    int32_t      altitude;      // metres GNSS
     float    speed;         // knots ground speed
     float    course;        // degrees true
-    int      aircraft_type; // PAW aircraft type byte
+    int32_t      aircraft_type; // PAW aircraft type byte
     float    signal_level;  // 0-1 relative
-    int      valid;         // non-zero = successfully decoded
+    int32_t      valid;         // non-zero = successfully decoded
 } p3i_message_t;
 
 // ======================== Whitening pattern ========================
@@ -66,10 +66,10 @@ extern const uint8_t p3i_whitening[P3I_PAYLOAD_SIZE];
 bool p3i_decode_packet(const uint8_t *payload, p3i_message_t *msg);
 
 // Apply/remove whitening from payload (XOR with fixed pattern)
-void p3i_dewhiten(uint8_t *data, int len);
+void p3i_dewhiten(uint8_t *data, int32_t len);
 
 // CRC-8 with polynomial 0x107
-uint8_t p3i_crc8(const uint8_t *data, int len);
+uint8_t p3i_crc8(const uint8_t *data, int32_t len);
 
 #ifdef __cplusplus
 }

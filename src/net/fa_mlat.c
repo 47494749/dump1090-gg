@@ -16,6 +16,7 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "fa_mlat.h"
 #include "feeder_thread.h"
 
@@ -35,15 +36,15 @@ struct fa_mlat_state FaMlat;
 // Flushed when buffer exceeds MTU (~1400 bytes) or on heartbeat (500ms).
 
 struct fa_mlat_udp {
-    int      fd;
+    int32_t      fd;
     uint32_t key;
     uint16_t seq;
     uint64_t base_timestamp;
-    int      has_base;
+    int32_t      has_base;
     uint8_t  buf[1500];
-    int      used;
-    int      count;             // total datagrams sent
-    int      mtu;
+    int32_t      used;
+    int32_t      count;             // total datagrams sent
+    int32_t      mtu;
 };
 
 // Pack uint64 big-endian into buffer
@@ -83,7 +84,7 @@ static void udp_init(struct fa_mlat_udp *u) {
     u->mtu = 1400;
 }
 
-static int udp_start(struct fa_mlat_udp *u, const char *host, int port, uint32_t key) {
+static int32_t udp_start(struct fa_mlat_udp *u, const char *host, int32_t port, uint32_t key) {
     struct addrinfo hints, *res;
     char port_str[16];
 
@@ -183,7 +184,7 @@ static inline void pack_icao(uint8_t *p, uint32_t addr) {
 // Send an individual MLAT message via UDP
 // msg is raw Mode S bytes, msglen is 2 (ModeAC), 7 (short), or 14 (long)
 static void udp_send_mlat(struct fa_mlat_udp *u, uint32_t addr,
-                           uint64_t timestamp, const uint8_t *msg, int msglen) {
+                           uint64_t timestamp, const uint8_t *msg, int32_t msglen) {
     if (u->fd < 0) return;
 
     if (!u->has_base)
@@ -283,7 +284,7 @@ static void fa_mlat_send_status(const char *fmt, ...) {
 
     pthread_mutex_lock(&FaMlat.status_mutex);
 
-    int next = (FaMlat.status_head + 1) % FA_MLAT_STATUS_LINES;
+    int32_t next = (FaMlat.status_head + 1) % FA_MLAT_STATUS_LINES;
     if (next != FaMlat.status_tail) {
         snprintf(FaMlat.status_lines[FaMlat.status_head], FA_MLAT_STATUS_LINE_LEN, "%s", line);
         FaMlat.status_head = next;
@@ -296,7 +297,7 @@ static void fa_mlat_send_status(const char *fmt, ...) {
 
 static struct fa_mlat_aircraft *fa_mlat_find_aircraft(uint32_t addr) {
     uint32_t hash = addr & FA_MLAT_HASH_MASK;
-    for (int i = 0; i < 4; i++) {
+    for (int32_t i = 0; i < 4; i++) {
         uint32_t idx = (hash + i) & FA_MLAT_HASH_MASK;
         if (FaMlat.aircraft[idx].addr == addr)
             return &FaMlat.aircraft[idx];
@@ -310,7 +311,7 @@ static struct fa_mlat_aircraft *fa_mlat_get_or_create_aircraft(uint32_t addr, ui
     uint32_t hash = addr & FA_MLAT_HASH_MASK;
     struct fa_mlat_aircraft *empty = NULL;
 
-    for (int i = 0; i < 8; i++) {
+    for (int32_t i = 0; i < 8; i++) {
         uint32_t idx = (hash + i) & FA_MLAT_HASH_MASK;
         if (FaMlat.aircraft[idx].addr == addr)
             return &FaMlat.aircraft[idx];
@@ -327,7 +328,7 @@ static struct fa_mlat_aircraft *fa_mlat_get_or_create_aircraft(uint32_t addr, ui
 }
 
 static void fa_mlat_expire_aircraft(uint64_t now) {
-    for (int i = 0; i < FA_MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < FA_MLAT_HASH_SIZE; i++) {
         if (FaMlat.aircraft[i].addr != 0) {
             if ((now - FaMlat.aircraft[i].last_message_time) > FA_MLAT_EXPIRY_AGE) {
                 FaMlat.aircraft[i].addr = 0;  // mark as empty
@@ -337,8 +338,8 @@ static void fa_mlat_expire_aircraft(uint64_t now) {
 }
 
 
-static int fa_mlat_is_wanted_modeac(uint32_t code) {
-    for (int i = 0; i < FaMlat.wanted_modeac_count; i++) {
+static int32_t fa_mlat_is_wanted_modeac(uint32_t code) {
+    for (int32_t i = 0; i < FaMlat.wanted_modeac_count; i++) {
         if (FaMlat.wanted_modeac[i] == code)
             return 1;
     }
@@ -380,7 +381,7 @@ static void fa_mlat_handle_df17(struct modesMessage *mm, struct fa_mlat_aircraft
     ac->recent_adsb_positions++;
 
     // Store even/odd message for sync pair
-    int msgbytes = mm->msgbits / 8;
+    int32_t msgbytes = mm->msgbits / 8;
     if (msgbytes != 14) return;
 
     if (!mm->cpr_odd) {
@@ -437,7 +438,7 @@ static void fa_mlat_handle_df_misc(struct modesMessage *mm, struct fa_mlat_aircr
     if ((now - ac->last_position_time) < FA_MLAT_POSITION_EXPIRY)
         return;
 
-    int msgbytes = mm->msgbits / 8;
+    int32_t msgbytes = mm->msgbits / 8;
     udp_send_mlat(udp, ac->addr, mm->timestampMsg, mm->verbatim, msgbytes);
 }
 
@@ -464,22 +465,22 @@ static void fa_mlat_send_reports(uint64_t now) {
 
     // Collect all aircraft with >1 message
     uint32_t all_icao[FA_MLAT_HASH_SIZE];
-    int all_count = 0;
-    for (int i = 0; i < FA_MLAT_HASH_SIZE && all_count < FA_MLAT_HASH_SIZE; i++) {
+    int32_t all_count = 0;
+    for (int32_t i = 0; i < FA_MLAT_HASH_SIZE && all_count < FA_MLAT_HASH_SIZE; i++) {
         if (FaMlat.aircraft[i].addr != 0 && FaMlat.aircraft[i].messages > 1)
             all_icao[all_count++] = FaMlat.aircraft[i].addr;
     }
 
     // Build "seen" list (aircraft we know about but haven't reported)
     char seen_buf[FA_MLAT_STATUS_LINE_LEN];
-    int seen_pos = 0;
+    int32_t seen_pos = 0;
     seen_pos = snprintf(seen_buf, sizeof(seen_buf), "type\tmlat_seen\thexids\t");
-    int seen_count = 0;
+    int32_t seen_count = 0;
 
-    for (int i = 0; i < all_count; i++) {
+    for (int32_t i = 0; i < all_count; i++) {
         struct fa_mlat_aircraft *ac = fa_mlat_find_aircraft(all_icao[i]);
         if (ac && !ac->reported) {
-            if (seen_count > 0 && seen_pos < (int)sizeof(seen_buf) - 8)
+            if (seen_count > 0 && seen_pos < (int32_t)sizeof(seen_buf) - 8)
                 seen_buf[seen_pos++] = ' ';
             seen_pos += snprintf(seen_buf + seen_pos, sizeof(seen_buf) - seen_pos,
                                  "%06X", ac->addr);
@@ -493,15 +494,15 @@ static void fa_mlat_send_reports(uint64_t now) {
 
     // Build "lost" list (aircraft we reported but no longer see)
     char lost_buf[FA_MLAT_STATUS_LINE_LEN];
-    int lost_pos = 0;
+    int32_t lost_pos = 0;
     lost_pos = snprintf(lost_buf, sizeof(lost_buf), "type\tmlat_lost\thexids\t");
-    int lost_count = 0;
+    int32_t lost_count = 0;
 
-    for (int i = 0; i < FA_MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < FA_MLAT_HASH_SIZE; i++) {
         struct fa_mlat_aircraft *ac = &FaMlat.aircraft[i];
         if (ac->addr != 0 && ac->reported && ac->messages <= 1) {
             // Was reported but no longer qualifies
-            if (lost_count > 0 && lost_pos < (int)sizeof(lost_buf) - 8)
+            if (lost_count > 0 && lost_pos < (int32_t)sizeof(lost_buf) - 8)
                 lost_buf[lost_pos++] = ' ';
             lost_pos += snprintf(lost_buf + lost_pos, sizeof(lost_buf) - lost_pos,
                                  "%06X", ac->addr);
@@ -521,17 +522,17 @@ static void fa_mlat_send_reports(uint64_t now) {
 
     // Build rate report
     char rate_buf[FA_MLAT_STATUS_LINE_LEN];
-    int rate_pos = 0;
+    int32_t rate_pos = 0;
     rate_pos = snprintf(rate_buf, sizeof(rate_buf), "type\tmlat_rates\trates\t");
-    int rate_count = 0;
+    int32_t rate_count = 0;
 
-    for (int i = 0; i < FA_MLAT_HASH_SIZE; i++) {
+    for (int32_t i = 0; i < FA_MLAT_HASH_SIZE; i++) {
         struct fa_mlat_aircraft *ac = &FaMlat.aircraft[i];
         if (ac->addr != 0 && ac->recent_adsb_positions > 0) {
             double interval = (now - ac->rate_measurement_start) / 1000.0;
             if (interval > 0) {
                 double rate = ac->recent_adsb_positions / interval;
-                if (rate_count > 0 && rate_pos < (int)sizeof(rate_buf) - 16)
+                if (rate_count > 0 && rate_pos < (int32_t)sizeof(rate_buf) - 16)
                     rate_buf[rate_pos++] = ' ';
                 rate_pos += snprintf(rate_buf + rate_pos, sizeof(rate_buf) - rate_pos,
                                      "%06X %.2f", ac->addr, rate);
@@ -559,7 +560,7 @@ static void *fa_mlat_thread_entry(void *arg) {
     char host[256];
     strncpy(host, FaMlat.udp_host, sizeof(host) - 1);
     host[sizeof(host) - 1] = 0;
-    int port = FaMlat.udp_port;
+    int32_t port = FaMlat.udp_port;
     uint32_t key = FaMlat.udp_key;
     pthread_mutex_unlock(&FaMlat.ctl_mutex);
 
@@ -592,9 +593,9 @@ static void *fa_mlat_thread_entry(void *arg) {
 
     // Local copy of wanted set for fast lookup (refreshed periodically)
     uint32_t local_wanted[FA_MLAT_MAX_WANTED];
-    int local_wanted_count = 0;
+    int32_t local_wanted_count = 0;
     uint32_t local_modeac[FA_MLAT_MAX_MODEAC];
-    int local_modeac_count = 0;
+    int32_t local_modeac_count = 0;
 
     // Clear aircraft hash table
     memset(FaMlat.aircraft, 0, sizeof(FaMlat.aircraft));
@@ -605,7 +606,7 @@ static void *fa_mlat_thread_entry(void *arg) {
     while (1) {
         // Check stop signal
         pthread_mutex_lock(&FaMlat.ctl_mutex);
-        int should_stop = FaMlat.stop_requested;
+        int32_t should_stop = FaMlat.stop_requested;
         pthread_mutex_unlock(&FaMlat.ctl_mutex);
         if (should_stop) break;
 
@@ -632,10 +633,10 @@ static void *fa_mlat_thread_entry(void *arg) {
             pthread_mutex_unlock(&FaMlat.ctl_mutex);
 
             // Update per-aircraft requested flags
-            for (int i = 0; i < FA_MLAT_HASH_SIZE; i++) {
+            for (int32_t i = 0; i < FA_MLAT_HASH_SIZE; i++) {
                 if (FaMlat.aircraft[i].addr != 0) {
-                    int wanted = 0;
-                    for (int j = 0; j < local_wanted_count; j++) {
+                    int32_t wanted = 0;
+                    for (int32_t j = 0; j < local_wanted_count; j++) {
                         if (local_wanted[j] == FaMlat.aircraft[i].addr) {
                             wanted = 1;
                             break;
@@ -653,7 +654,7 @@ static void *fa_mlat_thread_entry(void *arg) {
             // Skip MLAT results (don't feed back)
             if (mm.source == SOURCE_MLAT) continue;
 
-            int df = mm.msgtype;
+            int32_t df = mm.msgtype;
 
             // Mode A/C
             if (mm.msgbits == MODEAC_MSG_BYTES * 8) {
@@ -722,7 +723,7 @@ static void *fa_mlat_thread_entry(void *arg) {
 // Reuses the same approach as mlat_client.c.
 
 // NL table for CPR encoding
-static const struct { double lat; int nl; } fa_cpr_nl_table[] = {
+static const struct { double lat; int32_t nl; } fa_cpr_nl_table[] = {
     {10.47047130, 59}, {14.82817437, 58}, {18.18626357, 57}, {21.02939493, 56},
     {23.54504487, 55}, {25.82924707, 54}, {27.93898710, 53}, {29.91135686, 52},
     {31.77209708, 51}, {33.53993436, 50}, {35.22899598, 49}, {36.85025108, 48},
@@ -740,16 +741,16 @@ static const struct { double lat; int nl; } fa_cpr_nl_table[] = {
     {86.53536998,  3}, {87.00000000,  2}, {90.00000000,  1}
 };
 
-static int fa_cpr_NL(double lat) {
+static int32_t fa_cpr_NL(double lat) {
     if (lat < 0) lat = -lat;
-    for (int i = 0; i < 59; i++) {
+    for (int32_t i = 0; i < 59; i++) {
         if (lat < fa_cpr_nl_table[i].lat)
             return fa_cpr_nl_table[i].nl;
     }
     return 1;
 }
 
-static void fa_cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon) {
+static void fa_cpr_encode(double lat, double lon, int32_t odd, int32_t *rlat, int32_t *rlon) {
     double NbPow = 131072.0;
     double Dlat = 360.0 / (odd ? 59 : 60);
 
@@ -757,10 +758,10 @@ static void fa_cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon)
     if (lat_mod < 0) lat_mod += Dlat;
 
     double yz = floor(NbPow * lat_mod / Dlat + 0.5);
-    int YZ = ((int)yz) & 0x1FFFF;
+    int32_t YZ = ((int32_t)yz) & 0x1FFFF;
 
     double Rlat = Dlat * (yz / NbPow + floor(lat / Dlat));
-    int nl = fa_cpr_NL(Rlat) - (odd ? 1 : 0);
+    int32_t nl = fa_cpr_NL(Rlat) - (odd ? 1 : 0);
     if (nl < 1) nl = 1;
     double Dlon = 360.0 / nl;
 
@@ -768,21 +769,21 @@ static void fa_cpr_encode(double lat, double lon, int odd, int *rlat, int *rlon)
     if (lon_mod < 0) lon_mod += Dlon;
 
     double xz = floor(NbPow * lon_mod / Dlon + 0.5);
-    int XZ = ((int)xz) & 0x1FFFF;
+    int32_t XZ = ((int32_t)xz) & 0x1FFFF;
 
     *rlat = YZ;
     *rlon = XZ;
 }
 
-static int fa_encode_altitude(double ft) {
-    int i = (int)((ft + 1012.5) / 25.0);
+static int32_t fa_encode_altitude(double ft) {
+    int32_t i = (int32_t)((ft + 1012.5) / 25.0);
     if (i < 0) i = 0;
     if (i > 0x7FF) i = 0x7FF;
     return ((i & 0x7F0) << 1) | 0x010 | (i & 0x00F);
 }
 
 static void fa_build_position_frame(uint8_t *frame, uint32_t addr,
-                                     int elat, int elon, int ealt, int oddflag) {
+                                     int32_t elat, int32_t elon, int32_t ealt, int32_t oddflag) {
     memset(frame, 0, 14);
 
     // DF=18, CF=2 (TIS-B, ICAO address)
@@ -812,19 +813,19 @@ static void fa_build_velocity_frame(uint8_t *frame, uint32_t addr,
                                      double nsvel, double ewvel, double vrate) {
     memset(frame, 0, 14);
 
-    int supersonic = (fabs(nsvel) > 1000 || fabs(ewvel) > 1000);
-    int e_ew = 0, e_ns = 0, e_vr = 0;
+    int32_t supersonic = (fabs(nsvel) > 1000 || fabs(ewvel) > 1000);
+    int32_t e_ew = 0, e_ns = 0, e_vr = 0;
 
     if (ewvel < 0) { e_ew = 0x400; ewvel = -ewvel; }
     if (supersonic) ewvel /= 4;
-    e_ew |= ((int)(ewvel + 1.5)) & 0x3FF;
+    e_ew |= ((int32_t)(ewvel + 1.5)) & 0x3FF;
 
     if (nsvel < 0) { e_ns = 0x400; nsvel = -nsvel; }
     if (supersonic) nsvel /= 4;
-    e_ns |= ((int)(nsvel + 1.5)) & 0x3FF;
+    e_ns |= ((int32_t)(nsvel + 1.5)) & 0x3FF;
 
     if (vrate < 0) { e_vr = 0x200; vrate = -vrate; }
-    e_vr |= ((int)(vrate / 64 + 1.5)) & 0x1FF;
+    e_vr |= ((int32_t)(vrate / 64 + 1.5)) & 0x1FF;
 
     frame[0] = (18 << 3) | 2;
     frame[1] = (addr >> 16) & 0xFF;
@@ -845,7 +846,7 @@ static void fa_build_velocity_frame(uint8_t *frame, uint32_t addr,
     frame[13] = crc & 0xFF;
 }
 
-static void fa_inject_beast_message(const uint8_t *frame, int len) {
+static void fa_inject_beast_message(const uint8_t *frame, int32_t len) {
     struct modesMessage mm;
     memset(&mm, 0, sizeof(mm));
 
@@ -858,7 +859,7 @@ static void fa_inject_beast_message(const uint8_t *frame, int len) {
     memcpy(mm.msg, frame, len);
     memcpy(mm.verbatim, frame, len);
 
-    int result = decodeModesMessage(&mm, frame);
+    int32_t result = decodeModesMessage(&mm, frame);
     if (result < 0)
         return;
 
@@ -873,7 +874,7 @@ void faMlatInit(void) {
     pthread_mutex_init(&FaMlat.status_mutex, NULL);
 }
 
-void faMlatEnable(const char *host, int port, uint32_t key) {
+void faMlatEnable(const char *host, int32_t port, uint32_t key) {
     pthread_mutex_lock(&FaMlat.ctl_mutex);
 
     // If already running with same config, skip
@@ -935,14 +936,14 @@ void faMlatDisable(void) {
     fprintf(stderr, "FA-MLAT: disabled\n");
 }
 
-void faMlatStartSending(const uint32_t *icao, int count,
-                         const uint32_t *modeac, int modeac_count) {
+void faMlatStartSending(const uint32_t *icao, int32_t count,
+                         const uint32_t *modeac, int32_t modeac_count) {
     pthread_mutex_lock(&FaMlat.ctl_mutex);
 
     // Add ICAOs to wanted set (avoid duplicates)
-    for (int i = 0; i < count; i++) {
-        int found = 0;
-        for (int j = 0; j < FaMlat.wanted_count; j++) {
+    for (int32_t i = 0; i < count; i++) {
+        int32_t found = 0;
+        for (int32_t j = 0; j < FaMlat.wanted_count; j++) {
             if (FaMlat.wanted_icao[j] == icao[i]) { found = 1; break; }
         }
         if (!found && FaMlat.wanted_count < FA_MLAT_MAX_WANTED)
@@ -950,9 +951,9 @@ void faMlatStartSending(const uint32_t *icao, int count,
     }
 
     // Add Mode A/C codes
-    for (int i = 0; i < modeac_count; i++) {
-        int found = 0;
-        for (int j = 0; j < FaMlat.wanted_modeac_count; j++) {
+    for (int32_t i = 0; i < modeac_count; i++) {
+        int32_t found = 0;
+        for (int32_t j = 0; j < FaMlat.wanted_modeac_count; j++) {
             if (FaMlat.wanted_modeac[j] == modeac[i]) { found = 1; break; }
         }
         if (!found && FaMlat.wanted_modeac_count < FA_MLAT_MAX_MODEAC)
@@ -962,13 +963,13 @@ void faMlatStartSending(const uint32_t *icao, int count,
     pthread_mutex_unlock(&FaMlat.ctl_mutex);
 }
 
-void faMlatStopSending(const uint32_t *icao, int count,
-                        const uint32_t *modeac, int modeac_count) {
+void faMlatStopSending(const uint32_t *icao, int32_t count,
+                        const uint32_t *modeac, int32_t modeac_count) {
     pthread_mutex_lock(&FaMlat.ctl_mutex);
 
     // Remove ICAOs from wanted set
-    for (int i = 0; i < count; i++) {
-        for (int j = 0; j < FaMlat.wanted_count; j++) {
+    for (int32_t i = 0; i < count; i++) {
+        for (int32_t j = 0; j < FaMlat.wanted_count; j++) {
             if (FaMlat.wanted_icao[j] == icao[i]) {
                 FaMlat.wanted_icao[j] = FaMlat.wanted_icao[--FaMlat.wanted_count];
                 break;
@@ -977,8 +978,8 @@ void faMlatStopSending(const uint32_t *icao, int count,
     }
 
     // Remove Mode A/C codes
-    for (int i = 0; i < modeac_count; i++) {
-        for (int j = 0; j < FaMlat.wanted_modeac_count; j++) {
+    for (int32_t i = 0; i < modeac_count; i++) {
+        for (int32_t j = 0; j < FaMlat.wanted_modeac_count; j++) {
             if (FaMlat.wanted_modeac[j] == modeac[i]) {
                 FaMlat.wanted_modeac[j] = FaMlat.wanted_modeac[--FaMlat.wanted_modeac_count];
                 break;
@@ -989,7 +990,7 @@ void faMlatStopSending(const uint32_t *icao, int count,
     pthread_mutex_unlock(&FaMlat.ctl_mutex);
 }
 
-int faMlatPollStatus(char *buf, int bufsize) {
+int32_t faMlatPollStatus(char *buf, int32_t bufsize) {
     pthread_mutex_lock(&FaMlat.status_mutex);
 
     if (FaMlat.status_head == FaMlat.status_tail) {
@@ -1007,7 +1008,7 @@ int faMlatPollStatus(char *buf, int bufsize) {
 
 void faMlatInjectResult(uint32_t addr, double lat, double lon, double alt,
                          double nsvel, double ewvel, double vrate,
-                         int anon, int modeac_flag) {
+                         int32_t anon, int32_t modeac_flag) {
     (void)anon;
     (void)modeac_flag;
 
@@ -1016,8 +1017,8 @@ void faMlatInjectResult(uint32_t addr, double lat, double lon, double alt,
     double alt_ft = alt;  // FA sends altitude in feet
 
     // Generate synthetic DF18 position frames (even + odd)
-    int ealt = fa_encode_altitude(alt_ft);
-    int elat_even, elon_even, elat_odd, elon_odd;
+    int32_t ealt = fa_encode_altitude(alt_ft);
+    int32_t elat_even, elon_even, elat_odd, elon_odd;
     fa_cpr_encode(lat, lon, 0, &elat_even, &elon_even);
     fa_cpr_encode(lat, lon, 1, &elat_odd, &elon_odd);
 

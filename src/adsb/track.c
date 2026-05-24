@@ -48,6 +48,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include <inttypes.h>
 
 /* #define DEBUG_CPR_CHECKS */
@@ -64,7 +65,7 @@ uint32_t modeAC_age[4096];
 static struct aircraft *trackCreateAircraft(struct modesMessage *mm) {
     static struct aircraft zeroAircraft;
     struct aircraft *a = (struct aircraft *) malloc(sizeof(*a));
-    int i;
+    int32_t i;
 
     // Default everything to zero/NULL
     *a = zeroAircraft;
@@ -174,7 +175,7 @@ static struct aircraft *trackFindAircraft(uint32_t addr) {
 
 // Should we accept some new data from the given source?
 // If so, update the validity and return 1
-static int accept_data(data_validity *d, datasource_t source)
+static int32_t accept_data(data_validity *d, datasource_t source)
 {
     if (messageNow() < d->updated)
         return 0;
@@ -207,7 +208,7 @@ static void combine_validity(data_validity *to, const data_validity *from1, cons
     to->expires = (from1->expires < from2->expires) ? from1->expires : from2->expires;   // the earlier of the two expiry times
 }
 
-static int compare_validity(const data_validity *lhs, const data_validity *rhs) {
+static int32_t compare_validity(const data_validity *lhs, const data_validity *rhs) {
     if (messageNow() < lhs->stale && lhs->source > rhs->source)
         return 1;
     else if (messageNow() < rhs->stale && lhs->source < rhs->source)
@@ -404,7 +405,7 @@ static void update_range_histogram(double lat, double lon)
 {
     if (Modes.stats_range_histo && (Modes.bUserFlags & MODES_USER_LATLON_VALID)) {
         double range = greatcircle(Modes.fUserLat, Modes.fUserLon, lat, lon);
-        int bucket = round(range / Modes.maxRange * RANGE_BUCKET_COUNT);
+        int32_t bucket = round(range / Modes.maxRange * RANGE_BUCKET_COUNT);
 
         if (bucket < 0)
             bucket = 0;
@@ -417,13 +418,13 @@ static void update_range_histogram(double lat, double lon)
 
 // return true if it's OK for the aircraft to have travelled from its last known position
 // to a new position at (lat,lon,surface) at a time of now.
-static int speed_check(struct aircraft *a, double lat, double lon, int surface)
+static int32_t speed_check(struct aircraft *a, double lat, double lon, int32_t surface)
 {
     uint64_t elapsed;
     double distance;
     double range;
-    int speed;
-    int inrange;
+    int32_t speed;
+    int32_t inrange;
 
     if (!trackDataValid(&a->position_valid))
         return 1; // no reference, assume OK
@@ -473,7 +474,7 @@ static int speed_check(struct aircraft *a, double lat, double lon, int surface)
 }
 
 // return 1 if left_rc is worse (less accurate) than right_rc
-static int rcIsWorse(int left_rc, int right_rc)
+static int32_t rcIsWorse(int32_t left_rc, int32_t right_rc)
 {
     if (left_rc == 0 && right_rc == 0) // both unknown
         return 0;
@@ -484,11 +485,11 @@ static int rcIsWorse(int left_rc, int right_rc)
     return (left_rc > right_rc);
 }
 
-static int doGlobalCPR(struct aircraft *a, struct modesMessage *mm, double *lat, double *lon, uint32_t *nic, uint32_t *rc)
+static int32_t doGlobalCPR(struct aircraft *a, struct modesMessage *mm, double *lat, double *lon, uint32_t *nic, uint32_t *rc)
 {
-    int result;
-    int fflag = mm->cpr_odd;
-    int surface = (mm->cpr_type == CPR_SURFACE);
+    int32_t result;
+    int32_t fflag = mm->cpr_odd;
+    int32_t surface = (mm->cpr_type == CPR_SURFACE);
 
     // derive NIC, Rc from the worse of the two position
     // smaller NIC is worse
@@ -562,15 +563,15 @@ static int doGlobalCPR(struct aircraft *a, struct modesMessage *mm, double *lat,
     return result;
 }
 
-static int doLocalCPR(struct aircraft *a, struct modesMessage *mm, double *lat, double *lon, uint32_t *nic, uint32_t *rc)
+static int32_t doLocalCPR(struct aircraft *a, struct modesMessage *mm, double *lat, double *lon, uint32_t *nic, uint32_t *rc)
 {
     // relative CPR
     // find reference location
     double reflat, reflon;
     double range_limit = 0;
-    int result;
-    int fflag = mm->cpr_odd;
-    int surface = (mm->cpr_type == CPR_SURFACE);
+    int32_t result;
+    int32_t fflag = mm->cpr_odd;
+    int32_t surface = (mm->cpr_type == CPR_SURFACE);
 
     if (fflag) {
         *nic = a->cpr_odd_nic;
@@ -657,12 +658,12 @@ static uint64_t time_between(uint64_t t1, uint64_t t2)
 
 static void updatePosition(struct aircraft *a, struct modesMessage *mm)
 {
-    int location_result = -1;
+    int32_t location_result = -1;
     uint64_t max_elapsed;
     double new_lat = 0, new_lon = 0;
     uint32_t new_nic = 0;
     uint32_t new_rc = 0;
-    int surface;
+    int32_t surface;
 
     surface = (mm->cpr_type == CPR_SURFACE);
 
@@ -974,7 +975,7 @@ static uint32_t compute_rc(uint32_t metype, uint32_t version, uint32_t nic_a, ui
 
 // Map ADS-B v0 position message type to NACp value
 // returned computed NACp, or -1 if not a suitable message type
-static int compute_v0_nacp(struct modesMessage *mm)
+static int32_t compute_v0_nacp(struct modesMessage *mm)
 {
     if (mm->msgtype != 17 && mm->msgtype != 18) {
         return -1;
@@ -1006,7 +1007,7 @@ static int compute_v0_nacp(struct modesMessage *mm)
 
 // Map ADS-B v0 position message type to SIL value
 // returned computed SIL, or -1 if not a suitable message type
-static int compute_v0_sil(struct modesMessage *mm)
+static int32_t compute_v0_sil(struct modesMessage *mm)
 {
     if (mm->msgtype != 17 && mm->msgtype != 18) {
         return -1;
@@ -1049,15 +1050,15 @@ static int compute_v0_sil(struct modesMessage *mm)
 
 static void compute_nic_rc_from_message(struct modesMessage *mm, struct aircraft *a, uint32_t *nic, uint32_t *rc)
 {
-    int nic_a = (trackDataValid(&a->nic_a_valid) && a->nic_a);
-    int nic_b = (mm->accuracy.nic_b_valid && mm->accuracy.nic_b);
-    int nic_c = (trackDataValid(&a->nic_c_valid) && a->nic_c);
+    int32_t nic_a = (trackDataValid(&a->nic_a_valid) && a->nic_a);
+    int32_t nic_b = (mm->accuracy.nic_b_valid && mm->accuracy.nic_b);
+    int32_t nic_c = (trackDataValid(&a->nic_c_valid) && a->nic_c);
 
     *nic = compute_nic(mm->metype, a->adsb_version, nic_a, nic_b, nic_c);
     *rc = compute_rc(mm->metype, a->adsb_version, nic_a, nic_b, nic_c);
 }
 
-static int altitude_to_feet(int raw, altitude_unit_t unit)
+static int32_t altitude_to_feet(int32_t raw, altitude_unit_t unit)
 {
     switch (unit) {
     case UNIT_METERS:
@@ -1138,8 +1139,8 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
         a->addrtype = mm->addrtype;
 
     // decide on where to stash the version
-    int dummy_version = -1; // used for non-adsb/adsr/tisb messages
-    int *message_version;
+    int32_t dummy_version = -1; // used for non-adsb/adsr/tisb messages
+    int32_t *message_version;
 
     switch (mm->source) {
     case SOURCE_ADSB:
@@ -1180,7 +1181,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
 
     // fill in ADS-B v0 NACp, SIL from position message type
     if (*message_version == 0 && !mm->accuracy.nac_p_valid) {
-        int computed_nacp = compute_v0_nacp(mm);
+        int32_t computed_nacp = compute_v0_nacp(mm);
         if (computed_nacp != -1) {
             mm->accuracy.nac_p_valid = 1;
             mm->accuracy.nac_p = computed_nacp;
@@ -1188,7 +1189,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
     }
 
     if (*message_version == 0 && mm->accuracy.sil_type == SIL_INVALID) {
-        int computed_sil = compute_v0_sil(mm);
+        int32_t computed_sil = compute_v0_sil(mm);
         if (computed_sil != -1) {
             mm->accuracy.sil_type = SIL_UNKNOWN;
             mm->accuracy.sil = computed_sil;
@@ -1198,10 +1199,10 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
     if (mm->altitude_baro_valid) {
         uint64_t prev_alt_updated = a->altitude_baro_valid.updated;
         if (accept_data(&a->altitude_baro_valid, mm->source)) {
-            int alt = altitude_to_feet(mm->altitude_baro, mm->altitude_baro_unit);
+            int32_t alt = altitude_to_feet(mm->altitude_baro, mm->altitude_baro_unit);
             if (a->modeC_hit) {
-                int new_modeC = (a->altitude_baro + 49) / 100;
-                int old_modeC = (alt + 49) / 100;
+                int32_t new_modeC = (a->altitude_baro + 49) / 100;
+                int32_t old_modeC = (alt + 49) / 100;
                 if (new_modeC != old_modeC) {
                     a->modeC_hit = 0;
                 }
@@ -1211,8 +1212,8 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
             if (a->alt_reliable > 0 && a->altitude_baro != 0 && prev_alt_updated > 0) {
                 uint64_t elapsed = messageNow() - prev_alt_updated;
                 if (elapsed > 0 && elapsed < 30000) {
-                    int delta = abs(alt - a->altitude_baro);
-                    int fpm = (int)((int64_t)delta * 60000 / (int64_t)elapsed);
+                    int32_t delta = abs(alt - a->altitude_baro);
+                    int32_t fpm = (int32_t)((int64_t)delta * 60000 / (int64_t)elapsed);
                     if (fpm > 10000) {
                         a->alt_reliable = a->alt_reliable / 2;
                     }
@@ -1252,8 +1253,8 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
 
                 // Log squawk changes
                 if (PanelState.enabled) {
-                    int rxid = -1;
-                    for (int ri = 0; ri < SdrManager.count; ri++)
+                    int32_t rxid = -1;
+                    for (int32_t ri = 0; ri < SdrManager.count; ri++)
                         if (SdrManager.receivers[ri].config.role == SDR_ROLE_ADSB) { rxid = SdrManager.receivers[ri].dev_index; break; }
                     const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
                     if (mm->squawk == 0x7500 || mm->squawk == 0x7600 || mm->squawk == 0x7700) {
@@ -1306,8 +1307,8 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
             };
             const char *ename = (mm->emergency < 8) ? emerg_names[mm->emergency] : "UNKNOWN";
             const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
-            int rxid = -1;
-            for (int ri = 0; ri < SdrManager.count; ri++)
+            int32_t rxid = -1;
+            for (int32_t ri = 0; ri < SdrManager.count; ri++)
                 if (SdrManager.receivers[ri].config.role == SDR_ROLE_ADSB) { rxid = SdrManager.receivers[ri].dev_index; break; }
             panelLogMessage("[ADSB rx%d] \xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 EMERGENCY %s",
                             rxid, a->addr, cs, ename);
@@ -1393,8 +1394,8 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
             a->callsign_matched = 0;
 
             if (PanelState.enabled && mm->callsign[0]) {
-                int rxid = -1;
-                for (int ri = 0; ri < SdrManager.count; ri++)
+                int32_t rxid = -1;
+                for (int32_t ri = 0; ri < SdrManager.count; ri++)
                     if (SdrManager.receivers[ri].config.role == SDR_ROLE_ADSB) { rxid = SdrManager.receivers[ri].dev_index; break; }
                 panelLogMessage("[ADSB rx%d] %06X \xe2\x86\x92 IDENT %s", rxid, a->addr, mm->callsign);
             }
@@ -1607,7 +1608,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
     // GPS integrity monitoring
     // Evaluate whenever NIC or NACp is updated
     {
-        int new_integrity = 0; // normal
+        int32_t new_integrity = 0; // normal
         uint32_t cur_nic = a->pos_nic;
         uint32_t cur_nac_p = a->nac_p;
 
@@ -1644,7 +1645,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
     // Circling detection: record heading and check for >360Â° cumulative change
     if (trackDataValid(&a->track_valid)) {
         uint64_t now_ms = messageNow();
-        int idx = a->heading_history_idx;
+        int32_t idx = a->heading_history_idx;
 
         a->heading_history[idx] = a->track;
         a->heading_history_time[idx] = now_ms;
@@ -1655,13 +1656,13 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
         // Compute cumulative heading change over the window
         if (a->heading_history_count >= 3) {
             float cumulative = 0;
-            int count = a->heading_history_count;
-            int start = (a->heading_history_idx - count + CIRCLING_HISTORY_SIZE) % CIRCLING_HISTORY_SIZE;
+            int32_t count = a->heading_history_count;
+            int32_t start = (a->heading_history_idx - count + CIRCLING_HISTORY_SIZE) % CIRCLING_HISTORY_SIZE;
 
             // Only consider samples within last 120 seconds
-            for (int i = 0; i < count - 1; i++) {
-                int ci = (start + i) % CIRCLING_HISTORY_SIZE;
-                int ni = (start + i + 1) % CIRCLING_HISTORY_SIZE;
+            for (int32_t i = 0; i < count - 1; i++) {
+                int32_t ci = (start + i) % CIRCLING_HISTORY_SIZE;
+                int32_t ni = (start + i + 1) % CIRCLING_HISTORY_SIZE;
 
                 if ((now_ms - a->heading_history_time[ci]) > 120000)
                     continue; // too old
@@ -1710,7 +1711,7 @@ static void trackMatchAC(uint64_t now)
 
         // match on Mode C (+/- 100ft)
         if (trackDataValid(&a->altitude_baro_valid)) {
-            int modeC = (a->altitude_baro + 49) / 100;
+            int32_t modeC = (a->altitude_baro + 49) / 100;
 
             uint32_t modeA = modeCToModeA(modeC);
             uint32_t i = modeAToIndex(modeA);
@@ -1890,7 +1891,7 @@ struct aircraft *trackUpdateFromDecoder(const aircraft_update_t *upd)
         *a = zero;
         a->addr = upd->addr;
         a->addrtype = ADDR_TISB_OTHER;
-        for (int i = 0; i < 8; ++i)
+        for (int32_t i = 0; i < 8; ++i)
             a->signalLevel[i] = 1e-5;
         a->adsb_version = -1;
         a->adsb_hrd = HEADING_MAGNETIC;

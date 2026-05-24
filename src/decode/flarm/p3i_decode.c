@@ -6,6 +6,7 @@
 // Copyright (C) 2026 — GPL-3.0-or-later
 
 #include <string.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <math.h>
 #include "p3i_decode.h"
@@ -24,12 +25,12 @@ const uint8_t p3i_whitening[P3I_PAYLOAD_SIZE] = {
 // Generator polynomial x^8 + x^2 + x^1 + x^0 = 0x107 (reflected: 0xE0)
 // Used by NiceRF SV650 module
 
-uint8_t p3i_crc8(const uint8_t *data, int len)
+uint8_t p3i_crc8(const uint8_t *data, int32_t len)
 {
     uint8_t crc = 0;
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
+        for (int32_t j = 0; j < 8; j++) {
             if (crc & 0x80)
                 crc = (crc << 1) ^ 0x07;  // polynomial 0x107, MSB-first
             else
@@ -41,10 +42,10 @@ uint8_t p3i_crc8(const uint8_t *data, int len)
 
 // ======================== De-whitening ========================
 
-void p3i_dewhiten(uint8_t *data, int len)
+void p3i_dewhiten(uint8_t *data, int32_t len)
 {
-    int wlen = (len < P3I_PAYLOAD_SIZE) ? len : P3I_PAYLOAD_SIZE;
-    for (int i = 0; i < wlen; i++)
+    int32_t wlen = (len < P3I_PAYLOAD_SIZE) ? len : P3I_PAYLOAD_SIZE;
+    for (int32_t i = 0; i < wlen; i++)
         data[i] ^= p3i_whitening[i];
 }
 
@@ -77,7 +78,7 @@ bool p3i_decode_packet(const uint8_t *payload, p3i_message_t *msg)
 
     // XOR checksum: XOR of all bytes should be 0
     uint8_t cs = 0;
-    for (int i = 0; i < P3I_PAYLOAD_SIZE; i++)
+    for (int32_t i = 0; i < P3I_PAYLOAD_SIZE; i++)
         cs ^= pkt[i];
     if (cs != 0) {
         // Continue — extract fields anyway

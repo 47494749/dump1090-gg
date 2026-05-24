@@ -13,6 +13,7 @@
 // option) any later version.
 
 #include "lte_decode.h"
+#include <stdint.h>
 #include "lte_sib.h"
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,7 @@
 // ======================== Internal Constants ========================
 
 // Zadoff-Chu root indices for PSS (N_ID_2 = 0, 1, 2)
-static const int pss_roots[3] = { 25, 29, 34 };
+static const int32_t pss_roots[3] = { 25, 29, 34 };
 
 // PSS correlation threshold (normalized power)
 #define PSS_THRESHOLD       0.10f
@@ -53,13 +54,13 @@ typedef struct {
 // Per-cell tracking state
 typedef struct {
     lte_cell_info_t info;
-    int             frame_offset;    // Sample offset within buffer to frame start
+    int32_t             frame_offset;    // Sample offset within buffer to frame start
     uint64_t        last_pss_sample; // Last PSS detection sample count
     uint64_t        last_update;     // Monotonic sample count of last update
 
     // PBCH accumulation (spans 4 frames for MIB)
     cf_t            pbch_symbols[240]; // 4 frames * 60 PBCH symbols each
-    int             pbch_frame_idx;   // 0-3, which quarter of MIB
+    int32_t             pbch_frame_idx;   // 0-3, which quarter of MIB
 
     bool            active;
 } lte_cell_state_t;
@@ -86,16 +87,16 @@ struct lte_state {
 
     // IQ buffer (accumulate samples until we have a full frame)
     float          *iq_buf;         // interleaved I/Q float
-    int             iq_buf_size;    // capacity in IQ pairs
-    int             iq_buf_len;     // current fill in IQ pairs
+    int32_t             iq_buf_size;    // capacity in IQ pairs
+    int32_t             iq_buf_len;     // current fill in IQ pairs
     uint64_t        sample_counter; // total samples seen
 
     // Detected cells
     lte_cell_state_t cells[LTE_MAX_CELLS];
-    int             cell_count;
+    int32_t             cell_count;
 
     // Frequency hopping state
-    int             hop_idx;        // Current index into lte_hop_freqs[]
+    int32_t             hop_idx;        // Current index into lte_hop_freqs[]
     uint64_t        hop_next_sample; // Sample count when next hop should occur
     double          hop_request;    // Non-zero = caller should retune to this freq
 
@@ -127,21 +128,21 @@ static inline cf_t cf_add(cf_t a, cf_t b) {
 }
 
 // Simple radix-2 DIT FFT (in-place, size must be power of 2)
-static void fft_dit(cf_t *x, const cf_t *twiddle, int n)
+static void fft_dit(cf_t *x, const cf_t *twiddle, int32_t n)
 {
     // Bit-reverse permutation
-    for (int i = 1, j = 0; i < n; i++) {
-        int bit = n >> 1;
+    for (int32_t i = 1, j = 0; i < n; i++) {
+        int32_t bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
         if (i < j) { cf_t tmp = x[i]; x[i] = x[j]; x[j] = tmp; }
     }
     // Butterfly stages
-    for (int len = 2; len <= n; len <<= 1) {
-        int half = len >> 1;
-        int step = n / len;
-        for (int i = 0; i < n; i += len) {
-            for (int j = 0; j < half; j++) {
+    for (int32_t len = 2; len <= n; len <<= 1) {
+        int32_t half = len >> 1;
+        int32_t step = n / len;
+        for (int32_t i = 0; i < n; i += len) {
+            for (int32_t j = 0; j < half; j++) {
                 cf_t w = twiddle[j * step];
                 cf_t u = x[i + j];
                 cf_t v = cf_mul(x[i + j + half], w);
@@ -153,12 +154,12 @@ static void fft_dit(cf_t *x, const cf_t *twiddle, int n)
 }
 
 // IFFT via conjugate trick: IFFT(x) = conj(FFT(conj(x))) / N
-static void ifft(cf_t *x, const cf_t *twiddle, int n)
+static void ifft(cf_t *x, const cf_t *twiddle, int32_t n)
 {
-    for (int i = 0; i < n; i++) x[i] = cf_conj(x[i]);
+    for (int32_t i = 0; i < n; i++) x[i] = cf_conj(x[i]);
     fft_dit(x, twiddle, n);
     float inv = 1.0f / (float)n;
-    for (int i = 0; i < n; i++) {
+    for (int32_t i = 0; i < n; i++) {
         x[i].re *= inv;
         x[i].im *= -inv;
     }
@@ -169,11 +170,11 @@ static void ifft(cf_t *x, const cf_t *twiddle, int n)
 // Generate Zadoff-Chu sequence for PSS (3GPP TS 36.211 §6.11.1.1)
 // d_u(n) = exp(-j*pi*u*n*(n+1)/63), n=0..30
 // d_u(n) = exp(-j*pi*u*(n+1)*(n+2)/63), n=31..61 (DC gap adjustment)
-static void generate_pss(cf_t *out, int root_idx)
+static void generate_pss(cf_t *out, int32_t root_idx)
 {
-    int u = pss_roots[root_idx];
-    for (int n = 0; n < 62; n++) {
-        int nn = (n < 31) ? n : (n + 1); // accounts for DC subcarrier gap
+    int32_t u = pss_roots[root_idx];
+    for (int32_t n = 0; n < 62; n++) {
+        int32_t nn = (n < 31) ? n : (n + 1); // accounts for DC subcarrier gap
         double phase = -M_PI * (double)u * (double)nn * (double)(nn + 1) / 63.0;
         out[n].re = (float)cos(phase);
         out[n].im = (float)sin(phase);
@@ -189,7 +190,7 @@ static void pss_to_time(const cf_t *pss_freq, cf_t *pss_time, const cf_t *twiddl
     // Map 62 PSS subcarriers to FFT bins
     // PSS occupies subcarriers -31...-1, 1...31 (DC excluded)
     // In FFT bin terms: bins N-31...N-1 and 1...31 (where N=128)
-    for (int k = 0; k < 31; k++) {
+    for (int32_t k = 0; k < 31; k++) {
         sym[LTE_FFT_SIZE - 31 + k] = pss_freq[k];       // negative frequencies
         sym[k + 1]                 = pss_freq[k + 31];   // positive frequencies
     }
@@ -203,7 +204,7 @@ static void pss_to_time(const cf_t *pss_freq, cf_t *pss_time, const cf_t *twiddl
 
 // SSS is based on interleaved M-sequences
 // Generate SSS for all N_ID_1 values (simplified — real SSS uses scrambled M-sequences)
-static void generate_sss_tables(int8_t sss_d[LTE_N_ID_1_COUNT][2][LTE_SSS_LEN], int n_id_2)
+static void generate_sss_tables(int8_t sss_d[LTE_N_ID_1_COUNT][2][LTE_SSS_LEN], int32_t n_id_2)
 {
     // M-sequence generation using x^5 + x^2 + 1
     int8_t x_s[31], x_c[31], x_z[31];
@@ -211,36 +212,36 @@ static void generate_sss_tables(int8_t sss_d[LTE_N_ID_1_COUNT][2][LTE_SSS_LEN], 
     // Initialize x_s: [0,0,0,0,1,...]  polynomial x^5 + x^2 + 1
     memset(x_s, 0, sizeof(x_s));
     x_s[4] = 1;
-    for (int i = 5; i < 31; i++)
+    for (int32_t i = 5; i < 31; i++)
         x_s[i] = (x_s[i-3] + x_s[i-5]) & 1;  // s(i) = s(i-3) + s(i-5)
 
     // Initialize x_c: [0,0,0,0,1,...]  polynomial x^5 + x^3 + 1
     memset(x_c, 0, sizeof(x_c));
     x_c[4] = 1;
-    for (int i = 5; i < 31; i++)
+    for (int32_t i = 5; i < 31; i++)
         x_c[i] = (x_c[i-2] + x_c[i-5]) & 1;  // c(i) = c(i-2) + c(i-5)
 
     // Initialize x_z: [0,0,0,0,1,...]  polynomial x^5 + x^4 + x^2 + x + 1
     memset(x_z, 0, sizeof(x_z));
     x_z[4] = 1;
-    for (int i = 5; i < 31; i++)
+    for (int32_t i = 5; i < 31; i++)
         x_z[i] = (x_z[i-1] + x_z[i-3] + x_z[i-4] + x_z[i-5]) & 1;
 
     // Generate SSS for each N_ID_1 using 3GPP TS 36.211 §6.11.2.1 mapping
-    for (int q = 0; q < LTE_N_ID_1_COUNT; q++) {
-        int qp = q / 30;
-        int qq = (q + qp * (qp + 1) / 2) / 30;
-        int mp = q + qq * (qq + 1) / 2;
-        int m0 = mp % 31;
-        int m1 = (m0 + mp / 31 + 1) % 31;
+    for (int32_t q = 0; q < LTE_N_ID_1_COUNT; q++) {
+        int32_t qp = q / 30;
+        int32_t qq = (q + qp * (qp + 1) / 2) / 30;
+        int32_t mp = q + qq * (qq + 1) / 2;
+        int32_t m0 = mp % 31;
+        int32_t m1 = (m0 + mp / 31 + 1) % 31;
 
-        for (int n = 0; n < 31; n++) {
-            int s0 = 1 - 2 * x_s[(n + m0) % 31];
-            int s1 = 1 - 2 * x_s[(n + m1) % 31];
-            int c0 = 1 - 2 * x_c[(n + n_id_2) % 31];
-            int c1 = 1 - 2 * x_c[(n + n_id_2 + 3) % 31];
-            int z0 = 1 - 2 * x_z[(n + (m0 % 8)) % 31];
-            int z1 = 1 - 2 * x_z[(n + (m1 % 8)) % 31];
+        for (int32_t n = 0; n < 31; n++) {
+            int32_t s0 = 1 - 2 * x_s[(n + m0) % 31];
+            int32_t s1 = 1 - 2 * x_s[(n + m1) % 31];
+            int32_t c0 = 1 - 2 * x_c[(n + n_id_2) % 31];
+            int32_t c1 = 1 - 2 * x_c[(n + n_id_2 + 3) % 31];
+            int32_t z0 = 1 - 2 * x_z[(n + (m0 % 8)) % 31];
+            int32_t z1 = 1 - 2 * x_z[(n + (m1 % 8)) % 31];
 
             // Subframe 0: d(2n) = s0*c0, d(2n+1) = s1*c1*z0
             sss_d[q][0][2*n]     = (int8_t)(s0 * c0);
@@ -254,10 +255,10 @@ static void generate_sss_tables(int8_t sss_d[LTE_N_ID_1_COUNT][2][LTE_SSS_LEN], 
 
 // ======================== CRC-16 ========================
 
-static uint16_t crc16_lte(const uint8_t *bits, int nbits)
+static uint16_t crc16_lte(const uint8_t *bits, int32_t nbits)
 {
     uint16_t crc = PBCH_CRC_INIT;
-    for (int i = 0; i < nbits; i++) {
+    for (int32_t i = 0; i < nbits; i++) {
         uint16_t bit = (crc >> 15) ^ bits[i];
         crc = (crc << 1) & 0xFFFF;
         if (bit) crc ^= 0x1021;
@@ -274,43 +275,43 @@ static uint16_t crc16_lte(const uint8_t *bits, int nbits)
 static const uint8_t viterbi_poly[3] = { 0155, 0117, 0127 }; // G0=133, G1=171, G2=165 (bit-reversed for LSB=delay0 convention)
 
 // Output bits for state transition
-static inline int viterbi_output(int state, int input, int poly) {
-    int sr = (state << 1) | input;
-    int out = 0;
-    for (int i = 0; i < VITERBI_K; i++)
+static inline int32_t viterbi_output(int32_t state, int32_t input, int32_t poly) {
+    int32_t sr = (state << 1) | input;
+    int32_t out = 0;
+    for (int32_t i = 0; i < VITERBI_K; i++)
         out ^= ((sr >> i) & 1) & ((poly >> i) & 1);
     return out;
 }
 
 // Decode rate 1/3 convolutional code (hard decision, simplified)
-static int viterbi_decode(const int8_t *soft_bits, int coded_len, uint8_t *out_bits)
+static int32_t viterbi_decode(const int8_t *soft_bits, int32_t coded_len, uint8_t *out_bits)
 {
-    int n_out = coded_len / 3;
+    int32_t n_out = coded_len / 3;
     if (n_out <= 0) return 0;
 
     // Path metrics
-    int pm[VITERBI_STATES];
-    int pm_new[VITERBI_STATES];
+    int32_t pm[VITERBI_STATES];
+    int32_t pm_new[VITERBI_STATES];
     uint64_t *path = calloc((size_t)n_out, sizeof(uint64_t) * VITERBI_STATES);
     if (!path) return 0;
 
-    for (int i = 0; i < VITERBI_STATES; i++) pm[i] = 0; // tail-biting: all states equally likely
+    for (int32_t i = 0; i < VITERBI_STATES; i++) pm[i] = 0; // tail-biting: all states equally likely
 
-    for (int t = 0; t < n_out; t++) {
-        for (int i = 0; i < VITERBI_STATES; i++) pm_new[i] = -999999;
+    for (int32_t t = 0; t < n_out; t++) {
+        for (int32_t i = 0; i < VITERBI_STATES; i++) pm_new[i] = -999999;
 
-        for (int state = 0; state < VITERBI_STATES; state++) {
+        for (int32_t state = 0; state < VITERBI_STATES; state++) {
             if (pm[state] == -999999) continue;
-            for (int input = 0; input < 2; input++) {
-                int next_state = ((state << 1) | input) & (VITERBI_STATES - 1);
+            for (int32_t input = 0; input < 2; input++) {
+                int32_t next_state = ((state << 1) | input) & (VITERBI_STATES - 1);
                 // Calculate branch metric
                 // QPSK convention: bit 0 → +1, bit 1 → -1
-                int bm = 0;
-                for (int g = 0; g < 3; g++) {
-                    int expected = viterbi_output(state, input, viterbi_poly[g]);
+                int32_t bm = 0;
+                for (int32_t g = 0; g < 3; g++) {
+                    int32_t expected = viterbi_output(state, input, viterbi_poly[g]);
                     bm += soft_bits[t*3 + g] * (expected ? -1 : 1);
                 }
-                int metric = pm[state] + bm;
+                int32_t metric = pm[state] + bm;
                 if (metric > pm_new[next_state]) {
                     pm_new[next_state] = metric;
                     path[t * VITERBI_STATES + next_state] = (uint64_t)state | ((uint64_t)input << 32);
@@ -321,16 +322,16 @@ static int viterbi_decode(const int8_t *soft_bits, int coded_len, uint8_t *out_b
     }
 
     // Traceback from best final state
-    int best_state = 0;
-    for (int i = 1; i < VITERBI_STATES; i++)
+    int32_t best_state = 0;
+    for (int32_t i = 1; i < VITERBI_STATES; i++)
         if (pm[i] > pm[best_state]) best_state = i;
 
     // Trace back
-    int state = best_state;
-    for (int t = n_out - 1; t >= 0; t--) {
+    int32_t state = best_state;
+    for (int32_t t = n_out - 1; t >= 0; t--) {
         uint64_t entry = path[t * VITERBI_STATES + state];
         out_bits[t] = (uint8_t)((entry >> 32) & 1);
-        state = (int)(entry & 0xFFFFFFFF);
+        state = (int32_t)(entry & 0xFFFFFFFF);
     }
 
     free(path);
@@ -347,19 +348,19 @@ struct lte_state *lte_create(const lte_config_t *cfg)
     st->cfg = *cfg;
 
     // Generate PSS sequences
-    for (int i = 0; i < 3; i++) {
+    for (int32_t i = 0; i < 3; i++) {
         generate_pss(st->pss_freq[i], i);
     }
 
     // Generate FFT twiddle factors
-    for (int i = 0; i < LTE_FFT_SIZE / 2; i++) {
+    for (int32_t i = 0; i < LTE_FFT_SIZE / 2; i++) {
         double angle = -2.0 * M_PI * (double)i / (double)LTE_FFT_SIZE;
         st->fft_twiddle[i].re = (float)cos(angle);
         st->fft_twiddle[i].im = (float)sin(angle);
     }
 
     // Convert PSS to time domain
-    for (int i = 0; i < 3; i++) {
+    for (int32_t i = 0; i < 3; i++) {
         pss_to_time(st->pss_freq[i], st->pss_time[i], st->fft_twiddle);
     }
 
@@ -377,7 +378,7 @@ struct lte_state *lte_create(const lte_config_t *cfg)
     st->hop_request = 0;
     if (cfg->hop_enabled) {
         // Find which hop index matches the initial frequency
-        for (int i = 0; i < LTE_HOP_FREQS; i++) {
+        for (int32_t i = 0; i < LTE_HOP_FREQS; i++) {
             if (fabs(cfg->center_freq - lte_hop_freqs[i]) < 1e6) {
                 st->hop_idx = i;
                 break;
@@ -411,21 +412,21 @@ void lte_destroy(struct lte_state *st)
 #define PSS_FREQ_STEP     20000.0f  // 20 kHz steps
 #define PSS_FREQ_BASE    -60000.0f  // start at -60 kHz (covers ±60 kHz)
 
-static float pss_correlate(const float *iq, int n_samples, const cf_t *pss_ref,
-                           int fft_size, int *peak_offset, float *peak_phase,
+static float pss_correlate(const float *iq, int32_t n_samples, const cf_t *pss_ref,
+                           int32_t fft_size, int32_t *peak_offset, float *peak_phase,
                            float *freq_offset_out)
 {
     float best_power = 0;
-    int best_pos = 0;
+    int32_t best_pos = 0;
     float best_ph = 0;
-    int best_hyp = PSS_FREQ_HYPOS / 2; // default to center (0 Hz)
+    int32_t best_hyp = PSS_FREQ_HYPOS / 2; // default to center (0 Hz)
 
-    int max_pos = n_samples - fft_size;
+    int32_t max_pos = n_samples - fft_size;
     if (max_pos <= 0) return 0;
 
     // Pre-compute oscillator step (cos/sin of phase increment) for each hypothesis
     cf_t osc_step[PSS_FREQ_HYPOS];
-    for (int h = 0; h < PSS_FREQ_HYPOS; h++) {
+    for (int32_t h = 0; h < PSS_FREQ_HYPOS; h++) {
         float f_offset = PSS_FREQ_BASE + h * PSS_FREQ_STEP;
         float dp = 2.0f * (float)M_PI * f_offset / (float)LTE_SAMPLE_RATE;
         osc_step[h].re = cosf(dp);
@@ -433,20 +434,20 @@ static float pss_correlate(const float *iq, int n_samples, const cf_t *pss_ref,
     }
 
     // Coarse scan: every 8th sample, all frequency hypotheses
-    for (int pos = 0; pos < max_pos; pos += 8) {
+    for (int32_t pos = 0; pos < max_pos; pos += 8) {
         float sig_power = 0;
-        for (int k = 0; k < fft_size; k++) {
+        for (int32_t k = 0; k < fft_size; k++) {
             float I = iq[(pos + k) * 2];
             float Q = iq[(pos + k) * 2 + 1];
             sig_power += I*I + Q*Q;
         }
         if (sig_power <= 0) continue;
 
-        for (int h = 0; h < PSS_FREQ_HYPOS; h++) {
+        for (int32_t h = 0; h < PSS_FREQ_HYPOS; h++) {
             float corr_re = 0, corr_im = 0;
             float osc_re = 1.0f, osc_im = 0.0f;
             float step_re = osc_step[h].re, step_im = osc_step[h].im;
-            for (int k = 0; k < fft_size; k++) {
+            for (int32_t k = 0; k < fft_size; k++) {
                 float I = iq[(pos + k) * 2];
                 float Q = iq[(pos + k) * 2 + 1];
                 // Mix: (I+jQ) * (osc_re - j*osc_im) = derotate
@@ -470,22 +471,22 @@ static float pss_correlate(const float *iq, int n_samples, const cf_t *pss_ref,
     }
 
     // Refine around best position (sample-by-sample, all hypotheses)
-    int refine_start = (best_pos > 7) ? best_pos - 7 : 0;
-    int refine_end = (best_pos + 15 < max_pos) ? best_pos + 15 : max_pos;
-    for (int pos = refine_start; pos < refine_end; pos++) {
+    int32_t refine_start = (best_pos > 7) ? best_pos - 7 : 0;
+    int32_t refine_end = (best_pos + 15 < max_pos) ? best_pos + 15 : max_pos;
+    for (int32_t pos = refine_start; pos < refine_end; pos++) {
         float sig_power = 0;
-        for (int k = 0; k < fft_size; k++) {
+        for (int32_t k = 0; k < fft_size; k++) {
             float I = iq[(pos + k) * 2];
             float Q = iq[(pos + k) * 2 + 1];
             sig_power += I*I + Q*Q;
         }
         if (sig_power <= 0) continue;
 
-        for (int h = 0; h < PSS_FREQ_HYPOS; h++) {
+        for (int32_t h = 0; h < PSS_FREQ_HYPOS; h++) {
             float corr_re = 0, corr_im = 0;
             float osc_re = 1.0f, osc_im = 0.0f;
             float step_re = osc_step[h].re, step_im = osc_step[h].im;
-            for (int k = 0; k < fft_size; k++) {
+            for (int32_t k = 0; k < fft_size; k++) {
                 float I = iq[(pos + k) * 2];
                 float Q = iq[(pos + k) * 2 + 1];
                 float Ir = I * osc_re + Q * osc_im;
@@ -518,14 +519,14 @@ static float pss_correlate(const float *iq, int n_samples, const cf_t *pss_ref,
 // ======================== SSS Detection ========================
 
 // Extract SSS from frequency domain, equalize using PSS channel estimate, correlate
-static int detect_sss(struct lte_state *st, const float *iq, int offset, int n_id_2,
+static int32_t detect_sss(struct lte_state *st, const float *iq, int32_t offset, int32_t n_id_2,
                       float freq_offset_hz, float *best_corr)
 {
     // SSS is symbol 5, PSS is symbol 6 (both in slot 0 for subframe 0)
     // offset = start of PSS DATA (128 samples)
     // Layout: ...[SSS_CP(9)][SSS_DATA(128)][PSS_CP(9)][PSS_DATA(128)]...
     // SSS data starts at: offset - 9(PSS_CP) - 128(SSS_DATA) = offset - 137
-    int sss_data_start = offset - LTE_CP_NORMAL - LTE_FFT_SIZE;
+    int32_t sss_data_start = offset - LTE_CP_NORMAL - LTE_FFT_SIZE;
     if (sss_data_start < 0) return -1;
 
     // Frequency correction parameters
@@ -539,11 +540,11 @@ static int detect_sss(struct lte_state *st, const float *iq, int offset, int n_i
     // Extract and frequency-correct SSS OFDM symbol (skip CP)
     cf_t sss_sym[LTE_FFT_SIZE];
     {
-        int idx = sss_data_start; // directly at SSS data (CP already excluded)
+        int32_t idx = sss_data_start; // directly at SSS data (CP already excluded)
         if (idx + LTE_FFT_SIZE > st->iq_buf_len) return -1;
         float osc_re = cosf(dp * idx);
         float osc_im = sinf(dp * idx);
-        for (int i = 0; i < LTE_FFT_SIZE; i++) {
+        for (int32_t i = 0; i < LTE_FFT_SIZE; i++) {
             float I = iq[(idx + i) * 2];
             float Q = iq[(idx + i) * 2 + 1];
             sss_sym[i].re = I * osc_re + Q * osc_im;
@@ -557,7 +558,7 @@ static int detect_sss(struct lte_state *st, const float *iq, int offset, int n_i
 
     // Extract 62 SSS subcarriers (central subcarriers, skipping DC)
     cf_t sss_rx[LTE_SSS_LEN];
-    for (int k = 0; k < 31; k++) {
+    for (int32_t k = 0; k < 31; k++) {
         sss_rx[k]      = sss_sym[LTE_FFT_SIZE - 31 + k];
         sss_rx[k + 31] = sss_sym[k + 1];
     }
@@ -568,13 +569,13 @@ static int detect_sss(struct lte_state *st, const float *iq, int offset, int n_i
     // Complex correlation: for a flat channel, SSS_rx[k] ≈ H * d[k]
     // |sum(SSS_rx[k] * d_ref[k])| = |H| * 62 for correct hypothesis
     // This works without explicit channel estimation when channel is flat
-    int best_n_id_1 = -1;
+    int32_t best_n_id_1 = -1;
     float max_corr = 0;
 
-    for (int q = 0; q < LTE_N_ID_1_COUNT; q++) {
-        for (int sf = 0; sf < 2; sf++) {
+    for (int32_t q = 0; q < LTE_N_ID_1_COUNT; q++) {
+        for (int32_t sf = 0; sf < 2; sf++) {
             float corr_re = 0, corr_im = 0;
-            for (int n = 0; n < LTE_SSS_LEN; n++) {
+            for (int32_t n = 0; n < LTE_SSS_LEN; n++) {
                 float d = (float)st->sss_d[q][sf][n];
                 corr_re += sss_rx[n].re * d;
                 corr_im += sss_rx[n].im * d;
@@ -590,14 +591,14 @@ static int detect_sss(struct lte_state *st, const float *iq, int offset, int n_i
     // Normalize: max_corr is |corr|², sig_power = sum(|sss_rx|²)
     // Metric = |corr| / sqrt(sig_power * 62) → 1.0 for perfect match
     float sig_power = 0;
-    for (int n = 0; n < LTE_SSS_LEN; n++)
+    for (int32_t n = 0; n < LTE_SSS_LEN; n++)
         sig_power += cf_abs2(sss_rx[n]);
     float norm_corr = 0;
     if (sig_power > 0)
         norm_corr = sqrtf(max_corr) / sqrtf(sig_power * LTE_SSS_LEN);
 
     {
-        static int sss_dbg = 0;
+        static int32_t sss_dbg = 0;
         if (++sss_dbg % 20 == 1)
             fprintf(stderr, "LTE SSS: n_id_2=%d best_n1=%d corr=%.4f sig_pwr=%.1f fo=%.0f\n",
                     n_id_2, best_n_id_1, norm_corr, sig_power, freq_offset_hz);
@@ -623,18 +624,18 @@ static const uint8_t pbch_deintl[40] = {
 
 // Generate Gold sequence c(n) for n = offset..offset+len-1
 // c_init = PCI, Nc = 1600
-static void gold_sequence(uint32_t c_init, int offset, int len, uint8_t *seq)
+static void gold_sequence(uint32_t c_init, int32_t offset, int32_t len, uint8_t *seq)
 {
     uint32_t x1 = 1u; // x1(0)=1
     uint32_t x2 = c_init;
     // Advance by Nc + offset
-    for (int n = 0; n < 1600 + offset; n++) {
+    for (int32_t n = 0; n < 1600 + offset; n++) {
         uint32_t new1 = ((x1 >> 3) ^ x1) & 1;
         x1 = (x1 >> 1) | (new1 << 30);
         uint32_t new2 = ((x2 >> 3) ^ (x2 >> 2) ^ (x2 >> 1) ^ x2) & 1;
         x2 = (x2 >> 1) | (new2 << 30);
     }
-    for (int n = 0; n < len; n++) {
+    for (int32_t n = 0; n < len; n++) {
         seq[n] = (uint8_t)(((x1 >> 0) ^ (x2 >> 0)) & 1);
         uint32_t new1 = ((x1 >> 3) ^ x1) & 1;
         x1 = (x1 >> 1) | (new1 << 30);
@@ -645,15 +646,15 @@ static void gold_sequence(uint32_t c_init, int offset, int len, uint8_t *seq)
 
 // Attempt to decode MIB from PBCH
 // PBCH occupies symbols 0-3 of slot 1 in subframe 0 (72 subcarriers, 6 RBs center)
-static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
-                       int pci, float freq_offset_hz, lte_mib_t *mib)
+static bool decode_mib(struct lte_state *st, const float *iq, int32_t frame_start,
+                       int32_t pci, float freq_offset_hz, lte_mib_t *mib)
 {
     // PBCH is in subframe 0, slot 1, symbols 0-3
-    int slot1_start = frame_start + LTE_SAMPLES_PER_SLOT;
-    int iq_pairs = st->iq_buf_len;
+    int32_t slot1_start = frame_start + LTE_SAMPLES_PER_SLOT;
+    int32_t iq_pairs = st->iq_buf_len;
 
     // Check bounds
-    int pbch_end = slot1_start + 4 * (LTE_CP_NORMAL + LTE_FFT_SIZE);
+    int32_t pbch_end = slot1_start + 4 * (LTE_CP_NORMAL + LTE_FFT_SIZE);
     if (slot1_start < 0 || pbch_end > iq_pairs) return false;
 
     // Pre-compute frequency correction oscillator parameters
@@ -663,14 +664,14 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
 
     // Extract 4 OFDM symbols of PBCH with frequency correction + FFT
     cf_t pbch_syms[4][LTE_FFT_SIZE];
-    int pos = slot1_start;
-    for (int sym_idx = 0; sym_idx < 4; sym_idx++) {
-        int cp_len = (sym_idx == 0) ? LTE_CP_NORMAL_0 : LTE_CP_NORMAL;
+    int32_t pos = slot1_start;
+    for (int32_t sym_idx = 0; sym_idx < 4; sym_idx++) {
+        int32_t cp_len = (sym_idx == 0) ? LTE_CP_NORMAL_0 : LTE_CP_NORMAL;
         pos += cp_len; // skip CP
         if (pos + LTE_FFT_SIZE > iq_pairs) return false;
         float osc_re = cosf(dp * pos);
         float osc_im = sinf(dp * pos);
-        for (int i = 0; i < LTE_FFT_SIZE; i++) {
+        for (int32_t i = 0; i < LTE_FFT_SIZE; i++) {
             float I = iq[(pos + i) * 2];
             float Q = iq[(pos + i) * 2 + 1];
             pbch_syms[sym_idx][i].re = I * osc_re + Q * osc_im;
@@ -685,16 +686,16 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
 
     // PSS-based channel estimation
     // PSS data is at frame_start + 832 (last symbol of slot 0)
-    int pss_pos = frame_start + LTE_CP_NORMAL_0 + LTE_FFT_SIZE
+    int32_t pss_pos = frame_start + LTE_CP_NORMAL_0 + LTE_FFT_SIZE
                 + 5 * (LTE_CP_NORMAL + LTE_FFT_SIZE) + LTE_CP_NORMAL;
-    int n_id_2 = pci % 3;
+    int32_t n_id_2 = pci % 3;
 
     // FFT the received PSS with frequency correction
     cf_t pss_rx[LTE_FFT_SIZE];
     {
         float osc_re_p = cosf(dp * pss_pos);
         float osc_im_p = sinf(dp * pss_pos);
-        for (int i = 0; i < LTE_FFT_SIZE; i++) {
+        for (int32_t i = 0; i < LTE_FFT_SIZE; i++) {
             float I = iq[(pss_pos + i) * 2];
             float Q = iq[(pss_pos + i) * 2 + 1];
             pss_rx[i].re = I * osc_re_p + Q * osc_im_p;
@@ -710,7 +711,7 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
     // h_est[0..30] = H at subcarriers -31..-1 (bins 97..127)
     // h_est[31..61] = H at subcarriers +1..+31 (bins 1..31)
     cf_t h_est[62];
-    for (int k = 0; k < 31; k++) {
+    for (int32_t k = 0; k < 31; k++) {
         // Negative freq subcarrier -(31-k): bin (FFT_SIZE-31+k), pss_freq[k]
         cf_t rx = pss_rx[LTE_FFT_SIZE - 31 + k];
         cf_t ref = st->pss_freq[n_id_2][k];
@@ -731,8 +732,8 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
     // PBCH k=0..35 → subcarriers -36..-1; k=36..71 → subcarriers +1..+36
     // PSS covers subcarriers -31..-1 and +1..+31; extrapolate edges
     cf_t h_pbch[72];
-    for (int k = 0; k < 72; k++) {
-        int sc = (k < 36) ? (k - 36) : (k - 35); // subcarrier index
+    for (int32_t k = 0; k < 72; k++) {
+        int32_t sc = (k < 36) ? (k - 36) : (k - 35); // subcarrier index
         if (sc >= -31 && sc <= -1) {
             h_pbch[k] = h_est[sc + 31]; // index 0..30
         } else if (sc >= 1 && sc <= 31) {
@@ -745,9 +746,9 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
     }
 
     // Apply zero-forcing equalization to all PBCH symbols
-    for (int sym_idx = 0; sym_idx < 4; sym_idx++) {
-        for (int k = 0; k < 72; k++) {
-            int bin = (k < 36) ? (LTE_FFT_SIZE - 36 + k) : (k - 35);
+    for (int32_t sym_idx = 0; sym_idx < 4; sym_idx++) {
+        for (int32_t k = 0; k < 72; k++) {
+            int32_t bin = (k < 36) ? (LTE_FFT_SIZE - 36 + k) : (k - 35);
             float denom = h_pbch[k].re * h_pbch[k].re + h_pbch[k].im * h_pbch[k].im;
             if (denom < 1e-10f) continue;
             float re = pbch_syms[sym_idx][bin].re;
@@ -758,7 +759,7 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
     }
 
     // Debug: print channel estimate quality
-    static int mib_dbg_cnt = 0;
+    static int32_t mib_dbg_cnt = 0;
     if (++mib_dbg_cnt % 20 == 1) {
         float ph0 = atan2f(h_est[15].im, h_est[15].re);
         float ph1 = atan2f(h_est[45].im, h_est[45].re);
@@ -771,23 +772,23 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
     //   Symbol 0 (slot1): CRS ports 0,1 → k%6 == v_shift OR k%6 == (v_shift+3)%6
     //   Symbol 1 (slot1): CRS ports 2,3 → k%6 == v_shift OR k%6 == (v_shift+3)%6
     //   Symbols 2,3: no CRS exclusion
-    int v_shift = pci % 6;
-    int v_shift3 = (v_shift + 3) % 6;
+    int32_t v_shift = pci % 6;
+    int32_t v_shift3 = (v_shift + 3) % 6;
     int8_t soft_bits[480];
-    int soft_idx = 0;
+    int32_t soft_idx = 0;
 
-    for (int sym_idx = 0; sym_idx < 4; sym_idx++) {
-        for (int k = 0; k < 72; k++) {
+    for (int32_t sym_idx = 0; sym_idx < 4; sym_idx++) {
+        for (int32_t k = 0; k < 72; k++) {
             // Map to FFT bin: center 72 subcarriers exclude DC
             // k=0..35 → subcarriers -36..-1 → FFT bins (N-36)..(N-1)
             // k=36..71 → subcarriers +1..+36 → FFT bins 1..36
-            int bin;
+            int32_t bin;
             if (k < 36) bin = LTE_FFT_SIZE - 36 + k; // bins 92..127
             else bin = k - 35;                         // bins 1..36
 
             // CRS exclusion on symbols 0,1 (for ports 0-3 ambiguity)
             if (sym_idx < 2) {
-                int kmod6 = k % 6;
+                int32_t kmod6 = k % 6;
                 if (kmod6 == v_shift || kmod6 == v_shift3)
                     continue;
             }
@@ -803,8 +804,8 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
 
     // Try all 4 possible frame positions within the 40ms TTI
     // Each position uses a different scrambling sequence offset (0, 480, 960, 1440)
-    for (int frame_quarter = 0; frame_quarter < 4; frame_quarter++) {
-        int scr_offset = frame_quarter * 480;
+    for (int32_t frame_quarter = 0; frame_quarter < 4; frame_quarter++) {
+        int32_t scr_offset = frame_quarter * 480;
 
         // Generate scrambling sequence for this quarter
         uint8_t scr_seq[480];
@@ -812,21 +813,21 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
 
         // Descramble soft bits
         int8_t descrambled[480];
-        for (int n = 0; n < 480; n++)
+        for (int32_t n = 0; n < 480; n++)
             descrambled[n] = scr_seq[n] ? -soft_bits[n] : soft_bits[n];
 
         // Rate de-matching: soft-combine 4 repetitions of 120 coded bits
-        int combined[120];
-        for (int i = 0; i < 120; i++)
+        int32_t combined[120];
+        for (int32_t i = 0; i < 120; i++)
             combined[i] = descrambled[i] + descrambled[120+i] + descrambled[240+i] + descrambled[360+i];
 
         // De-interleave: circular buffer = [stream0_intl[40], stream1_intl[40], stream2_intl[40]]
         // Viterbi expects: viterbi_in[t*3+g] = stream_g[t] (encoder output order)
         // De-interleave each stream using pbch_deintl: stream_g[t] = combined[g*40 + pbch_deintl[t]]
         int8_t viterbi_in[120];
-        for (int t = 0; t < 40; t++) {
-            for (int g = 0; g < 3; g++) {
-                int val = combined[g * 40 + pbch_deintl[t]];
+        for (int32_t t = 0; t < 40; t++) {
+            for (int32_t g = 0; g < 3; g++) {
+                int32_t val = combined[g * 40 + pbch_deintl[t]];
                 if (val > 127) val = 127;
                 if (val < -127) val = -127;
                 viterbi_in[t * 3 + g] = (int8_t)val;
@@ -835,13 +836,13 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
 
         // Viterbi decode (tail-biting: init all states equally)
         uint8_t decoded[120];
-        int n_decoded = viterbi_decode(viterbi_in, 120, decoded);
+        int32_t n_decoded = viterbi_decode(viterbi_in, 120, decoded);
         if (n_decoded < 40) continue;
 
         // Check CRC-16
         uint16_t crc = crc16_lte(decoded, 24);
         uint16_t rx_crc = 0;
-        for (int i = 0; i < 16; i++)
+        for (int32_t i = 0; i < 16; i++)
             rx_crc |= (uint16_t)(decoded[24 + i] & 1) << (15 - i);
 
         // CRC mask indicates antenna ports
@@ -857,7 +858,7 @@ static bool decode_mib(struct lte_state *st, const float *iq, int frame_start,
         mib->phich_duration = decoded[3];
         mib->phich_resources = (decoded[4] << 1) | decoded[5];
         mib->sfn = 0;
-        for (int i = 0; i < 8; i++)
+        for (int32_t i = 0; i < 8; i++)
             mib->sfn |= (uint16_t)(decoded[6 + i] & 1) << (9 - i);
         // Lower 2 bits of SFN from frame quarter position
         mib->sfn |= (uint16_t)(frame_quarter & 3);
@@ -886,8 +887,8 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
             // Buffer full — process and shift
             // Try PSS detection on the buffered data
             float max_corr_dbg = 0;
-            for (int nid2 = 0; nid2 < 3; nid2++) {
-                int peak_pos = 0;
+            for (int32_t nid2 = 0; nid2 < 3; nid2++) {
+                int32_t peak_pos = 0;
                 float peak_phase = 0;
                 float freq_offset_hz = 0;
                 float corr = pss_correlate(st->iq_buf, st->iq_buf_len,
@@ -900,10 +901,10 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
 
                     // Try SSS detection using PSS-based channel estimation
                     float sss_corr = 0;
-                    int n_id_1 = detect_sss(st, st->iq_buf, peak_pos, nid2,
+                    int32_t n_id_1 = detect_sss(st, st->iq_buf, peak_pos, nid2,
                                             freq_offset_hz, &sss_corr);
 
-                    int pci = -1;
+                    int32_t pci = -1;
                     if (n_id_1 >= 0) {
                         pci = 3 * n_id_1 + nid2;
                         st->stats.sss_decoded++;
@@ -912,7 +913,7 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
                     // Find or create cell entry
                     lte_cell_state_t *cell = NULL;
                     if (pci >= 0) {
-                        for (int c = 0; c < st->cell_count; c++) {
+                        for (int32_t c = 0; c < st->cell_count; c++) {
                             if (st->cells[c].active && st->cells[c].info.pci == (uint16_t)pci) {
                                 cell = &st->cells[c];
                                 break;
@@ -934,7 +935,7 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
                         }
                     } else if (!cell && pci < 0) {
                         // PSS only — check if we already have a PSS-only cell for this N_ID_2
-                        for (int c = 0; c < st->cell_count; c++) {
+                        for (int32_t c = 0; c < st->cell_count; c++) {
                             if (st->cells[c].active && st->cells[c].info.n_id_2 == (uint8_t)nid2 &&
                                 st->cells[c].info.sync_state == LTE_SYNC_PSS) {
                                 cell = &st->cells[c];
@@ -966,7 +967,7 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
                             // Try MIB decode
                             // PSS is symbol 6 of slot 0, peak_pos = PSS data start
                             // Frame start = peak_pos - PSS_CP - 5*(CP+FFT) - (CP0+FFT)
-                            int frame_start = peak_pos - LTE_CP_NORMAL
+                            int32_t frame_start = peak_pos - LTE_CP_NORMAL
                                             - 5 * (LTE_CP_NORMAL + LTE_FFT_SIZE)
                                             - (LTE_CP_NORMAL_0 + LTE_FFT_SIZE);
                             lte_mib_t mib;
@@ -979,16 +980,16 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
                                 st->stats.mib_decoded++;
 
                                 // Attempt SIB1 decode (only feasible for 1.4 MHz cells)
-                                int n_rb = lte_bw_to_nrb(mib.dl_bandwidth);
+                                int32_t n_rb = lte_bw_to_nrb(mib.dl_bandwidth);
                                 if (n_rb <= 6 && mib.sfn % 8 == 0) {
                                     // SIB1 is in subframe 5 of even frames (SFN mod 2 == 0)
-                                    int sf5_start = frame_start + 5 * LTE_SAMPLES_PER_SLOT * 2;
+                                    int32_t sf5_start = frame_start + 5 * LTE_SAMPLES_PER_SLOT * 2;
                                     lte_dci_t dci;
                                     if (lte_decode_pdcch_si(st->iq_buf, st->iq_buf_len,
                                             sf5_start, n_rb, pci, freq_offset_hz,
                                             st->fft_twiddle, &dci)) {
                                         uint8_t tb_bits[4096];
-                                        int tb_len = 0;
+                                        int32_t tb_len = 0;
                                         if (lte_decode_pdsch_sib(st->iq_buf, st->iq_buf_len,
                                                 sf5_start, n_rb, pci, freq_offset_hz,
                                                 st->fft_twiddle, &dci, tb_bits, &tb_len)) {
@@ -1014,16 +1015,16 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
 
                                     // Try SI messages in SI-window subframes (4,6-9)
                                     // These carry SIB2-14 according to SIB1 scheduling
-                                    static const int si_subframes[] = { 4, 6, 7, 8, 9 };
-                                    for (int si = 0; si < 5; si++) {
-                                        int sf_start = frame_start + si_subframes[si] * LTE_SAMPLES_PER_SLOT * 2;
+                                    static const int32_t si_subframes[] = { 4, 6, 7, 8, 9 };
+                                    for (int32_t si = 0; si < 5; si++) {
+                                        int32_t sf_start = frame_start + si_subframes[si] * LTE_SAMPLES_PER_SLOT * 2;
                                         lte_dci_t si_dci;
                                         if (!lte_decode_pdcch_si(st->iq_buf, st->iq_buf_len,
                                                 sf_start, n_rb, pci, freq_offset_hz,
                                                 st->fft_twiddle, &si_dci))
                                             continue;
                                         uint8_t si_bits[4096];
-                                        int si_len = 0;
+                                        int32_t si_len = 0;
                                         if (!lte_decode_pdsch_sib(st->iq_buf, st->iq_buf_len,
                                                 sf_start, n_rb, pci, freq_offset_hz,
                                                 st->fft_twiddle, &si_dci, si_bits, &si_len))
@@ -1115,8 +1116,8 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
                                             a->active = true;
                                             snprintf(a->category, sizeof(a->category), "EAB Active");
                                             // Build barring info text
-                                            int tpos = 0;
-                                            for (int ac = 0; ac < 10; ac++) {
+                                            int32_t tpos = 0;
+                                            for (int32_t ac = 0; ac < 10; ac++) {
                                                 if (si_res.sib14.ac_barring[ac].barred) {
                                                     tpos += snprintf(a->text + tpos,
                                                         sizeof(a->text) - (size_t)tpos,
@@ -1141,14 +1142,14 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
                 }
             }
             {
-                static int dbg_n = 0;
+                static int32_t dbg_n = 0;
                 if (++dbg_n % 50 == 1)
                     fprintf(stderr, "LTE: buf#%d maxCorr=%.4f freq=%.1f MHz\n",
                             dbg_n, max_corr_dbg, st->cfg.center_freq / 1e6);
             }
 
             // Shift buffer left by half
-            int shift = st->iq_buf_size / 2;
+            int32_t shift = st->iq_buf_size / 2;
             memmove(st->iq_buf, st->iq_buf + shift * 2,
                     (size_t)(st->iq_buf_len - shift) * 2 * sizeof(float));
             st->iq_buf_len -= shift;
@@ -1157,10 +1158,10 @@ void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len)
 
         // Convert u8 IQ to float (centered at 0)
         for (uint32_t i = 0; i < chunk; i++) {
-            st->iq_buf[(st->iq_buf_len + (int)i) * 2]     = ((float)iq_data[(offset + i) * 2] - 127.5f) / 127.5f;
-            st->iq_buf[(st->iq_buf_len + (int)i) * 2 + 1] = ((float)iq_data[(offset + i) * 2 + 1] - 127.5f) / 127.5f;
+            st->iq_buf[(st->iq_buf_len + (int32_t)i) * 2]     = ((float)iq_data[(offset + i) * 2] - 127.5f) / 127.5f;
+            st->iq_buf[(st->iq_buf_len + (int32_t)i) * 2 + 1] = ((float)iq_data[(offset + i) * 2 + 1] - 127.5f) / 127.5f;
         }
-        st->iq_buf_len += (int)chunk;
+        st->iq_buf_len += (int32_t)chunk;
         offset += chunk;
         st->sample_counter += chunk;
     }
@@ -1180,11 +1181,11 @@ void lte_get_stats(const struct lte_state *st, lte_stats_t *out)
     *out = st->stats;
 }
 
-int lte_get_cells(const struct lte_state *st, lte_cell_info_t *out, int max_cells)
+int32_t lte_get_cells(const struct lte_state *st, lte_cell_info_t *out, int32_t max_cells)
 {
     if (!st || !out) return 0;
-    int count = 0;
-    for (int i = 0; i < st->cell_count && count < max_cells; i++) {
+    int32_t count = 0;
+    for (int32_t i = 0; i < st->cell_count && count < max_cells; i++) {
         if (st->cells[i].active) {
             out[count++] = st->cells[i].info;
         }
@@ -1196,7 +1197,7 @@ lte_sync_state_t lte_get_best_sync(const struct lte_state *st)
 {
     if (!st) return LTE_SYNC_NONE;
     lte_sync_state_t best = LTE_SYNC_NONE;
-    for (int i = 0; i < st->cell_count; i++) {
+    for (int32_t i = 0; i < st->cell_count; i++) {
         if (st->cells[i].active && st->cells[i].info.sync_state > best)
             best = st->cells[i].info.sync_state;
     }
@@ -1295,7 +1296,7 @@ const char *lte_bw_string(uint8_t dl_bw)
     }
 }
 
-int lte_bw_to_nrb(uint8_t dl_bw)
+int32_t lte_bw_to_nrb(uint8_t dl_bw)
 {
     switch (dl_bw) {
         case 0: return 6;

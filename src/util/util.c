@@ -51,6 +51,7 @@
 #define _GNU_SOURCE
 
 #include "dump1090.h"
+#include <stdint.h>
 
 #include <stdlib.h>
 #include <sys/time.h>
@@ -84,7 +85,7 @@ void normalize_timespec(struct timespec *ts)
         ts->tv_sec += ts->tv_nsec / 1000000000;
         ts->tv_nsec = ts->tv_nsec % 1000000000;
     } else if (ts->tv_nsec < 0) {
-        long adjust = ts->tv_nsec / 1000000000 + 1;
+        int64_t adjust = ts->tv_nsec / 1000000000 + 1;
         ts->tv_sec -= adjust;
         ts->tv_nsec = (ts->tv_nsec + 1000000000 * adjust) % 1000000000;
     }

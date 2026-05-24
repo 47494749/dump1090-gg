@@ -33,7 +33,7 @@ static uint32_t adsl_crc_pass(uint32_t crc, uint8_t byte)
 {
     const uint32_t poly = 0xFFFA0480;
     crc |= byte;
-    for (int bit = 0; bit < 8; bit++) {
+    for (int32_t bit = 0; bit < 8; bit++) {
         if (crc & 0x80000000)
             crc ^= poly;
         crc <<= 1;
@@ -44,7 +44,7 @@ static uint32_t adsl_crc_pass(uint32_t crc, uint8_t byte)
 bool adsl_check_crc(const uint8_t *data24)
 {
     uint32_t crc = 0;
-    for (int i = 0; i < ADSL_PACKET_TOTAL; i++) {
+    for (int32_t i = 0; i < ADSL_PACKET_TOTAL; i++) {
         crc = adsl_crc_pass(crc, data24[i]);
     }
     return (crc >> 8) == 0;
@@ -54,17 +54,17 @@ bool adsl_check_crc(const uint8_t *data24)
 
 // XXTEA decrypt with all-zero key, n=5 words, 6 rounds.
 // Standard btea decrypt: y carries from previous iteration (initial = v[0]).
-static void xxtea_decrypt_key0(uint32_t *data, int n, int rounds)
+static void xxtea_decrypt_key0(uint32_t *data, int32_t n, int32_t rounds)
 {
     const uint32_t delta = 0x9E3779B9;
     uint32_t sum = (uint32_t)rounds * delta;
     uint32_t y = data[0];
 
-    for (int cycle = 0; cycle < rounds; cycle++) {
+    for (int32_t cycle = 0; cycle < rounds; cycle++) {
         uint32_t e = (sum >> 2) & 3;
         uint32_t z;
 
-        for (int p = n - 1; p > 0; p--) {
+        for (int32_t p = n - 1; p > 0; p--) {
             z = data[p - 1];
             uint32_t mx = ((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4))
                         ^ ((sum ^ y) + z);
@@ -101,7 +101,7 @@ static inline uint32_t get4bytes(const uint8_t *b)
 static uint16_t ur2v6_adsl(uint8_t code)
 {
     if (code < 64) return code;
-    int exp = (code >> 6) - 1;
+    int32_t exp = (code >> 6) - 1;
     uint16_t mant = code & 0x3F;
     return (uint16_t)((mant + 64) << exp);
 }
@@ -111,7 +111,7 @@ static uint16_t ur2v6_adsl(uint8_t code)
 static int32_t ur2v12_adsl(uint16_t code)
 {
     if (code < 4096) return (int32_t)code;
-    int exp = (code >> 12) - 1;
+    int32_t exp = (code >> 12) - 1;
     int32_t mant = code & 0x0FFF;
     return (mant + 4096) << exp;
 }
@@ -140,7 +140,7 @@ bool adsl_decode_packet(const uint8_t *data24,
 
     // Extract 5 words from bytes 1-20 (little-endian)
     uint32_t words[5];
-    for (int i = 0; i < 5; i++) {
+    for (int32_t i = 0; i < 5; i++) {
         words[i] = get4bytes(&data24[1 + i * 4]);
     }
 
@@ -149,7 +149,7 @@ bool adsl_decode_packet(const uint8_t *data24,
 
     // Re-serialize descrambled words to byte array for field extraction
     uint8_t pkt[20];
-    for (int i = 0; i < 5; i++) {
+    for (int32_t i = 0; i < 5; i++) {
         pkt[i * 4 + 0] = (uint8_t)(words[i]);
         pkt[i * 4 + 1] = (uint8_t)(words[i] >> 8);
         pkt[i * 4 + 2] = (uint8_t)(words[i] >> 16);
@@ -224,10 +224,10 @@ bool adsl_decode_packet(const uint8_t *data24,
 
     // Altitude: 14 bits (pos[7] + pos[8] bits 0-5), UnsVR12, offset -320
     uint16_t alt_code = (uint16_t)pos[7] | (((uint16_t)(pos[8] & 0x3F)) << 8);
-    int altitude = (int)ur2v12_adsl(alt_code) - 320;
+    int32_t altitude = (int32_t)ur2v12_adsl(alt_code) - 320;
 
     // Apply geoid correction
-    altitude -= (int)roundf(ref_alt_geoid);
+    altitude -= (int32_t)roundf(ref_alt_geoid);
 
     // Climb rate: 9 bits (pos[8] bits 6-7 + pos[9] bits 0-6)
     // Sign-magnitude with UnsVR6 decode, units = 0.125 m/s

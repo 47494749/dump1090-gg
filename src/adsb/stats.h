@@ -75,7 +75,7 @@ struct stats {
     uint64_t samples_dropped;
 
     // SDR settings:
-    int sdr_gain;  // current gain step in use
+    int32_t sdr_gain;  // current gain step in use
 
     // timing:
     struct timespec demod_cpu;
@@ -148,7 +148,7 @@ struct stats {
     uint32_t adaptive_loud_decoded;                     // Total number of loud, decoded messages
     uint32_t adaptive_gain_changes;                     // Total number of gain changes caused by adaptive gain control
     double adaptive_noise_dbfs;                         // Current adaptive-dynamic-range smoothed noise measurement, dBFS
-    int adaptive_range_gain_limit;                      // Current adaptive-dynamic-range gain step limit
+    int32_t adaptive_range_gain_limit;                      // Current adaptive-dynamic-range gain step limit
 };
 
 void add_stats(const struct stats *st1, const struct stats *st2, struct stats *target);

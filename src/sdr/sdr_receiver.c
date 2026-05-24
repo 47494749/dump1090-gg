@@ -8,6 +8,7 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_receiver.h"
 #include "dispatcher.h"
 #include "msg_queue.h"
@@ -38,13 +39,13 @@
 // ======================== Global state ========================
 
 sdr_manager_t SdrManager;
-int PocsagOutputEnabled = 1;  // toggled from panel; 1 = decode & show messages
-int GsmOutputEnabled = 1;     // toggled from panel; 1 = decode & show GSM cells
-int LteOutputEnabled = 1;     // toggled from panel; 1 = decode & show LTE cells
-int IotOutputEnabled = 1;     // toggled from panel; 1 = decode & show IoT devices
-int FanetOutputEnabled = 1;   // toggled from panel; 1 = decode & show FANET traffic
-int SarsatOutputEnabled = 1;  // toggled from panel; 1 = decode & show Sarsat beacons
-int DvbDriverWarning = 0;     // set to 1 if dvb_usb_rtl28xxu kernel module is loaded
+int32_t PocsagOutputEnabled = 1;  // toggled from panel; 1 = decode & show messages
+int32_t GsmOutputEnabled = 1;     // toggled from panel; 1 = decode & show GSM cells
+int32_t LteOutputEnabled = 1;     // toggled from panel; 1 = decode & show LTE cells
+int32_t IotOutputEnabled = 1;     // toggled from panel; 1 = decode & show IoT devices
+int32_t FanetOutputEnabled = 1;   // toggled from panel; 1 = decode & show FANET traffic
+int32_t SarsatOutputEnabled = 1;  // toggled from panel; 1 = decode & show Sarsat beacons
+int32_t DvbDriverWarning = 0;     // set to 1 if dvb_usb_rtl28xxu kernel module is loaded
 
 // Dispatcher aircraft queue for FANET (registered on first use)
 static aircraft_queue_handle_t fanet_aircraft_queue = NULL;
@@ -53,7 +54,7 @@ static aircraft_queue_handle_t fanet_aircraft_queue = NULL;
 #define FANET_GROUND_MAX 64
 
 static fanet_ground_entry_t fanet_ground_cache[FANET_GROUND_MAX];
-static int fanet_ground_count = 0;
+static int32_t fanet_ground_count = 0;
 static pthread_mutex_t fanet_ground_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // FANET recent messages caches (for panel display)
@@ -64,31 +65,31 @@ static pthread_mutex_t fanet_ground_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define FANET_ACK_MAX 32
 
 static fanet_name_entry_t fanet_name_cache[FANET_NAME_MAX];
-static int fanet_name_count = 0;
+static int32_t fanet_name_count = 0;
 static pthread_mutex_t fanet_name_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static fanet_msg_entry_t fanet_msg_cache[FANET_MSG_MAX];
-static int fanet_msg_count = 0;
+static int32_t fanet_msg_count = 0;
 static pthread_mutex_t fanet_msg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static fanet_wx_entry_t fanet_wx_cache[FANET_WX_MAX];
-static int fanet_wx_count = 0;
+static int32_t fanet_wx_count = 0;
 static pthread_mutex_t fanet_wx_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static fanet_thermal_entry_t fanet_thermal_cache[FANET_THERMAL_MAX];
-static int fanet_thermal_count = 0;
+static int32_t fanet_thermal_count = 0;
 static pthread_mutex_t fanet_thermal_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static fanet_ack_entry_t fanet_ack_cache[FANET_ACK_MAX];
-static int fanet_ack_count = 0;
-static int fanet_ack_write = 0;  // ring buffer index
+static int32_t fanet_ack_count = 0;
+static int32_t fanet_ack_write = 0;  // ring buffer index
 static pthread_mutex_t fanet_ack_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void fanetGetGroundTracks(void (*cb)(const fanet_ground_entry_t *e, void *ctx), void *ctx)
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_ground_mutex);
-    for (int i = 0; i < fanet_ground_count; i++) {
+    for (int32_t i = 0; i < fanet_ground_count; i++) {
         if (fanet_ground_cache[i].valid && (now - fanet_ground_cache[i].last_seen) < 300000)
             cb(&fanet_ground_cache[i], ctx);
     }
@@ -102,9 +103,9 @@ static void fanet_ground_cache_update(uint32_t addr, double lat, double lon,
     pthread_mutex_lock(&fanet_ground_mutex);
 
     // Find existing entry or oldest slot
-    int slot = -1, oldest = -1;
+    int32_t slot = -1, oldest = -1;
     uint64_t oldest_time = UINT64_MAX;
-    for (int i = 0; i < fanet_ground_count; i++) {
+    for (int32_t i = 0; i < fanet_ground_count; i++) {
         if (fanet_ground_cache[i].addr == addr) { slot = i; break; }
         if (fanet_ground_cache[i].last_seen < oldest_time) {
             oldest_time = fanet_ground_cache[i].last_seen;
@@ -136,7 +137,7 @@ void fanetGetNames(void (*cb)(const fanet_name_entry_t *e, void *ctx), void *ctx
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_name_mutex);
-    for (int i = 0; i < fanet_name_count; i++) {
+    for (int32_t i = 0; i < fanet_name_count; i++) {
         if (fanet_name_cache[i].valid && (now - fanet_name_cache[i].last_seen) < 600000)
             cb(&fanet_name_cache[i], ctx);
     }
@@ -147,9 +148,9 @@ static void fanet_name_cache_update(uint32_t addr, const char *name)
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_name_mutex);
-    int slot = -1, oldest = -1;
+    int32_t slot = -1, oldest = -1;
     uint64_t oldest_time = UINT64_MAX;
-    for (int i = 0; i < fanet_name_count; i++) {
+    for (int32_t i = 0; i < fanet_name_count; i++) {
         if (fanet_name_cache[i].addr == addr) { slot = i; break; }
         if (fanet_name_cache[i].last_seen < oldest_time) { oldest_time = fanet_name_cache[i].last_seen; oldest = i; }
     }
@@ -169,7 +170,7 @@ void fanetGetMessages(void (*cb)(const fanet_msg_entry_t *e, void *ctx), void *c
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_msg_mutex);
-    for (int i = 0; i < fanet_msg_count; i++) {
+    for (int32_t i = 0; i < fanet_msg_count; i++) {
         if (fanet_msg_cache[i].valid && (now - fanet_msg_cache[i].last_seen) < 600000)
             cb(&fanet_msg_cache[i], ctx);
     }
@@ -181,9 +182,9 @@ static void fanet_msg_cache_update(uint32_t addr, uint8_t subtype, const char *t
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_msg_mutex);
     // Messages are appended as a ring (most recent wins per slot)
-    int slot = -1, oldest = -1;
+    int32_t slot = -1, oldest = -1;
     uint64_t oldest_time = UINT64_MAX;
-    for (int i = 0; i < fanet_msg_count; i++) {
+    for (int32_t i = 0; i < fanet_msg_count; i++) {
         if (fanet_msg_cache[i].addr == addr && fanet_msg_cache[i].subtype == subtype) { slot = i; break; }
         if (fanet_msg_cache[i].last_seen < oldest_time) { oldest_time = fanet_msg_cache[i].last_seen; oldest = i; }
     }
@@ -204,7 +205,7 @@ void fanetGetWeather(void (*cb)(const fanet_wx_entry_t *e, void *ctx), void *ctx
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_wx_mutex);
-    for (int i = 0; i < fanet_wx_count; i++) {
+    for (int32_t i = 0; i < fanet_wx_count; i++) {
         if (fanet_wx_cache[i].valid && (now - fanet_wx_cache[i].last_seen) < 600000)
             cb(&fanet_wx_cache[i], ctx);
     }
@@ -215,9 +216,9 @@ static void fanet_wx_cache_update(uint32_t addr, const char *name, const fanet_m
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_wx_mutex);
-    int slot = -1, oldest = -1;
+    int32_t slot = -1, oldest = -1;
     uint64_t oldest_time = UINT64_MAX;
-    for (int i = 0; i < fanet_wx_count; i++) {
+    for (int32_t i = 0; i < fanet_wx_count; i++) {
         if (fanet_wx_cache[i].addr == addr) { slot = i; break; }
         if (fanet_wx_cache[i].last_seen < oldest_time) { oldest_time = fanet_wx_cache[i].last_seen; oldest = i; }
     }
@@ -252,7 +253,7 @@ void fanetGetThermals(void (*cb)(const fanet_thermal_entry_t *e, void *ctx), voi
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_thermal_mutex);
-    for (int i = 0; i < fanet_thermal_count; i++) {
+    for (int32_t i = 0; i < fanet_thermal_count; i++) {
         if (fanet_thermal_cache[i].valid && (now - fanet_thermal_cache[i].last_seen) < 600000)
             cb(&fanet_thermal_cache[i], ctx);
     }
@@ -263,9 +264,9 @@ static void fanet_thermal_cache_update(uint32_t addr, const fanet_message_t *msg
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_thermal_mutex);
-    int slot = -1, oldest = -1;
+    int32_t slot = -1, oldest = -1;
     uint64_t oldest_time = UINT64_MAX;
-    for (int i = 0; i < fanet_thermal_count; i++) {
+    for (int32_t i = 0; i < fanet_thermal_count; i++) {
         if (fanet_thermal_cache[i].addr == addr) { slot = i; break; }
         if (fanet_thermal_cache[i].last_seen < oldest_time) { oldest_time = fanet_thermal_cache[i].last_seen; oldest = i; }
     }
@@ -291,7 +292,7 @@ void fanetGetAcks(void (*cb)(const fanet_ack_entry_t *e, void *ctx), void *ctx)
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_ack_mutex);
-    for (int i = 0; i < fanet_ack_count; i++) {
+    for (int32_t i = 0; i < fanet_ack_count; i++) {
         if (fanet_ack_cache[i].valid && (now - fanet_ack_cache[i].timestamp) < 300000)
             cb(&fanet_ack_cache[i], ctx);
     }
@@ -302,7 +303,7 @@ static void fanet_ack_cache_update(uint32_t src_addr, uint32_t dst_addr)
 {
     uint64_t now = mstime();
     pthread_mutex_lock(&fanet_ack_mutex);
-    int slot = fanet_ack_write;
+    int32_t slot = fanet_ack_write;
     fanet_ack_cache[slot].src_addr = src_addr;
     fanet_ack_cache[slot].dst_addr = dst_addr;
     fanet_ack_cache[slot].timestamp = now;
@@ -434,7 +435,7 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
         } else if (!strcasecmp(token, "agc")) {
             config->digital_agc = true;
         } else if (!strncasecmp(token, "freq=", 5)) {
-            config->freq = (int)strtol(token + 5, NULL, 10);
+            config->freq = (int32_t)strtol(token + 5, NULL, 10);
         } else if (!strncasecmp(token, "rate=", 5)) {
             config->sample_rate = strtod(token + 5, NULL);
         } else if (!strncasecmp(token, "path=", 5)) {
@@ -673,22 +674,22 @@ void rxFifoRelease(rx_fifo_t *fifo, struct mag_buf *buf)
 
 #if defined(ENABLE_RTLSDR) || defined(ENABLE_SDRGG)
 
-static int rx_sort_gains(const void *left, const void *right)
+static int32_t rx_sort_gains(const void *left, const void *right)
 {
-    return *(const int *)left - *(const int *)right;
+    return *(const int32_t *)left - *(const int32_t *)right;
 }
 
-int rxGetGain(sdr_receiver_t *rx)
+int32_t rxGetGain(sdr_receiver_t *rx)
 {
     return rx->rtl.current_gain;
 }
 
-int rxGetMaxGain(sdr_receiver_t *rx)
+int32_t rxGetMaxGain(sdr_receiver_t *rx)
 {
     return rx->rtl.gain_steps - 1;
 }
 
-double rxGetGainDb(sdr_receiver_t *rx, int step)
+double rxGetGainDb(sdr_receiver_t *rx, int32_t step)
 {
     if (!rx->rtl.gains) return 0.0;
     if (step < 0) step = 0;
@@ -696,7 +697,7 @@ double rxGetGainDb(sdr_receiver_t *rx, int step)
     return rx->rtl.gains[step] / 10.0;
 }
 
-int rxSetGain(sdr_receiver_t *rx, int step)
+int32_t rxSetGain(sdr_receiver_t *rx, int32_t step)
 {
     if (!rx->rtl.gains || !rx->backend_dev) return -1;
 
@@ -728,21 +729,21 @@ int rxSetGain(sdr_receiver_t *rx, int step)
     return step;
 }
 
-static int rx_find_device_index(const sdr_backend_ops_t *ops, const char *serial)
+static int32_t rx_find_device_index(const sdr_backend_ops_t *ops, const char *serial)
 {
     sdr_dev_info_t devs[MAX_SDR_RECEIVERS];
-    int count = ops->enumerate(devs, MAX_SDR_RECEIVERS);
+    int32_t count = ops->enumerate(devs, MAX_SDR_RECEIVERS);
     if (!count) return -1;
 
     // Exact match
-    for (int i = 0; i < count; i++) {
+    for (int32_t i = 0; i < count; i++) {
         if (!strcmp(serial, devs[i].serial))
             return devs[i].index;
     }
 
     // Prefix match
     size_t slen = strlen(serial);
-    for (int i = 0; i < count; i++) {
+    for (int32_t i = 0; i < count; i++) {
         if (!strncmp(serial, devs[i].serial, slen))
             return devs[i].index;
     }
@@ -765,7 +766,7 @@ static void rx_stream_callback(uint8_t *buf, uint32_t len, void *ctx)
     uint32_t new_freq = rx->pending_freq;
     if (new_freq) {
         rx->pending_freq = 0;
-        int ret = rx->backend_ops->set_frequency(rx->backend_dev, new_freq);
+        int32_t ret = rx->backend_ops->set_frequency(rx->backend_dev, new_freq);
         if (ret < 0) {
             rx->usb_error_count++;
             rx->usb_error_total++;
@@ -815,8 +816,8 @@ static void rx_stream_callback(uint8_t *buf, uint32_t len, void *ctx)
         uint32_t n = (samples_read < 256) ? samples_read : 256;
         uint64_t s = 0;
         for (uint32_t i = 0; i < n * 2; i += 2) {
-            int I = (int)buf[i] - 128;
-            int Q = (int)buf[i+1] - 128;
+            int32_t I = (int32_t)buf[i] - 128;
+            int32_t Q = (int32_t)buf[i+1] - 128;
             s += (uint32_t)(I*I + Q*Q);
         }
         __atomic_add_fetch(&rx->ag_iq_sum, s, __ATOMIC_RELAXED);
@@ -880,14 +881,14 @@ bool rxOpen(sdr_receiver_t *rx)
 
     // Enumerate devices via the resolved backend
     sdr_dev_info_t devs[MAX_SDR_RECEIVERS];
-    int dev_count = ops->enumerate(devs, MAX_SDR_RECEIVERS);
+    int32_t dev_count = ops->enumerate(devs, MAX_SDR_RECEIVERS);
     if (!dev_count) {
         fprintf(stderr, "rx[%d]: no SDR devices found (backend=%s)\n", rx->id, ops->name);
         rx->state = RX_STATE_ERROR;
         return false;
     }
 
-    int dev_index = -1;
+    int32_t dev_index = -1;
     if (rx->config.serial[0]) {
         dev_index = rx_find_device_index(ops, rx->config.serial);
         if (dev_index < 0) {
@@ -897,10 +898,10 @@ bool rxOpen(sdr_receiver_t *rx)
         }
     } else {
         // Auto-assign: find first device not already in use by another receiver
-        for (int i = 0; i < dev_count; i++) {
+        for (int32_t i = 0; i < dev_count; i++) {
             // Check if already used
             bool in_use = false;
-            for (int r = 0; r < SdrManager.count; r++) {
+            for (int32_t r = 0; r < SdrManager.count; r++) {
                 if (r != rx->id && SdrManager.receivers[r].state >= RX_STATE_OPEN &&
                     !strcmp(SdrManager.receivers[r].serial_actual, devs[i].serial)) {
                     in_use = true;
@@ -920,7 +921,7 @@ bool rxOpen(sdr_receiver_t *rx)
     }
 
     // Fill identity from enumeration info
-    for (int i = 0; i < dev_count; i++) {
+    for (int32_t i = 0; i < dev_count; i++) {
         if (devs[i].index == dev_index) {
             strncpy(rx->serial_actual, devs[i].serial, sizeof(rx->serial_actual) - 1);
             strncpy(rx->manufacturer, devs[i].manufacturer, sizeof(rx->manufacturer) - 1);
@@ -944,7 +945,7 @@ bool rxOpen(sdr_receiver_t *rx)
     }
     rx->backend_dev = sdev;
     rx->rtl.dev = sdev->handle;  // legacy compat: keep raw handle in rtl.dev
-    rx->rtl.tuner_type = (int)sdev->tuner_type;
+    rx->rtl.tuner_type = (int32_t)sdev->tuner_type;
 
     // Gain setup
     if (rx->config.direct_sampling) {
@@ -952,14 +953,14 @@ bool rxOpen(sdr_receiver_t *rx)
         ops->set_direct_sampling(sdev, rx->config.direct_sampling);
         rx->rtl.gain_steps = 0;
     } else {
-        int numgains = ops->get_tuner_gains(sdev, NULL, 0);
+        int32_t numgains = ops->get_tuner_gains(sdev, NULL, 0);
         if (numgains <= 0) {
             fprintf(stderr, "rx[%d]: error getting tuner gains\n", rx->id);
             rxClose(rx);
             return false;
         }
 
-        int *gains = malloc((numgains + 1) * sizeof(int));
+        int32_t *gains = malloc((numgains + 1) * sizeof(int32_t));
         if (ops->get_tuner_gains(sdev, gains, numgains) != numgains) {
             fprintf(stderr, "rx[%d]: error getting tuner gains\n", rx->id);
             free(gains);
@@ -975,13 +976,13 @@ bool rxOpen(sdr_receiver_t *rx)
         rx->rtl.gains = gains;
 
         // Select gain step
-        int selected = -1;
+        int32_t selected = -1;
         if (rx->config.gain == MODES_LEGACY_AUTO_GAIN) {
             selected = numgains;  // AGC
         } else if (rx->config.gain == MODES_DEFAULT_GAIN) {
             selected = numgains - 1;  // max manual gain
         } else {
-            for (int i = 0; i <= numgains; ++i) {
+            for (int32_t i = 0; i <= numgains; ++i) {
                 if (selected == -1 || fabs(gains[i] / 10.0 - rx->config.gain) < fabs(gains[selected] / 10.0 - rx->config.gain))
                     selected = i;
             }
@@ -1150,7 +1151,7 @@ static void *rx_file_reader_thread(void *arg)
             if (sleep_us > 0) {
                 struct timespec ts;
                 ts.tv_sec = (time_t)(sleep_us / 1e6);
-                ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+                ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
                 nanosleep(&ts, NULL);
             }
         }
@@ -1236,7 +1237,7 @@ void rxClose(sdr_receiver_t *rx)
 // is still streaming on the same USB bus.
 // Precondition: rx->state == RX_STATE_RUNNING (will be stopped internally).
 bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
-                   int new_ppm, uint32_t new_freq, double new_sample_rate)
+                   int32_t new_ppm, uint32_t new_freq, double new_sample_rate)
 {
     if (rx->state == RX_STATE_RUNNING)
         rxStop(rx);
@@ -1274,14 +1275,14 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
 
     // Gain: find closest step
     if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
-        int numgains = rx->rtl.gain_steps;
-        int selected = -1;
+        int32_t numgains = rx->rtl.gain_steps;
+        int32_t selected = -1;
         if (rx->config.gain == MODES_LEGACY_AUTO_GAIN) {
             selected = numgains - 1;  // AGC (last = fake AGC entry)
         } else if (rx->config.gain == MODES_DEFAULT_GAIN) {
             selected = numgains - 2;  // max manual
         } else {
-            for (int i = 0; i < numgains; ++i) {
+            for (int32_t i = 0; i < numgains; ++i) {
                 if (selected == -1 || fabs(rx->rtl.gains[i] / 10.0 - rx->config.gain) <
                                       fabs(rx->rtl.gains[selected] / 10.0 - rx->config.gain))
                     selected = i;
@@ -1323,12 +1324,12 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
     return true;
 }
 
-int sdrEnumerateDevices(char serials[][64], int max_devices)
+int32_t sdrEnumerateDevices(char serials[][64], int32_t max_devices)
 {
     sdr_dev_info_t devs[MAX_SDR_RECEIVERS];
-    int count = sdrBackendEnumerateAll(devs, max_devices < MAX_SDR_RECEIVERS ? max_devices : MAX_SDR_RECEIVERS);
-    int filled = 0;
-    for (int i = 0; i < count && filled < max_devices; i++) {
+    int32_t count = sdrBackendEnumerateAll(devs, max_devices < MAX_SDR_RECEIVERS ? max_devices : MAX_SDR_RECEIVERS);
+    int32_t filled = 0;
+    for (int32_t i = 0; i < count && filled < max_devices; i++) {
         snprintf(serials[filled], 64, "%.63s", devs[i].serial);
         filled++;
     }
@@ -1337,16 +1338,16 @@ int sdrEnumerateDevices(char serials[][64], int max_devices)
 
 #else // !ENABLE_RTLSDR && !ENABLE_SDRGG — stubs
 
-int rxGetGain(sdr_receiver_t *rx)     { MODES_NOTUSED(rx); return -1; }
-int rxGetMaxGain(sdr_receiver_t *rx)  { MODES_NOTUSED(rx); return -1; }
-double rxGetGainDb(sdr_receiver_t *rx, int step) { MODES_NOTUSED(rx); MODES_NOTUSED(step); return 0.0; }
-int rxSetGain(sdr_receiver_t *rx, int step) { MODES_NOTUSED(rx); MODES_NOTUSED(step); return -1; }
+int32_t rxGetGain(sdr_receiver_t *rx)     { MODES_NOTUSED(rx); return -1; }
+int32_t rxGetMaxGain(sdr_receiver_t *rx)  { MODES_NOTUSED(rx); return -1; }
+double rxGetGainDb(sdr_receiver_t *rx, int32_t step) { MODES_NOTUSED(rx); MODES_NOTUSED(step); return 0.0; }
+int32_t rxSetGain(sdr_receiver_t *rx, int32_t step) { MODES_NOTUSED(rx); MODES_NOTUSED(step); return -1; }
 bool rxOpen(sdr_receiver_t *rx)       { fprintf(stderr, "rx[%d]: no SDR backend compiled\n", rx->id); rx->state = RX_STATE_ERROR; return false; }
 bool rxStart(sdr_receiver_t *rx)      { MODES_NOTUSED(rx); return false; }
 void rxStop(sdr_receiver_t *rx)       { MODES_NOTUSED(rx); }
 void rxClose(sdr_receiver_t *rx)      { MODES_NOTUSED(rx); rx->state = RX_STATE_IDLE; }
-bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t r, double g, int p, uint32_t f, double s) { MODES_NOTUSED(rx); MODES_NOTUSED(r); MODES_NOTUSED(g); MODES_NOTUSED(p); MODES_NOTUSED(f); MODES_NOTUSED(s); return false; }
-int sdrEnumerateDevices(char serials[][64], int max_devices) { MODES_NOTUSED(serials); MODES_NOTUSED(max_devices); return 0; }
+bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t r, double g, int32_t p, uint32_t f, double s) { MODES_NOTUSED(rx); MODES_NOTUSED(r); MODES_NOTUSED(g); MODES_NOTUSED(p); MODES_NOTUSED(f); MODES_NOTUSED(s); return false; }
+int32_t sdrEnumerateDevices(char serials[][64], int32_t max_devices) { MODES_NOTUSED(serials); MODES_NOTUSED(max_devices); return 0; }
 
 #endif // ENABLE_RTLSDR || ENABLE_SDRGG
 
@@ -1436,7 +1437,7 @@ static void pocsag_queue_cb(const pocsag_msg_t *msg, void *ctx) {
 }
 
 static void gsm_msg_queue_cb(const gsm_cell_info_t *cell, const char *msg_type,
-                              const uint8_t *l3_data, int l3_len, void *ctx) {
+                              const uint8_t *l3_data, int32_t l3_len, void *ctx) {
     (void)l3_data; (void)l3_len;
     gsm_ctx_t *c = (gsm_ctx_t *)ctx;
     gsm_msg_item_t item;
@@ -1920,7 +1921,7 @@ static bool sondeDecoderDrain(sdr_receiver_t *rx) {
 
                 // Generate pseudo-ICAO from serial hash (fd0000-fdFFFF range)
                 uint32_t hash = 0;
-                for (int i = 0; msg.serial[i]; i++)
+                for (int32_t i = 0; msg.serial[i]; i++)
                     hash = hash * 31 + (uint8_t)msg.serial[i];
                 upd.addr = 0xFD0000 | (hash & 0xFFFF);
                 upd.timestamp_ms = mstime();
@@ -1941,15 +1942,15 @@ static bool sondeDecoderDrain(sdr_receiver_t *rx) {
                 upd.position_valid = 1;
 
                 // Altitude (meters → feet, geometric/GPS)
-                upd.altitude_ft = (int)(msg.alt * 3.28084);
+                upd.altitude_ft = (int32_t)(msg.alt * 3.28084);
                 upd.altitude_valid = 1;
                 upd.altitude_is_baro = 0;
 
                 // Velocity
                 if (msg.vel_h > 0.1 || fabs(msg.vel_v) > 0.1) {
-                    upd.ground_speed_kt = (int)(msg.vel_h * 1.94384);
-                    upd.heading_deg = (int)msg.heading;
-                    upd.vert_rate_fpm = (int)(msg.vel_v * 196.85);
+                    upd.ground_speed_kt = (int32_t)(msg.vel_h * 1.94384);
+                    upd.heading_deg = (int32_t)msg.heading;
+                    upd.vert_rate_fpm = (int32_t)(msg.vel_v * 196.85);
                     upd.velocity_valid = 1;
                 }
 
@@ -2132,8 +2133,8 @@ static bool lteDecoderDrain(sdr_receiver_t *rx) {
         had_data = true;
         lteTrackerUpdate(&cell);
 
-        int rxid = ctx->rx->dev_index;
-        for (int i = 0; i < cell.alert_count; i++) {
+        int32_t rxid = ctx->rx->dev_index;
+        for (int32_t i = 0; i < cell.alert_count; i++) {
             const lte_alert_t *a = &cell.alerts[i];
             if (!a->active) continue;
             switch (a->type) {
@@ -2317,14 +2318,14 @@ static bool fanetDecoderDrain(sdr_receiver_t *rx)
                 upd.lon = msg.tracking.longitude;
                 upd.position_valid = 1;
 
-                upd.altitude_ft = (int)(msg.tracking.altitude * 3.28084);
+                upd.altitude_ft = (int32_t)(msg.tracking.altitude * 3.28084);
                 upd.altitude_valid = 1;
                 upd.altitude_is_baro = 0;
 
                 if (msg.tracking.speed > 0.1f || fabsf(msg.tracking.climb) > 0.1f) {
-                    upd.ground_speed_kt = (int)(msg.tracking.speed * 0.539957f);
-                    upd.heading_deg = (int)msg.tracking.heading;
-                    upd.vert_rate_fpm = (int)(msg.tracking.climb * 196.85f);
+                    upd.ground_speed_kt = (int32_t)(msg.tracking.speed * 0.539957f);
+                    upd.heading_deg = (int32_t)msg.tracking.heading;
+                    upd.vert_rate_fpm = (int32_t)(msg.tracking.climb * 196.85f);
                     upd.velocity_valid = 1;
                 }
 
@@ -2371,7 +2372,7 @@ static bool fanetDecoderDrain(sdr_receiver_t *rx)
 
         case FANET_TYPE_SERVICE: {
             char buf[200];
-            int pos = 0;
+            int32_t pos = 0;
             pos += snprintf(buf + pos, sizeof(buf) - pos,
                             "[FANET rx%d] Weather %02X:%04X",
                             rx->dev_index, msg.src_manufacturer, msg.src_id);
@@ -2410,7 +2411,7 @@ static bool fanetDecoderDrain(sdr_receiver_t *rx)
                     upd.thermal.altitude_m = msg.thermal.altitude;
                     upd.thermal.climb_ms = msg.thermal.climb;
                     upd.thermal.wind_speed_kmh = msg.thermal.wind_speed;
-                    upd.thermal.wind_heading_deg = (int)msg.thermal.wind_heading;
+                    upd.thermal.wind_heading_deg = (int32_t)msg.thermal.wind_heading;
                     upd.thermal.confidence = msg.thermal.confidence;
                     upd.thermal.valid = 1;
                     dispatcher_push_aircraft(fanet_aircraft_queue, &upd);
@@ -2777,20 +2778,20 @@ void sdrManagerInit(void)
     // Initialize backend subsystem (detects available libraries)
     sdrBackendInit();
 
-    for (int i = 0; i < MAX_SDR_RECEIVERS; i++) {
+    for (int32_t i = 0; i < MAX_SDR_RECEIVERS; i++) {
         SdrManager.receivers[i].id = i;
         SdrManager.receivers[i].state = RX_STATE_IDLE;
         pthread_mutex_init(&SdrManager.receivers[i].cpu_mutex, NULL);
     }
 }
 
-int sdrManagerAddReceiver(const rx_config_t *config)
+int32_t sdrManagerAddReceiver(const rx_config_t *config)
 {
     pthread_mutex_lock(&SdrManager.lock);
 
     // Reject duplicate serials (skip check for virtual file devices)
     if (config->ifile_path[0] == '\0') {
-        for (int i = 0; i < SdrManager.count; i++) {
+        for (int32_t i = 0; i < SdrManager.count; i++) {
             if (!strcmp(SdrManager.receivers[i].config.serial, config->serial)) {
                 fprintf(stderr, "sdr_manager: serial %s already managed (index %d)\n", config->serial, i);
                 pthread_mutex_unlock(&SdrManager.lock);
@@ -2805,7 +2806,7 @@ int sdrManagerAddReceiver(const rx_config_t *config)
         return -1;
     }
 
-    int idx = SdrManager.count;
+    int32_t idx = SdrManager.count;
     sdr_receiver_t *rx = &SdrManager.receivers[idx];
 
     memset(&rx->config, 0, sizeof(rx->config));
@@ -2827,7 +2828,7 @@ int sdrManagerAddReceiver(const rx_config_t *config)
     return idx;
 }
 
-bool sdrManagerRemoveReceiver(int index)
+bool sdrManagerRemoveReceiver(int32_t index)
 {
     if (index < 0 || index >= SdrManager.count) return false;
 
@@ -2840,7 +2841,7 @@ bool sdrManagerRemoveReceiver(int index)
         rxClose(rx);
 
     // Shift remaining receivers down
-    for (int i = index; i < SdrManager.count - 1; i++) {
+    for (int32_t i = index; i < SdrManager.count - 1; i++) {
         SdrManager.receivers[i] = SdrManager.receivers[i + 1];
         SdrManager.receivers[i].id = i;
     }
@@ -2854,10 +2855,10 @@ bool sdrManagerRemoveReceiver(int index)
     return true;
 }
 
-int sdrManagerOpenAll(void)
+int32_t sdrManagerOpenAll(void)
 {
-    int opened = 0;
-    for (int i = 0; i < SdrManager.count; i++) {
+    int32_t opened = 0;
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         if (SdrManager.receivers[i].state == RX_STATE_IDLE) {
             if (rxOpen(&SdrManager.receivers[i]))
                 opened++;
@@ -2866,10 +2867,10 @@ int sdrManagerOpenAll(void)
     return opened;
 }
 
-int sdrManagerStartAll(void)
+int32_t sdrManagerStartAll(void)
 {
-    int started = 0;
-    for (int i = 0; i < SdrManager.count; i++) {
+    int32_t started = 0;
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         if (SdrManager.receivers[i].state == RX_STATE_OPEN) {
             if (rxStart(&SdrManager.receivers[i]))
                 started++;
@@ -2882,7 +2883,7 @@ bool sdrManagerDrainAll(void)
 {
     bool had_data = false;
     pthread_mutex_lock(&SdrManager.lock);
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         if (rx->state == RX_STATE_RUNNING && rx->decoder_ops && rx->decoder_ops->drain) {
             if (rx->decoder_ops->drain(rx))
@@ -2895,7 +2896,7 @@ bool sdrManagerDrainAll(void)
 
 void sdrManagerStopAll(void)
 {
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         if (SdrManager.receivers[i].state == RX_STATE_RUNNING)
             rxStop(&SdrManager.receivers[i]);
     }
@@ -2903,7 +2904,7 @@ void sdrManagerStopAll(void)
 
 void sdrManagerCloseAll(void)
 {
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         if (SdrManager.receivers[i].state != RX_STATE_IDLE)
             rxClose(&SdrManager.receivers[i]);
     }
@@ -2916,9 +2917,9 @@ void sdrManagerShutdown(void)
     pthread_mutex_destroy(&SdrManager.lock);
 }
 
-int sdrManagerFindBySerial(const char *serial)
+int32_t sdrManagerFindBySerial(const char *serial)
 {
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         if (!strcmp(SdrManager.receivers[i].config.serial, serial) ||
             !strcmp(SdrManager.receivers[i].serial_actual, serial))
             return i;
@@ -2926,7 +2927,7 @@ int sdrManagerFindBySerial(const char *serial)
     return -1;
 }
 
-void sdrManagerUpdateConfig(int index, const rx_config_t *config)
+void sdrManagerUpdateConfig(int32_t index, const rx_config_t *config)
 {
     if (index < 0 || index >= SdrManager.count) return;
     pthread_mutex_lock(&SdrManager.lock);
@@ -2939,7 +2940,7 @@ void sdrManagerUpdateConfig(int index, const rx_config_t *config)
     pthread_mutex_unlock(&SdrManager.lock);
 }
 
-sdr_receiver_t *sdrManagerGetReceiver(int index)
+sdr_receiver_t *sdrManagerGetReceiver(int32_t index)
 {
     if (index < 0 || index >= SdrManager.count) return NULL;
     return &SdrManager.receivers[index];
@@ -2958,8 +2959,8 @@ bool sdrManagerSave(void)
     }
 
     fprintf(f, "{\"receivers\":[\n");
-    int written = 0;
-    for (int i = 0; i < SdrManager.count; i++) {
+    int32_t written = 0;
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         // Don't persist virtual file devices
         if (rx->config.ifile_path[0] != '\0') continue;
@@ -2976,13 +2977,13 @@ bool sdrManagerSave(void)
     return true;
 }
 
-int sdrManagerLoad(void)
+int32_t sdrManagerLoad(void)
 {
     FILE *f = fopen(RECEIVERS_JSON_PATH, "r");
     if (!f) return 0;  // no saved config — normal on first run
 
     fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
+    int64_t sz = ftell(f);
     if (sz <= 0 || sz > 65536) { fclose(f); return 0; }
     rewind(f);
 
@@ -2992,14 +2993,14 @@ int sdrManagerLoad(void)
     fclose(f);
     data[rd] = '\0';
 
-    int loaded = 0;
+    int32_t loaded = 0;
     // Simple JSON parser: find each {"serial":"...","role":"...","gain":...,"ppm":...}
     const char *p = data;
     while ((p = strstr(p, "\"serial\"")) != NULL) {
         char serial[64] = {0};
         char role_str[16] = {0};
         float gain = 0;
-        int ppm = 0;
+        int32_t ppm = 0;
 
         // Parse serial
         const char *v = strchr(p + 8, '"');
@@ -3125,17 +3126,17 @@ char *rxGetDecoderStatsJSON(void)
     // Returns a malloc'd string — caller must free().
     char *buf = (char *)malloc(8192);
     if (!buf) return NULL;
-    int pos = 0, cap = 8192;
+    int32_t pos = 0, cap = 8192;
 
     #define APPEND(...) do { \
-        int n = snprintf(buf + pos, cap - pos, __VA_ARGS__); \
+        int32_t n = snprintf(buf + pos, cap - pos, __VA_ARGS__); \
         if (n > 0) pos += n; \
     } while(0)
 
     APPEND("{");
-    int first_top = 1;
+    int32_t first_top = 1;
 
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         if (rx->state < RX_STATE_RUNNING) continue;
         // ADS-B uses Modes.stats_* instead of decoder_state; others need decoder_state
@@ -3147,7 +3148,7 @@ char *rxGetDecoderStatsJSON(void)
             struct stats s;
             add_stats(&Modes.stats_alltime, &Modes.stats_current, &s);
             uint32_t accepted = 0;
-            for (int b = 0; b <= MODES_MAX_BITERRORS; b++)
+            for (int32_t b = 0; b <= MODES_MAX_BITERRORS; b++)
                 accepted += s.demod_accepted[b];
             double noise_db = -999;
             if (s.noise_power_count > 0) {
@@ -3355,7 +3356,7 @@ void rxGetStatsSnapshot(rx_stats_snapshot_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    for (int i = 0; i < SdrManager.count; i++) {
+    for (int32_t i = 0; i < SdrManager.count; i++) {
         sdr_receiver_t *rx = &SdrManager.receivers[i];
         if (rx->state < RX_STATE_RUNNING) continue;
         if (rx->config.role != SDR_ROLE_ADSB && !rx->decoder_state) continue;

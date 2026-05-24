@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "dispatcher.h"
 
 #include <assert.h>
@@ -45,24 +46,24 @@ static adsb_queue_handle_t demod_adsb_queue = NULL;
 // nb: the correlation functions sum to zero, so we do not need to adjust for the DC offset in the input signal
 // (adding any constant value to all of m[0..3] does not change the result)
 
-static inline int slice_phase0(uint16_t *m) {
+static inline int32_t slice_phase0(uint16_t *m) {
     return 5 * m[0] - 3 * m[1] - 2 * m[2];
 }
-static inline int slice_phase1(uint16_t *m) {
+static inline int32_t slice_phase1(uint16_t *m) {
     return 4 * m[0] - m[1] - 3 * m[2];
 }
-static inline int slice_phase2(uint16_t *m) {
+static inline int32_t slice_phase2(uint16_t *m) {
     return 3 * m[0] + m[1] - 4 * m[2];
 }
-static inline int slice_phase3(uint16_t *m) {
+static inline int32_t slice_phase3(uint16_t *m) {
     return 2 * m[0] + 3 * m[1] - 5 * m[2];
 }
-static inline int slice_phase4(uint16_t *m) {
+static inline int32_t slice_phase4(uint16_t *m) {
     return m[0] + 5 * m[1] - 5 * m[2] - m[3];
 }
 
-static uint32_t valid_df_short_bitset;        // set of acceptable DF values for short messages
-static uint32_t valid_df_long_bitset;         // set of acceptable DF values for long messages
+static uint32_t valid_df_short_bitset;        // set of acceptable DF values for int16_t messages
+static uint32_t valid_df_long_bitset;         // set of acceptable DF values for int64_t messages
 
 static uint32_t generate_damage_set(uint8_t df, uint32_t damage_bits)
 {
@@ -121,7 +122,7 @@ void demodulate2400(struct mag_buf *mag)
     }
 
     uint8_t *bestmsg;
-    int bestscore, bestphase;
+    int32_t bestscore, bestphase;
 
     // maximum lookahead we use
     assert(mag->overlap >= 19 + 1 + 269);
@@ -139,11 +140,11 @@ void demodulate2400(struct mag_buf *mag)
 
     for (j = last_message_end; j < mlen; j++) {
         uint16_t *preamble = &m[j];
-        int high;
+        int32_t high;
         uint32_t base_signal, base_noise;
-        int try_phase;
-        int msglen;
-        int crc_rescue_attempt = 0;
+        int32_t try_phase;
+        int32_t msglen;
+        int32_t crc_rescue_attempt = 0;
 
         // Look for a message starting at around sample 0 with phase offset 3..7
 
@@ -240,7 +241,7 @@ void demodulate2400(struct mag_buf *mag)
         bestmsg = NULL; bestscore = SR_NOT_SET; bestphase = -1;
         for (try_phase = 4; try_phase <= 8; ++try_phase) {
             uint16_t *pPtr;
-            int phase, score;
+            int32_t phase, score;
 
             // Decode all the next 112 bits, regardless of the actual message
             // size. We'll check the actual message type later
@@ -403,8 +404,8 @@ void demodulate2400(struct mag_buf *mag)
         {
             double signal_power;
             uint64_t scaled_signal_power = 0;
-            int signal_len = msglen*12/5;
-            int k;
+            int32_t signal_len = msglen*12/5;
+            int32_t k;
 
             for (k = 0; k < signal_len; ++k) {
                 uint32_t mag = m[j+19+k];
@@ -466,9 +467,9 @@ void demodulate2400(struct mag_buf *mag)
 
 #ifdef MODEAC_DEBUG
 
-static int yscale(uint32_t signal)
+static int32_t yscale(uint32_t signal)
 {
-    return (int) (299 - 299.0 * signal / 65536.0);
+    return (int32_t) (299 - 299.0 * signal / 65536.0);
 }
 
 static void draw_modeac(uint16_t *m, uint32_t modeac, uint32_t f1_clock, uint32_t noise_threshold, uint32_t signal_threshold, uint32_t bits, uint32_t noisy_bits, uint32_t uncertain_bits)
@@ -477,23 +478,23 @@ static void draw_modeac(uint16_t *m, uint32_t modeac, uint32_t f1_clock, uint32_
     // use 1 pixel = 30MHz = 1087 pixels
 
     gdImagePtr im = gdImageCreate(1088, 300);
-    int red = gdImageColorAllocate(im, 255, 0, 0);
-    int brightgreen = gdImageColorAllocate(im, 0, 255, 0);
-    int darkgreen = gdImageColorAllocate(im, 0, 180, 0);
-    int blue = gdImageColorAllocate(im, 0, 0, 255);
-    int grey = gdImageColorAllocate(im, 200, 200, 200);
-    int white = gdImageColorAllocate(im, 255, 255, 255);
-    int black = gdImageColorAllocate(im, 0, 0, 0);
+    int32_t red = gdImageColorAllocate(im, 255, 0, 0);
+    int32_t brightgreen = gdImageColorAllocate(im, 0, 255, 0);
+    int32_t darkgreen = gdImageColorAllocate(im, 0, 180, 0);
+    int32_t blue = gdImageColorAllocate(im, 0, 0, 255);
+    int32_t grey = gdImageColorAllocate(im, 200, 200, 200);
+    int32_t white = gdImageColorAllocate(im, 255, 255, 255);
+    int32_t black = gdImageColorAllocate(im, 0, 0, 0);
 
     gdImageFilledRectangle(im, 0, 0, 1087, 299, white);
 
     // draw samples
     for (uint32_t pixel = 0; pixel < 1088; ++pixel) {
-        int clock_offset = (pixel - 150) * 2;
-        int bit = clock_offset / 87;
-        int sample = (f1_clock + clock_offset) / 25;
-        int bitoffset = clock_offset % 87;
-        int color;
+        int32_t clock_offset = (pixel - 150) * 2;
+        int32_t bit = clock_offset / 87;
+        int32_t sample = (f1_clock + clock_offset) / 25;
+        int32_t bitoffset = clock_offset % 87;
+        int32_t color;
 
         if (sample < 0)
             continue;
@@ -531,7 +532,7 @@ static void draw_modeac(uint16_t *m, uint32_t modeac, uint32_t f1_clock, uint32_
 
     // save it
 
-    static int file_counter;
+    static int32_t file_counter;
     char filename[PATH_MAX];
     sprintf(filename, "modeac_%04X_%04d.png", modeac, ++file_counter);
     fprintf(stderr, "writing %s\n", filename);

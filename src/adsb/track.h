@@ -96,8 +96,8 @@ extern "C" {
 //  stale: data is valid. Updates from a less reliable source are accepted.
 //  expired: data is not valid.
 typedef struct {
-    uint64_t stale_interval;  /* how long after an update until the data is stale */
-    uint64_t expire_interval; /* how long after an update until the data expires */
+    uint64_t stale_interval;  /* how int64_t after an update until the data is stale */
+    uint64_t expire_interval; /* how int64_t after an update until the data expires */
 
     datasource_t source;     /* where the data came from */
     uint64_t updated;        /* when it arrived */
@@ -113,26 +113,26 @@ struct aircraft {
     uint64_t      seen;           // Time (millis) at which the last packet was received
     int64_t       messages;       // Number of Mode S messages received
 
-    int           reliable;       // Do we think this is a real aircraft, not noise?
+    int32_t           reliable;       // Do we think this is a real aircraft, not noise?
     int64_t       reliableDF11;   // Number of "reliable" DF11s (no CRC errors corrected, IID = 0) received
     int64_t       reliableDF17;   // Number of "reliable" DF17s (no CRC errors corrected) received
     int64_t       discarded;      // Number of messages discarded as possibly-noise
 
     double        signalLevel[8]; // Last 8 Signal Amplitudes
-    int           signalNext;     // next index of signalLevel to use
+    int32_t           signalNext;     // next index of signalLevel to use
 
     data_validity callsign_valid;
     char          callsign[9];     // Flight number
-    int           callsign_matched;   // Interactive callsign filter matched
+    int32_t           callsign_matched;   // Interactive callsign filter matched
 
     data_validity altitude_baro_valid;
-    int           altitude_baro;   // Altitude (Baro)
+    int32_t           altitude_baro;   // Altitude (Baro)
 
     data_validity altitude_geom_valid;
-    int           altitude_geom;   // Altitude (Geometric)
+    int32_t           altitude_geom;   // Altitude (Geometric)
 
     data_validity geom_delta_valid;
-    int           geom_delta;      // Difference between Geometric and Baro altitudes
+    int32_t           geom_delta;      // Difference between Geometric and Baro altitudes
 
     data_validity gs_valid;
     float         gs;
@@ -162,10 +162,10 @@ struct aircraft {
     float         true_heading;    // True heading
 
     data_validity baro_rate_valid;
-    int           baro_rate;      // Vertical rate (barometric)
+    int32_t           baro_rate;      // Vertical rate (barometric)
 
     data_validity geom_rate_valid;
-    int           geom_rate;      // Vertical rate (geometric)
+    int32_t           geom_rate;      // Vertical rate (geometric)
 
     data_validity squawk_valid;
     uint32_t      squawk;         // Squawk
@@ -182,10 +182,10 @@ struct aircraft {
     float         nav_qnh;        // Altimeter setting (QNH/QFE), millibars
 
     data_validity nav_altitude_mcp_valid;
-    int           nav_altitude_mcp;    // FCU/MCP selected altitude
+    int32_t           nav_altitude_mcp;    // FCU/MCP selected altitude
 
     data_validity nav_altitude_fms_valid;
-    int           nav_altitude_fms;    // FMS selected altitude
+    int32_t           nav_altitude_fms;    // FMS selected altitude
 
     data_validity nav_altitude_src_valid;
     nav_altitude_source_t nav_altitude_src;  // source of altitude used by automation
@@ -216,9 +216,9 @@ struct aircraft {
     uint32_t      pos_rc;         // Rc of last computed position
 
     // data extracted from opstatus etc
-    int           adsb_version;   // ADS-B version (from ADS-B operational status); -1 means no ADS-B messages seen
-    int           adsr_version;   // As above, for ADS-R messages
-    int           tisb_version;   // As above, for TIS-B messages
+    int32_t           adsb_version;   // ADS-B version (from ADS-B operational status); -1 means no ADS-B messages seen
+    int32_t           adsr_version;   // As above, for ADS-R messages
+    int32_t           tisb_version;   // As above, for TIS-B messages
     heading_type_t adsb_hrd;      // Heading Reference Direction setting (from ADS-B operational status)
     heading_type_t adsb_tah;      // Track Angle / Heading setting (from ADS-B operational status)
 
@@ -283,10 +283,10 @@ struct aircraft {
     data_validity waypoint_pos_valid;
     double        waypoint_lat;
     double        waypoint_lon;
-    int           waypoint_alt;        // feet, 0 if not valid
+    int32_t           waypoint_alt;        // feet, 0 if not valid
 
     data_validity waypoint_info_valid;
-    int           waypoint_crossing_alt;   // feet
+    int32_t           waypoint_crossing_alt;   // feet
     uint32_t      waypoint_crossing_speed; // kts
 
     // data extracted from ACAS RA (BDS 3,0 or TC28/sub2)
@@ -321,7 +321,7 @@ struct aircraft {
     float         derived_wind_speed;    // knots
     float         derived_wind_dir;      // degrees (0-360)
     uint64_t      derived_wind_updated;  // when derived wind was last computed
-    int           derived_wind_altitude; // baro altitude at which wind was computed
+    int32_t           derived_wind_altitude; // baro altitude at which wind was computed
 
     // Derived temperature (computed from TAS + Mach)
     float         oat;                   // Outside Air Temperature, degrees C
@@ -333,7 +333,7 @@ struct aircraft {
     uint64_t      squawkTentativeChanged; // when tentative squawk was first seen
 
     // Altitude reliability scoring
-    int           alt_reliable;          // reliability counter (0 to ALTITUDE_RELIABLE_MAX)
+    int32_t           alt_reliable;          // reliability counter (0 to ALTITUDE_RELIABLE_MAX)
 
     // Calculated track from successive positions
     float         calc_track;            // degrees, calculated from position pairs
@@ -345,13 +345,13 @@ struct aircraft {
     float         mag_declination;       // degrees, positive = east
     uint64_t      mag_declination_updated; // when declination was last computed
 
-    int           modeA_hit;   // did our squawk match a possible mode A reply in the last check period?
-    int           modeC_hit;   // did our altitude match a possible mode C reply in the last check period?
+    int32_t           modeA_hit;   // did our squawk match a possible mode A reply in the last check period?
+    int32_t           modeC_hit;   // did our altitude match a possible mode C reply in the last check period?
 
-    int           fatsv_emitted_altitude_baro;    // last FA emitted altitude
-    int           fatsv_emitted_altitude_geom;    //      -"-         GNSS altitude
-    int           fatsv_emitted_baro_rate;        //      -"-         barometric rate
-    int           fatsv_emitted_geom_rate;        //      -"-         geometric rate
+    int32_t           fatsv_emitted_altitude_baro;    // last FA emitted altitude
+    int32_t           fatsv_emitted_altitude_geom;    //      -"-         GNSS altitude
+    int32_t           fatsv_emitted_baro_rate;        //      -"-         barometric rate
+    int32_t           fatsv_emitted_geom_rate;        //      -"-         geometric rate
     float         fatsv_emitted_track;            //      -"-         true track
     float         fatsv_emitted_track_rate;       //      -"-         track rate of change
     float         fatsv_emitted_mag_heading;      //      -"-         magnetic heading
@@ -362,8 +362,8 @@ struct aircraft {
     uint32_t      fatsv_emitted_tas;              //      -"-         TAS
     float         fatsv_emitted_mach;             //      -"-         Mach number
     airground_t   fatsv_emitted_airground;        //      -"-         air/ground state
-    int           fatsv_emitted_nav_altitude_mcp; //      -"-         MCP altitude
-    int           fatsv_emitted_nav_altitude_fms; //      -"-         FMS altitude
+    int32_t           fatsv_emitted_nav_altitude_mcp; //      -"-         MCP altitude
+    int32_t           fatsv_emitted_nav_altitude_fms; //      -"-         FMS altitude
     nav_altitude_source_t fatsv_emitted_nav_altitude_src; // -"-      automation altitude source
     float         fatsv_emitted_nav_heading;      //      -"-         target heading
     nav_modes_t   fatsv_emitted_nav_modes;        //      -"-         enabled navigation modes
@@ -376,7 +376,7 @@ struct aircraft {
     uint8_t       fatsv_emitted_es_acas_ra[7];    //      -"-         ES ACAS RA report message
     char          fatsv_emitted_callsign[9];      //      -"-         callsign
     addrtype_t    fatsv_emitted_addrtype;         //      -"-         address type (assumed ADSB_ICAO initially)
-    int           fatsv_emitted_adsb_version;     //      -"-         ADS-B version (assumed non-ADS-B initially)
+    int32_t           fatsv_emitted_adsb_version;     //      -"-         ADS-B version (assumed non-ADS-B initially)
     uint32_t      fatsv_emitted_category;         //      -"-         ADS-B emitter category (assumed A0 initially)
     uint32_t      fatsv_emitted_squawk;           //      -"-         squawk
     uint32_t      fatsv_emitted_nac_p;            //      -"-         NACp
@@ -390,7 +390,7 @@ struct aircraft {
     uint64_t      fatsv_last_force_emit;          // time (millis) we last emitted only-on-change data
 
     // GPS integrity monitoring
-    int           gps_integrity;           // 0=normal, 1=degraded, 2=suspect
+    int32_t           gps_integrity;           // 0=normal, 1=degraded, 2=suspect
     uint32_t      prev_nic;                // previous NIC value for drop detection
     uint32_t      prev_nac_p;              // previous NACp value for drop detection
     uint64_t      gps_integrity_updated;   // when gps_integrity was last evaluated
@@ -399,13 +399,13 @@ struct aircraft {
 #define CIRCLING_HISTORY_SIZE 24           // 24 heading samples over ~2 minutes
     float         heading_history[CIRCLING_HISTORY_SIZE];
     uint64_t      heading_history_time[CIRCLING_HISTORY_SIZE];
-    int           heading_history_idx;     // next slot to write
-    int           heading_history_count;   // number of valid entries
-    int           circling;                // 1 if aircraft is circling (>360° heading change in window)
+    int32_t           heading_history_idx;     // next slot to write
+    int32_t           heading_history_count;   // number of valid entries
+    int32_t           circling;                // 1 if aircraft is circling (>360° heading change in window)
     uint64_t      circling_updated;        // when circling was last evaluated
 
     // DF19 (Military Extended Squitter) seen
-    int           seen_df19;               // 1 if DF19 was received from this aircraft
+    int32_t           seen_df19;               // 1 if DF19 was received from this aircraft
 
     // FLARM/FANET/OGN aircraft type (0 = not set / not FLARM)
     uint8_t       flarm_acft_type;         // enum flarm_aircraft_type value (1-15), 0=unset
@@ -422,7 +422,7 @@ struct aircraft {
     struct {
         double   latitude;
         double   longitude;
-        int      altitude;         // meters
+        int32_t      altitude;         // meters
         float    climb;            // m/s
         float    wind_speed;       // km/h
         float    wind_heading;     // degrees
@@ -434,9 +434,9 @@ struct aircraft {
     struct {
         char     serial[16];       // sonde serial (e.g. "T1234567")
         char     sonde_type[8];    // "RS41", "DFM", etc.
-        int      frame_num;        // frame counter
-        int      rs_errors;        // RS corrections (-1=uncorrectable)
-        int      satellites;       // GPS satellites
+        int32_t      frame_num;        // frame counter
+        int32_t      rs_errors;        // RS corrections (-1=uncorrectable)
+        int32_t      satellites;       // GPS satellites
         double   vel_v;            // vertical velocity m/s
         float    freq_mhz;         // receive frequency
         uint8_t  valid;            // non-zero if sonde data present
@@ -454,13 +454,13 @@ extern uint32_t modeAC_match[4096];
 extern uint32_t modeAC_age[4096];
 
 /* is this bit of data valid? */
-static inline int trackDataValid(const data_validity *v)
+static inline int32_t trackDataValid(const data_validity *v)
 {
     return (v->source != SOURCE_INVALID && messageNow() < v->expires);
 }
 
 /* is this bit of data fresh? */
-static inline int trackDataFresh(const data_validity *v)
+static inline int32_t trackDataFresh(const data_validity *v)
 {
     return (v->source != SOURCE_INVALID && messageNow() < v->stale);
 }

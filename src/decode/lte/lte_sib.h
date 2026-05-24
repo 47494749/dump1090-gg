@@ -32,7 +32,7 @@ extern "C" {
 #define LTE_MAX_SI_MSG      8           // Max SI messages (scheduling)
 
 // SI periodicity values (radio frames)
-static const int si_periodicity_rf[] = { 8, 16, 32, 64, 128, 256, 512 };
+static const int32_t si_periodicity_rf[] = { 8, 16, 32, 64, 128, 256, 512 };
 
 // ======================== SIB Structures ========================
 
@@ -44,7 +44,7 @@ typedef struct {
         uint16_t mnc;
         bool     cell_reserved;
     } plmn[6];
-    int      plmn_count;
+    int32_t      plmn_count;
 
     uint16_t tac;                   // Tracking Area Code
     uint32_t cell_id;               // 28-bit Cell Identity (eNodeB_ID << 8 | sector)
@@ -57,9 +57,9 @@ typedef struct {
     struct {
         uint8_t si_periodicity;     // Index into si_periodicity_rf[]
         uint8_t sib_mapping[8];     // SIB types in this SI message
-        int     sib_count;
+        int32_t     sib_count;
     } si_sched[LTE_MAX_SI_MSG];
-    int      si_sched_count;
+    int32_t      si_sched_count;
     uint8_t  si_window_length;      // ms (1,2,5,10,15,20,40)
 
     bool     valid;
@@ -101,7 +101,7 @@ typedef struct {
         uint16_t pci;               // Physical Cell ID
         int8_t   q_offset;          // Q-offset (dB * 2)
     } cells[LTE_MAX_NEIGH_CELLS];
-    int count;
+    int32_t count;
     bool valid;
 } lte_sib4_t;
 
@@ -115,7 +115,7 @@ typedef struct {
         uint8_t  thresh_x_low;      // Threshold for low priority
         uint8_t  bandwidth;         // Allowed measurement bandwidth
     } carriers[LTE_MAX_EARFCN_LIST];
-    int count;
+    int32_t count;
     bool valid;
 } lte_sib5_t;
 
@@ -128,7 +128,7 @@ typedef struct {
         uint8_t  thresh_x_high;
         uint8_t  thresh_x_low;
     } carriers[LTE_MAX_UTRA_FREQ];
-    int count;
+    int32_t count;
     bool valid;
 } lte_sib6_t;
 
@@ -142,7 +142,7 @@ typedef struct {
         uint8_t  thresh_x_high;
         uint8_t  thresh_x_low;
     } freq_groups[LTE_MAX_GERAN_FREQ];
-    int count;
+    int32_t count;
     bool valid;
 } lte_sib7_t;
 
@@ -163,7 +163,7 @@ typedef struct {
     uint8_t  warning_msg_segment_num;   // Segment number
     uint8_t  data_coding_scheme;        // CBS DCS (GSM 03.38)
     uint8_t  warning_msg[LTE_ETWS_MSG_SIZE];
-    int      warning_msg_len;
+    int32_t      warning_msg_len;
     bool     valid;
 } lte_sib11_t;
 
@@ -175,7 +175,7 @@ typedef struct {
     uint8_t  warning_msg_segment_num;
     uint8_t  data_coding_scheme;
     uint8_t  warning_msg[LTE_CMAS_MSG_SIZE];
-    int      warning_msg_len;
+    int32_t      warning_msg_len;
     bool     valid;
 } lte_sib12_t;
 
@@ -223,8 +223,8 @@ typedef struct {
 // iq = float IQ buffer, subframe_start = sample offset of subframe start
 // n_rb_dl = total DL resource blocks, pci = physical cell identity
 // Returns true if DCI found for system information
-bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
-                         int n_rb_dl, int pci, float freq_offset_hz,
+bool lte_decode_pdcch_si(const float *iq, int32_t iq_len, int32_t subframe_start,
+                         int32_t n_rb_dl, int32_t pci, float freq_offset_hz,
                          const void *fft_twiddle, lte_dci_t *dci);
 
 // Decode PDSCH transport block for SIB
@@ -232,16 +232,16 @@ bool lte_decode_pdcch_si(const float *iq, int iq_len, int subframe_start,
 // dci = DCI from PDCCH, pci = physical cell identity
 // out_bits = decoded transport block bits, out_len = bit count
 // Returns true if CRC passes
-bool lte_decode_pdsch_sib(const float *iq, int iq_len, int subframe_start,
-                          int n_rb_dl, int pci, float freq_offset_hz,
+bool lte_decode_pdsch_sib(const float *iq, int32_t iq_len, int32_t subframe_start,
+                          int32_t n_rb_dl, int32_t pci, float freq_offset_hz,
                           const void *fft_twiddle, const lte_dci_t *dci,
-                          uint8_t *out_bits, int *out_len);
+                          uint8_t *out_bits, int32_t *out_len);
 
 // Parse SIB1 from decoded BCCH-DL-SCH transport block
-bool lte_parse_sib1(const uint8_t *bits, int nbits, lte_sib1_info_t *sib1);
+bool lte_parse_sib1(const uint8_t *bits, int32_t nbits, lte_sib1_info_t *sib1);
 
 // Parse SI message (contains one or more SIBs according to scheduling)
-bool lte_parse_si_msg(const uint8_t *bits, int nbits, lte_sib_results_t *results);
+bool lte_parse_si_msg(const uint8_t *bits, int32_t nbits, lte_sib_results_t *results);
 
 // Get human-readable CMAS category from message_id
 const char *lte_cmas_category(uint16_t message_id);
@@ -250,8 +250,8 @@ const char *lte_cmas_category(uint16_t message_id);
 const char *lte_etws_warning_type(uint8_t type_byte);
 
 // Decode CBS data coding scheme (GSM 03.38) to UTF-8
-int lte_cbs_decode_text(const uint8_t *data, int data_len, uint8_t dcs,
-                        char *utf8_out, int utf8_max);
+int32_t lte_cbs_decode_text(const uint8_t *data, int32_t data_len, uint8_t dcs,
+                        char *utf8_out, int32_t utf8_max);
 
 #ifdef __cplusplus
 }

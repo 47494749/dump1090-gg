@@ -62,7 +62,7 @@ void iotTrackerInit(void);
 void iotTrackerUpdate(const iot_device_msg_t *msg);
 
 // Get number of active (non-stale) devices
-int iotTrackerActiveCount(void);
+int32_t iotTrackerActiveCount(void);
 
 // Clean up
 void iotTrackerDestroy(void);

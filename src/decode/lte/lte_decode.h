@@ -127,7 +127,7 @@ typedef struct {
     lte_sib2_t      sib2;            // Decoded SIB2 (partial)
     lte_sib3_t      sib3;            // Decoded SIB3 (partial)
     lte_alert_t     alerts[LTE_MAX_ALERTS]; // Active alerts (ETWS/CMAS/EAB)
-    int             alert_count;     // Number of active alerts
+    int32_t             alert_count;     // Number of active alerts
     lte_sync_state_t sync_state;     // Current sync level
 
     // Statistics
@@ -170,7 +170,7 @@ struct lte_state *lte_create(const lte_config_t *cfg);
 void lte_destroy(struct lte_state *st);
 void lte_process(struct lte_state *st, const uint8_t *iq_data, uint32_t len);
 void lte_get_stats(const struct lte_state *st, lte_stats_t *out);
-int  lte_get_cells(const struct lte_state *st, lte_cell_info_t *out, int max_cells);
+int32_t  lte_get_cells(const struct lte_state *st, lte_cell_info_t *out, int32_t max_cells);
 lte_sync_state_t lte_get_best_sync(const struct lte_state *st);
 
 // Frequency hopping: returns non-zero if decoder wants to retune
@@ -193,7 +193,7 @@ const char *lte_band_name(double freq_hz);
 const char *lte_bw_string(uint8_t dl_bw);
 
 // Get number of RBs from dl_bandwidth
-int lte_bw_to_nrb(uint8_t dl_bw);
+int32_t lte_bw_to_nrb(uint8_t dl_bw);
 
 #ifdef __cplusplus
 }

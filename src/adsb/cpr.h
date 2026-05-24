@@ -19,25 +19,26 @@
 
 #ifndef DUMP1090_CPR_H
 #define DUMP1090_CPR_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int decodeCPRairborne(int even_cprlat, int even_cprlon,
-                      int odd_cprlat, int odd_cprlon,
-                      int fflag,
+int32_t decodeCPRairborne(int32_t even_cprlat, int32_t even_cprlon,
+                      int32_t odd_cprlat, int32_t odd_cprlon,
+                      int32_t fflag,
                       double *out_lat, double *out_lon);
 
-int decodeCPRsurface(double reflat, double reflon,
-                     int even_cprlat, int even_cprlon,
-                     int odd_cprlat, int odd_cprlon,
-                     int fflag,
+int32_t decodeCPRsurface(double reflat, double reflon,
+                     int32_t even_cprlat, int32_t even_cprlon,
+                     int32_t odd_cprlat, int32_t odd_cprlon,
+                     int32_t fflag,
                      double *out_lat, double *out_lon);
 
-int decodeCPRrelative(double reflat, double reflon,
-                      int cprlat, int cprlon,
-                      int fflag, int surface,
+int32_t decodeCPRrelative(double reflat, double reflon,
+                      int32_t cprlat, int32_t cprlon,
+                      int32_t fflag, int32_t surface,
                       double *out_lat, double *out_lon);
 
 #ifdef __cplusplus

@@ -7,6 +7,7 @@
 // the new structs, this file will own initialization directly.
 
 #include <string.h>
+#include <stdint.h>
 #include "station_config.h"
 #include "network_config.h"
 #include "display_config.h"
@@ -65,7 +66,7 @@ void appConfigSyncFromModes(void)
 
     // Beast feeds
     NetworkConfig.feed_count = Modes.beast_feed_count;
-    for (int i = 0; i < Modes.beast_feed_count && i < MAX_BEAST_FEEDS; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count && i < MAX_BEAST_FEEDS; i++) {
         snprintf(NetworkConfig.feeds[i].name, sizeof(NetworkConfig.feeds[i].name),
                  "%s", Modes.beast_feeds[i].name);
         if (Modes.beast_feeds[i].host)

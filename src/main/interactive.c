@@ -48,6 +48,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 
 #include <curses.h>
 #include <regex.h>
@@ -57,7 +58,7 @@
 //========================= Interactive mode ===============================
 
 
-static int convert_altitude(int ft)
+static int32_t convert_altitude(int32_t ft)
 {
     if (Modes.metric)
         return (ft / 3.2828);
@@ -65,7 +66,7 @@ static int convert_altitude(int ft)
         return ft;
 }
 
-static int convert_speed(int kts)
+static int32_t convert_speed(int32_t kts)
 {
     if (Modes.metric)
         return (kts * 1.852);
@@ -104,7 +105,7 @@ void interactiveInit() {
     }
 
     if (Modes.interactive_callsign_filter) {
-        int rc = regcomp(&callsign_filter_regex, Modes.interactive_callsign_filter,
+        int32_t rc = regcomp(&callsign_filter_regex, Modes.interactive_callsign_filter,
             REG_EXTENDED | REG_NOSUB | REG_ICASE);
         if (rc != 0) {
             char msg[256];
@@ -141,7 +142,7 @@ void interactiveShowData(void) {
     uint64_t now = mstime();
     char progress;
     char spinner[4] = "|/-\\";
-    int valid = 0;
+    int32_t valid = 0;
     double signalMax = -100.0;
     double signalMin = +100.0;
     double signalMean = 0.0;
@@ -172,11 +173,11 @@ void interactiveShowData(void) {
     progress = spinner[(now/1000)%4];
     mvaddch(0, 79, progress);
 
-    int rows = getmaxy(stdscr);
-    int row = 3;
-    int rowMaxd = 0;
-    int rowMaxRSSI = 0;
-    int rowMinRSSI = 0;
+    int32_t rows = getmaxy(stdscr);
+    int32_t row = 3;
+    int32_t rowMaxd = 0;
+    int32_t rowMaxRSSI = 0;
+    int32_t rowMinRSSI = 0;
 
     // Ensure trackDataValid uses the current time
     _messageNow = now;
@@ -190,7 +191,7 @@ void interactiveShowData(void) {
             char strFl[7]     = " ";
             char strTt[5]     = " ";
             char strGs[5]     = " ";
-            int msgs  = a->messages;
+            int32_t msgs  = a->messages;
 
             a->callsign_matched = 1;
             valid++;
@@ -328,7 +329,7 @@ void interactiveShowData(void) {
             char strMode[5] = "  A ";
             char strFl[7] = " ";
             uint32_t modeA = indexToModeA(i);
-            int modeC = modeAToModeC(modeA);
+            int32_t modeC = modeAToModeC(modeA);
             if (modeC != INVALID_ALTITUDE) {
                 strMode[3] = 'C';
                 snprintf(strFl, sizeof(strFl), "%5d ", convert_altitude(modeC * 100));

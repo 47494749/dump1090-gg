@@ -29,6 +29,7 @@
 //
 
 #include "dump1090.h"
+#include <stdint.h>
 #include <assert.h>
 //
 //=========================================================================
@@ -36,15 +37,15 @@
 // Input format is : 00:A4:A2:A1:00:B4:B2:B1:00:C4:C2:C1:00:D4:D2:D1
 //
 
-static int modeAToCTable[4096];
+static int32_t modeAToCTable[4096];
 static uint32_t modeCToATable[4096];
-static int internalModeAToModeC(uint32_t ModeA);
+static int32_t internalModeAToModeC(uint32_t ModeA);
 
 void modeACInit()
 {
     for (uint32_t i = 0; i < 4096; ++i) {
         uint32_t modeA = indexToModeA(i);
-        int modeC = internalModeAToModeC(modeA);
+        int32_t modeC = internalModeAToModeC(modeA);
         modeAToCTable[i] = modeC;
 
         modeC += 13;
@@ -58,7 +59,7 @@ void modeACInit()
 // Given a mode A value (hex-encoded, see above)
 // return the mode C value (signed multiple of 100s of feet)
 // or INVALID_ALITITUDE if not a valid mode C value
-int modeAToModeC(uint32_t modeA)
+int32_t modeAToModeC(uint32_t modeA)
 {
     uint32_t i = modeAToIndex(modeA);
     if (i >= 4096)
@@ -69,7 +70,7 @@ int modeAToModeC(uint32_t modeA)
 
 // Given a mode C value (signed multiple of 100s of feet)
 // return the mode A value, or 0 if not a valid mode C value
-uint32_t modeCToModeA(int modeC)
+uint32_t modeCToModeA(int32_t modeC)
 {
     modeC += 13;
     if (modeC < 0 || modeC >= 4096)
@@ -78,7 +79,7 @@ uint32_t modeCToModeA(int modeC)
     return modeCToATable[modeC];
 }
 
-static int internalModeAToModeC(uint32_t ModeA)
+static int32_t internalModeAToModeC(uint32_t ModeA)
 {
     uint32_t FiveHundreds = 0;
     uint32_t OneHundreds  = 0;
@@ -120,7 +121,7 @@ static int internalModeAToModeC(uint32_t ModeA)
 //
 //=========================================================================
 //
-void decodeModeAMessage(struct modesMessage *mm, int ModeA)
+void decodeModeAMessage(struct modesMessage *mm, int32_t ModeA)
 {
     mm->source = SOURCE_MODE_AC;
     mm->addrtype = ADDR_MODE_A;
@@ -144,7 +145,7 @@ void decodeModeAMessage(struct modesMessage *mm, int ModeA)
 
     // Decode an altitude if this looks like a possible mode C
     if (!mm->spi) {
-        int modeC = modeAToModeC(ModeA);
+        int32_t modeC = modeAToModeC(ModeA);
         if (modeC != INVALID_ALTITUDE) {
             mm->altitude_baro = modeC * 100;
             mm->altitude_baro_unit = UNIT_FEET;

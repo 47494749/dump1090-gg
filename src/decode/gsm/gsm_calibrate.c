@@ -17,6 +17,7 @@
 //   6. corrected_ppm = current_ppm + mean_offset
 
 #include "gsm_calibrate.h"
+#include <stdint.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,11 +47,11 @@
 
 typedef struct { float re, im; } cplx_t;
 
-static void fft_forward(cplx_t *x, int n)
+static void fft_forward(cplx_t *x, int32_t n)
 {
     // Bit-reversal permutation
-    for (int i = 1, j = 0; i < n; i++) {
-        int bit = n >> 1;
+    for (int32_t i = 1, j = 0; i < n; i++) {
+        int32_t bit = n >> 1;
         for (; j & bit; bit >>= 1)
             j ^= bit;
         j ^= bit;
@@ -62,12 +63,12 @@ static void fft_forward(cplx_t *x, int n)
     }
 
     // Butterfly stages
-    for (int len = 2; len <= n; len <<= 1) {
+    for (int32_t len = 2; len <= n; len <<= 1) {
         float ang = -2.0f * (float)M_PI / len;
         cplx_t wn = { cosf(ang), sinf(ang) };
-        for (int i = 0; i < n; i += len) {
+        for (int32_t i = 0; i < n; i += len) {
             cplx_t w = { 1.0f, 0.0f };
-            for (int j = 0; j < len / 2; j++) {
+            for (int32_t j = 0; j < len / 2; j++) {
                 cplx_t u = x[i + j];
                 cplx_t v = {
                     x[i + j + len/2].re * w.re - x[i + j + len/2].im * w.im,
@@ -87,16 +88,16 @@ static void fft_forward(cplx_t *x, int n)
 
 // ===================== Sine window (same as ogn-rf) =====================
 
-static void make_sine_window(float *win, int n)
+static void make_sine_window(float *win, int32_t n)
 {
     float scale = 1.0f / sqrtf((float)n);
-    for (int i = 0; i < n; i++)
+    for (int32_t i = 0; i < n; i++)
         win[i] = sinf((float)M_PI * i / n) * scale;
 }
 
 // ===================== Float comparison for qsort =====================
 
-static int cmp_float(const void *a, const void *b)
+static int32_t cmp_float(const void *a, const void *b)
 {
     float fa = *(const float *)a, fb = *(const float *)b;
     return (fa > fb) - (fa < fb);
@@ -104,7 +105,7 @@ static int cmp_float(const void *a, const void *b)
 
 // ===================== Main calibration function =====================
 
-gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_db,
+gsm_cal_result_t gsm_calibrate(const char *serial, int32_t current_ppm, float gain_db,
                                 sdr_backend_type_t backend)
 {
     gsm_cal_result_t result;
@@ -140,8 +141,8 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
     // Use manual gain at max for reliable GSM detection.
     // Auto-gain is unreliable on FC0012 tuners and some RTL-SDR clones.
     sdr_set_gain_mode(dev, 1);  // manual gain
-    int gains[64];
-    int n_gains = sdr_get_tuner_gains(dev, gains, 64);
+    int32_t gains[64];
+    int32_t n_gains = sdr_get_tuner_gains(dev, gains, 64);
     if (n_gains > 0) {
         sdr_set_gain(dev, gains[n_gains - 1]);  // max gain
         fprintf(stderr, "gsm_cal: %s gain set to %d (tenth dB), %d steps available\n",
@@ -156,7 +157,7 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
     power_avg  = calloc(FFT_SIZE, sizeof(float));
     fft_buf    = malloc(FFT_SIZE * sizeof(cplx_t));
     ppm_values = malloc(MAX_PPM_VALUES * sizeof(float));
-    int ppm_count = 0;
+    int32_t ppm_count = 0;
 
     if (!iq_buf || !power_avg || !fft_buf || !ppm_values) {
         snprintf(result.error, sizeof(result.error), "Memory allocation failed");
@@ -169,49 +170,49 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
     float bin_width = (float)SAMPLE_RATE / FFT_SIZE;
 
     // Scan plan: step through the E-GSM band in SAMPLE_RATE (2 MHz) steps
-    int freq_step = SAMPLE_RATE;
-    int scans = (UPPER_FREQ - LOWER_FREQ - 2 * GUARD_BAND + freq_step - 1) / freq_step;
-    int read_ok_count = 0, read_fail_count = 0;
+    int32_t freq_step = SAMPLE_RATE;
+    int32_t scans = (UPPER_FREQ - LOWER_FREQ - 2 * GUARD_BAND + freq_step - 1) / freq_step;
+    int32_t read_ok_count = 0, read_fail_count = 0;
     float best_ratio_overall = 0;
 
-    int freq = LOWER_FREQ + GUARD_BAND + freq_step / 2;
-    for (int scan = 0; scan < scans && ppm_count < MAX_PPM_VALUES; scan++, freq += freq_step) {
+    int32_t freq = LOWER_FREQ + GUARD_BAND + freq_step / 2;
+    for (int32_t scan = 0; scan < scans && ppm_count < MAX_PPM_VALUES; scan++, freq += freq_step) {
         // Tune to scan frequency
         sdr_set_frequency(dev, (uint32_t)freq);
-        int actual_freq = (int)sdr_get_frequency(dev);
+        int32_t actual_freq = (int32_t)sdr_get_frequency(dev);
         sdr_reset_buffer(dev);
 
         // Compute averaged power spectrum from multiple reads for better SNR
         memset(power_avg, 0, FFT_SIZE * sizeof(float));
-        int slide_step = FFT_HALF;   // 50% overlap
-        int num_slides = 0;
-        int scan_read_ok = 0;
+        int32_t slide_step = FFT_HALF;   // 50% overlap
+        int32_t num_slides = 0;
+        int32_t scan_read_ok = 0;
 
-        for (int rd = 0; rd < READS_PER_SCAN; rd++) {
+        for (int32_t rd = 0; rd < READS_PER_SCAN; rd++) {
             // Read IQ samples synchronously via backend layer
-            int n_read = 0;
-            int rc = sdr_read_sync(dev, iq_buf, SAMPLES_PER_READ * 2, &n_read);
+            int32_t n_read = 0;
+            int32_t rc = sdr_read_sync(dev, iq_buf, SAMPLES_PER_READ * 2, &n_read);
             // Accept data even with LIBUSB_ERROR_OVERFLOW (-8)
-            if (n_read < (int)(FFT_SIZE * 4)) {
+            if (n_read < (int32_t)(FFT_SIZE * 4)) {
                 if (rd == 0)
                     fprintf(stderr, "gsm_cal: scan %d freq=%dHz: read failed rc=%d n_read=%d\n", scan, freq, rc, n_read);
                 continue;
             }
             scan_read_ok++;
-            int num_iq_pairs = n_read / 2;
+            int32_t num_iq_pairs = n_read / 2;
 
             // Log first read of first scan to verify data quality
             if (scan == 0 && rd == 0) {
-                int dc_count = 0;
-                for (int k = 0; k < 1000 && k < n_read; k++)
+                int32_t dc_count = 0;
+                for (int32_t k = 0; k < 1000 && k < n_read; k++)
                     if (iq_buf[k] == 127 || iq_buf[k] == 128) dc_count++;
                 fprintf(stderr, "gsm_cal: %s scan0 freq=%d n_read=%d dc_pct=%d%%\n",
                         serial, freq, n_read, dc_count * 100 / (n_read < 1000 ? n_read : 1000));
             }
 
             // Accumulate FFT power from this read
-            for (int off = 0; off + FFT_SIZE <= num_iq_pairs; off += slide_step) {
-                for (int i = 0; i < FFT_SIZE; i++) {
+            for (int32_t off = 0; off + FFT_SIZE <= num_iq_pairs; off += slide_step) {
+                for (int32_t i = 0; i < FFT_SIZE; i++) {
                     float re = (iq_buf[(off + i) * 2    ] - 127.5f) / 128.0f;
                     float im = (iq_buf[(off + i) * 2 + 1] - 127.5f) / 128.0f;
                     fft_buf[i].re = re * window[i];
@@ -220,8 +221,8 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
 
                 fft_forward(fft_buf, FFT_SIZE);
 
-                for (int i = 0; i < FFT_SIZE; i++) {
-                    int si = (i + FFT_HALF) % FFT_SIZE;
+                for (int32_t i = 0; i < FFT_SIZE; i++) {
+                    int32_t si = (i + FFT_HALF) % FFT_SIZE;
                     float pwr = fft_buf[i].re * fft_buf[i].re
                               + fft_buf[i].im * fft_buf[i].im;
                     power_avg[si] += pwr;
@@ -241,7 +242,7 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
 
         // Normalize
         float inv_slides = 1.0f / num_slides;
-        for (int i = 0; i < FFT_SIZE; i++)
+        for (int32_t i = 0; i < FFT_SIZE; i++)
             power_avg[i] *= inv_slides;
 
         // Analyze GSM channels in this scan
@@ -252,7 +253,7 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
         // Expected GMSK peak offset from carrier in bins
         float exp_peak_bins = (float)GSM_DATA_RATE / (4.0f * bin_width);  // ~34.7 bins
 
-        int chan = (int)ceilf(first_bin_freq / GSM_CHAN_WIDTH);
+        int32_t chan = (int32_t)ceilf(first_bin_freq / GSM_CHAN_WIDTH);
         for (; ppm_count < MAX_PPM_VALUES; chan++) {
             float chan_freq = chan * (float)GSM_CHAN_WIDTH;
             if (chan_freq >= last_bin_freq)
@@ -260,19 +261,19 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
 
             // Expected GMSK peak position: channel_center + DataRate/4
             float center_bin = (chan_freq - first_bin_freq) / bin_width;
-            int exp_bin = (int)(center_bin + exp_peak_bins + 0.5f);
+            int32_t exp_bin = (int32_t)(center_bin + exp_peak_bins + 0.5f);
 
             // Search window: ±4 bins (~±8 kHz) around expected peak
             // A genuine GMSK DataRate/4 peak should be within ±2 bins of expected
-            int search_lo = exp_bin - 4;
-            int search_hi = exp_bin + 4;
+            int32_t search_lo = exp_bin - 4;
+            int32_t search_hi = exp_bin + 4;
             if (search_lo < 2 || search_hi >= FFT_SIZE - 2)
                 continue;
 
             // Find peak near expected position
             float peak_val = 0;
-            int peak_idx = exp_bin;
-            for (int i = search_lo; i <= search_hi; i++) {
+            int32_t peak_idx = exp_bin;
+            for (int32_t i = search_lo; i <= search_hi; i++) {
                 if (power_avg[i] > peak_val) {
                     peak_val = power_avg[i];
                     peak_idx = i;
@@ -285,13 +286,13 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
 
             // Background: average power in the lower half of the channel
             // (away from the GMSK peak, between center-90kHz and center+20kHz)
-            int bkg_lo = (int)(center_bin - 0.45f * GSM_CHAN_WIDTH / bin_width + 0.5f);
-            int bkg_hi = (int)(center_bin + 0.10f * GSM_CHAN_WIDTH / bin_width + 0.5f);
+            int32_t bkg_lo = (int32_t)(center_bin - 0.45f * GSM_CHAN_WIDTH / bin_width + 0.5f);
+            int32_t bkg_hi = (int32_t)(center_bin + 0.10f * GSM_CHAN_WIDTH / bin_width + 0.5f);
             if (bkg_lo < 0) bkg_lo = 0;
             if (bkg_hi >= FFT_SIZE) bkg_hi = FFT_SIZE - 1;
             float bkg = 0;
-            int bkg_n = 0;
-            for (int i = bkg_lo; i <= bkg_hi; i++) {
+            int32_t bkg_n = 0;
+            for (int32_t i = bkg_lo; i <= bkg_hi; i++) {
                 bkg += power_avg[i];
                 bkg_n++;
             }
@@ -358,7 +359,7 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
     // MAD (Median Absolute Deviation)
     float *abs_dev = malloc(ppm_count * sizeof(float));
     if (!abs_dev) { snprintf(result.error, sizeof(result.error), "Memory allocation failed"); goto cleanup; }
-    for (int i = 0; i < ppm_count; i++)
+    for (int32_t i = 0; i < ppm_count; i++)
         abs_dev[i] = fabsf(ppm_values[i] - median);
     qsort(abs_dev, ppm_count, sizeof(float), cmp_float);
     float mad;
@@ -371,8 +372,8 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
     // Keep only values within 2*MAD of median (or 3 ppm if MAD is tiny)
     float threshold = fmaxf(2.0f * mad, 3.0f);
     float sum = 0;
-    int kept = 0;
-    for (int i = 0; i < ppm_count; i++) {
+    int32_t kept = 0;
+    for (int32_t i = 0; i < ppm_count; i++) {
         if (fabsf(ppm_values[i] - median) <= threshold) {
             sum += ppm_values[i];
             kept++;
@@ -388,7 +389,7 @@ gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_d
 
     // RMS of kept values
     float rms_sum = 0;
-    for (int i = 0; i < ppm_count; i++) {
+    for (int32_t i = 0; i < ppm_count; i++) {
         if (fabsf(ppm_values[i] - median) <= threshold) {
             float d = ppm_values[i] - mean;
             rms_sum += d * d;

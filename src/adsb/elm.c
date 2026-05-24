@@ -14,6 +14,7 @@
 //
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -76,25 +77,25 @@ static void elm_remove(struct elm_state *state, uint32_t addr) {
 //   SOH (0x01) or prekey, then label (2 chars), then text ending with ETX (0x03) or ETB (0x17)
 // We also look for plain ASCII text.
 
-static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
-                             char *outbuf, int outbuf_size) {
+static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int32_t len,
+                             char *outbuf, int32_t outbuf_size) {
     // Look for ACARS framing
-    int i;
-    int found_acars = 0;
-    int n = 0;  // output buffer position
+    int32_t i;
+    int32_t found_acars = 0;
+    int32_t n = 0;  // output buffer position
 
     for (i = 0; i < len; i++) {
         if (payload[i] == 0x01) { // SOH - start of ACARS header
             found_acars = 1;
 
             // Find end of message (ETX=0x03 or ETB=0x17)
-            int end = i + 1;
+            int32_t end = i + 1;
             while (end < len && payload[end] != 0x03 && payload[end] != 0x17)
                 end++;
 
             // Extract the ACARS content between SOH and ETX/ETB
-            int msg_start = i + 1;
-            int msg_len = end - msg_start;
+            int32_t msg_start = i + 1;
+            int32_t msg_len = end - msg_start;
 
             if (msg_len > 2) {
                 n += snprintf(outbuf + n, outbuf_size - n, "ELM ACARS %06X: ", addr);
@@ -106,7 +107,7 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
                 // Print the address field (up to 7 chars)
                 if (msg_len > 8) {
                     n += snprintf(outbuf + n, outbuf_size - n, "reg=");
-                    for (int j = 1; j < 8 && (msg_start + j) < len; j++) {
+                    for (int32_t j = 1; j < 8 && (msg_start + j) < len; j++) {
                         if (isprint(payload[msg_start + j]) && n < outbuf_size - 1)
                             outbuf[n++] = payload[msg_start + j];
                     }
@@ -126,8 +127,8 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
                 }
 
                 // Print STX onwards as text (the actual message body)
-                int stx_pos = -1;
-                for (int j = msg_start; j < end; j++) {
+                int32_t stx_pos = -1;
+                for (int32_t j = msg_start; j < end; j++) {
                     if (payload[j] == 0x02) { // STX
                         stx_pos = j + 1;
                         break;
@@ -136,7 +137,7 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
 
                 if (stx_pos >= 0 && stx_pos < end) {
                     n += snprintf(outbuf + n, outbuf_size - n, "text=\"");
-                    for (int j = stx_pos; j < end && n < outbuf_size - 4; j++) {
+                    for (int32_t j = stx_pos; j < end && n < outbuf_size - 4; j++) {
                         uint8_t c = payload[j];
                         if (c >= 0x20 && c < 0x7f)
                             outbuf[n++] = c;
@@ -162,7 +163,7 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
         FILE *mem = open_memstream(&cpdlc_buf, &cpdlc_len);
         if (mem) {
             stdout = mem;
-            int decoded = cpdlc_try_decode(addr, payload, len);
+            int32_t decoded = cpdlc_try_decode(addr, payload, len);
             fflush(mem);
             stdout = old_stdout;
             fclose(mem);
@@ -194,7 +195,7 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int len,
             n += snprintf(outbuf + n, outbuf_size - n, "...");
 
         // ASCII if there's meaningful text
-        int has_printable = 0;
+        int32_t has_printable = 0;
         for (i = 0; i < len; i++) {
             if (isprint(payload[i]) && payload[i] != ' ')
                 has_printable++;
@@ -250,8 +251,8 @@ static void *elm_decode_worker(void *arg) {
 
             // Log decoded content to panel
             if (decoded[0]) {
-                int rxid = -1;
-                for (int ri = 0; ri < SdrManager.count; ri++)
+                int32_t rxid = -1;
+                for (int32_t ri = 0; ri < SdrManager.count; ri++)
                     if (SdrManager.receivers[ri].config.role == SDR_ROLE_ADSB) { rxid = SdrManager.receivers[ri].dev_index; break; }
                 panelLogMessage("[ELM rx%d] %s", rxid, decoded);
             }
@@ -276,12 +277,12 @@ static void *elm_decode_worker(void *arg) {
 
 // Check if payload looks like valid ACARS or CPDLC content.
 // Returns 1 if content passes validation, 0 if it looks like garbage.
-static int elm_validate_content(const uint8_t *payload, int len) {
+static int32_t elm_validate_content(const uint8_t *payload, int32_t len) {
     if (len < 10)
         return 0;
 
     // Check 1: ACARS framing â€” SOH (0x01) present
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         if (payload[i] == 0x01) {
             // Found SOH â€” likely real ACARS
             return 1;
@@ -293,8 +294,8 @@ static int elm_validate_content(const uint8_t *payload, int len) {
     // Accept if first byte has high bit clear (tag < 128)
     if ((payload[0] & 0x80) == 0) {
         // Could be ASN.1 UPER, accept provisionally if enough printable content
-        int printable = 0;
-        for (int i = 0; i < len; i++) {
+        int32_t printable = 0;
+        for (int32_t i = 0; i < len; i++) {
             if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
                 payload[i] == 0x0a || payload[i] == 0x0d)
                 printable++;
@@ -304,8 +305,8 @@ static int elm_validate_content(const uint8_t *payload, int len) {
     }
 
     // Check 3: Plain text content â€” at least 40% printable ASCII
-    int printable = 0;
-    for (int i = 0; i < len; i++) {
+    int32_t printable = 0;
+    for (int32_t i = 0; i < len; i++) {
         if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
             payload[i] == 0x0a || payload[i] == 0x0d)
             printable++;
@@ -320,8 +321,8 @@ static int elm_validate_content(const uint8_t *payload, int len) {
 
 // Check if consecutive segments arrived within reasonable time gaps.
 // Real ELM segments arrive in rapid succession (< 5 seconds apart).
-static int elm_validate_timing(struct elm_entry *entry, int num_segments) {
-    for (int i = 1; i < num_segments; i++) {
+static int32_t elm_validate_timing(struct elm_entry *entry, int32_t num_segments) {
+    for (int32_t i = 1; i < num_segments; i++) {
         if (entry->seg_time[i] == 0 || entry->seg_time[i - 1] == 0)
             return 0;
         uint64_t gap = entry->seg_time[i] - entry->seg_time[i - 1];
@@ -333,10 +334,10 @@ static int elm_validate_timing(struct elm_entry *entry, int num_segments) {
 
 // ========== Queue a complete message for decode ==========
 
-static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry, int complete_ke) {
+static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry, int32_t complete_ke) {
     // Find the highest consecutive segment from 0
-    int max_seg = -1;
-    for (int i = 0; i < ELM_MAX_SEGMENTS; i++) {
+    int32_t max_seg = -1;
+    for (int32_t i = 0; i < ELM_MAX_SEGMENTS; i++) {
         if (entry->segments_mask & (1 << i))
             max_seg = i;
         else
@@ -346,7 +347,7 @@ static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry,
     if (max_seg < 0)
         return; // nothing usable
 
-    int num_segments = max_seg + 1;
+    int32_t num_segments = max_seg + 1;
 
     // Require minimum number of consecutive segments
     if (num_segments < ELM_MIN_SEGMENTS) {
@@ -360,15 +361,15 @@ static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry,
     if (!elm_validate_timing(entry, num_segments)) {
         state->messages_rejected++;
         fprintf(stderr, "ELM reject %06X: segment timing too slow (>%ds gap)\n",
-                entry->addr, (int)(ELM_SEG_GAP_MS / 1000));
+                entry->addr, (int32_t)(ELM_SEG_GAP_MS / 1000));
         return;
     }
 
-    int payload_len = num_segments * ELM_SEGMENT_SIZE;
+    int32_t payload_len = num_segments * ELM_SEGMENT_SIZE;
 
     // Assemble payload temporarily for content validation
     uint8_t payload[ELM_MAX_PAYLOAD];
-    for (int i = 0; i < num_segments; i++) {
+    for (int32_t i = 0; i < num_segments; i++) {
         memcpy(payload + i * ELM_SEGMENT_SIZE, entry->data[i], ELM_SEGMENT_SIZE);
     }
 
@@ -437,7 +438,7 @@ void elmCleanup(struct elm_state *state) {
     pthread_cond_destroy(&state->queue_cond);
 
     // Free all reassembly entries
-    for (int i = 0; i < ELM_TABLE_SIZE; i++) {
+    for (int32_t i = 0; i < ELM_TABLE_SIZE; i++) {
         struct elm_entry *e = state->table[i];
         while (e) {
             struct elm_entry *next = e->next;
@@ -467,8 +468,8 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
     } else {
         // Existing entry: only accept segments that extend the sequence.
         // Find the highest consecutive segment we have so far.
-        int next_expected = 0;
-        for (int i = 0; i < ELM_MAX_SEGMENTS; i++) {
+        int32_t next_expected = 0;
+        for (int32_t i = 0; i < ELM_MAX_SEGMENTS; i++) {
             if (entry->segments_mask & (1 << i))
                 next_expected = i + 1;
             else
@@ -484,7 +485,7 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
     }
 
     // Store the segment
-    int is_new = !(entry->segments_mask & (1 << nd));
+    int32_t is_new = !(entry->segments_mask & (1 << nd));
     memcpy(entry->data[nd], md, ELM_SEGMENT_SIZE);
     entry->segments_mask |= (1 << nd);
     entry->seg_time[nd] = timestamp;
@@ -493,12 +494,12 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
 
     // Log new segment arrival immediately
     if (is_new) {
-        int segs_have = 0;
-        for (int i = 0; i < ELM_MAX_SEGMENTS; i++)
+        int32_t segs_have = 0;
+        for (int32_t i = 0; i < ELM_MAX_SEGMENTS; i++)
             if (entry->segments_mask & (1 << i))
                 segs_have++;
         fprintf(stderr, "ELM seg %06X: ND=%u KE=%u [%d/16] ", addr, nd, ke, segs_have);
-        for (int b = 0; b < ELM_SEGMENT_SIZE; b++)
+        for (int32_t b = 0; b < ELM_SEGMENT_SIZE; b++)
             fprintf(stderr, "%02X", md[b]);
         fprintf(stderr, "\n");
         fflush(stderr);
@@ -511,8 +512,8 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
     if (!(entry->segments_mask & 1))
         return; // no segment 0 yet
 
-    int consecutive = 0;
-    for (int i = 0; i < ELM_MAX_SEGMENTS; i++) {
+    int32_t consecutive = 0;
+    for (int32_t i = 0; i < ELM_MAX_SEGMENTS; i++) {
         if (entry->segments_mask & (1 << i))
             consecutive = i + 1;
         else
@@ -521,7 +522,7 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
 
     // Complete if: KE=1 or we have enough consecutive segments.
     // All validation (min segments, timing, content) happens in elm_queue_complete.
-    int complete = 0;
+    int32_t complete = 0;
     if (ke == 1 && consecutive >= ELM_MIN_SEGMENTS) {
         complete = 1;
     } else if (consecutive >= ELM_MIN_SEGMENTS && consecutive == ELM_MAX_SEGMENTS) {
@@ -529,8 +530,8 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
     } else if (consecutive >= ELM_MIN_SEGMENTS) {
         // Check if there's a gap after our consecutive run â€” this means
         // we likely have everything before the gap
-        int has_later = 0;
-        for (int i = consecutive; i < ELM_MAX_SEGMENTS; i++) {
+        int32_t has_later = 0;
+        for (int32_t i = consecutive; i < ELM_MAX_SEGMENTS; i++) {
             if (entry->segments_mask & (1 << i)) {
                 has_later = 1;
                 break;
@@ -551,15 +552,15 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
 }
 
 void elmCleanupStale(struct elm_state *state, uint64_t now) {
-    for (int i = 0; i < ELM_TABLE_SIZE; i++) {
+    for (int32_t i = 0; i < ELM_TABLE_SIZE; i++) {
         struct elm_entry **pp = &state->table[i];
         while (*pp) {
             struct elm_entry *e = *pp;
             if (now - e->last_seen > ELM_TTL_MS) {
                 // TTL expired. If we have enough consecutive segments from 0,
                 // try to decode what we have.
-                int consec = 0;
-                for (int s = 0; s < ELM_MAX_SEGMENTS; s++) {
+                int32_t consec = 0;
+                for (int32_t s = 0; s < ELM_MAX_SEGMENTS; s++) {
                     if (e->segments_mask & (1 << s))
                         consec = s + 1;
                     else
@@ -603,11 +604,11 @@ void elmPrintPartial(struct elm_state *state, uint64_t now) {
 
     state->last_partial_time = now;
 
-    for (int i = 0; i < ELM_TABLE_SIZE; i++) {
+    for (int32_t i = 0; i < ELM_TABLE_SIZE; i++) {
         struct elm_entry *e = state->table[i];
         while (e) {
-            int segs_have = 0;
-            for (int s = 0; s < ELM_MAX_SEGMENTS; s++)
+            int32_t segs_have = 0;
+            for (int32_t s = 0; s < ELM_MAX_SEGMENTS; s++)
                 if (e->segments_mask & (1 << s))
                     segs_have++;
 
@@ -617,9 +618,9 @@ void elmPrintPartial(struct elm_state *state, uint64_t now) {
                     e->addr, segs_have, age_sec);
 
             // Print segment map: hex for received, ".." for missing
-            for (int s = 0; s < ELM_MAX_SEGMENTS; s++) {
+            for (int32_t s = 0; s < ELM_MAX_SEGMENTS; s++) {
                 if (e->segments_mask & (1 << s)) {
-                    for (int b = 0; b < ELM_SEGMENT_SIZE; b++)
+                    for (int32_t b = 0; b < ELM_SEGMENT_SIZE; b++)
                         fprintf(stderr, "%02X", e->data[s][b]);
                 } else {
                     // 10 bytes missing = 20 dots
@@ -631,9 +632,9 @@ void elmPrintPartial(struct elm_state *state, uint64_t now) {
 
             // Also print ASCII view of received segments
             fprintf(stderr, " |");
-            for (int s = 0; s < ELM_MAX_SEGMENTS; s++) {
+            for (int32_t s = 0; s < ELM_MAX_SEGMENTS; s++) {
                 if (e->segments_mask & (1 << s)) {
-                    for (int b = 0; b < ELM_SEGMENT_SIZE; b++) {
+                    for (int32_t b = 0; b < ELM_SEGMENT_SIZE; b++) {
                         uint8_t c = e->data[s][b];
                         fputc((c >= 0x20 && c < 0x7f) ? c : '.', stderr);
                     }

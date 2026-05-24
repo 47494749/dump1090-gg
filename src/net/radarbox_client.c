@@ -1,5 +1,6 @@
 // radarbox_client.c: Stub — RadarBox feeder removed in dump1090-gg-light
 #include "radarbox_client.h"
+#include <stdint.h>
 #include <string.h>
 
 radarbox_client_t RadarBoxClient;
@@ -9,7 +10,7 @@ void radarboxClientStart(void) { }
 void radarboxClientPeriodicWork(void) { }
 void radarboxClientStop(void) { }
 
-int radarboxLoadConfig(const char *path) {
+int32_t radarboxLoadConfig(const char *path) {
     (void)path;
     return -1;
 }
@@ -19,7 +20,7 @@ bool radarboxLoadKeys(const char *path) {
     return false;
 }
 
-int rb_keys_are_loaded(void) { return 0; }
+int32_t rb_keys_are_loaded(void) { return 0; }
 
 void rb_get_key(uint8_t out[16]) {
     memset(out, 0, 16);

@@ -81,7 +81,7 @@ typedef struct {
     bool     long_message;        // true=144-bit, false=112-bit
 
     // Identification
-    int      country_code;        // MID / country code (10-bit)
+    int32_t      country_code;        // MID / country code (10-bit)
     char     country_name[48];    // Resolved country name
     sarsat_protocol_t protocol;
     sarsat_beacon_type_t beacon_type;
@@ -109,8 +109,8 @@ typedef struct {
     // BCH error correction status
     bool     bch1_valid;
     bool     bch2_valid;
-    int      bch1_errors;         // Errors corrected in BCH-1
-    int      bch2_errors;         // Errors corrected in BCH-2
+    int32_t      bch1_errors;         // Errors corrected in BCH-1
+    int32_t      bch2_errors;         // Errors corrected in BCH-2
 
     // Signal info
     float    snr;                 // Signal-to-noise ratio estimate (dB)
@@ -157,7 +157,7 @@ void sarsat_get_stats(struct sarsat_state *state, sarsat_stats_t *stats);
 // Utility: get human-readable names
 const char *sarsat_beacon_type_name(sarsat_beacon_type_t type);
 const char *sarsat_protocol_name(sarsat_protocol_t proto);
-const char *sarsat_country_name(int mid);
+const char *sarsat_country_name(int32_t mid);
 
 #ifdef __cplusplus
 }

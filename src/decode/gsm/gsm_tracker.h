@@ -44,7 +44,7 @@ typedef struct {
     double   freq_offset_hz;     // current frequency offset
 
     // Sync state
-    int      sync_state;         // gsm_sync_state_t
+    int32_t      sync_state;         // gsm_sync_state_t
 
     // Last Cell Broadcast text
     char     last_cb_text[256];
@@ -73,7 +73,7 @@ void gsmTrackerUpdateFCCH(uint16_t arfcn, double freq_mhz,
 void gsmTrackerUpdateCB(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb);
 
 // Get number of active (non-stale) cells
-int gsmTrackerActiveCount(void);
+int32_t gsmTrackerActiveCount(void);
 
 #ifdef __cplusplus
 }

@@ -14,6 +14,7 @@
 // option) any later version.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "airframes_feed.h"
 
 #include <stdio.h>
@@ -27,15 +28,15 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-static int acars_fd = -1;
-static int vdl2_fd  = -1;
+static int32_t acars_fd = -1;
+static int32_t vdl2_fd  = -1;
 static struct sockaddr_in acars_addr;
 static struct sockaddr_in vdl2_addr;
 static uint64_t acars_msgs_sent = 0;
 static uint64_t vdl2_msgs_sent  = 0;
 
 // Resolve hostname to sockaddr_in, returns 0 on success
-static int resolve_host(const char *host, int port, struct sockaddr_in *out)
+static int32_t resolve_host(const char *host, int32_t port, struct sockaddr_in *out)
 {
     memset(out, 0, sizeof(*out));
     out->sin_family = AF_INET;
@@ -104,11 +105,11 @@ void airframesFeedInit(void)
 }
 
 // Escape a string for JSON output. Returns number of bytes written (excluding NUL).
-static int json_escape_str(char *out, int out_size, const char *in)
+static int32_t json_escape_str(char *out, int32_t out_size, const char *in)
 {
-    int pos = 0;
+    int32_t pos = 0;
     for (; *in && pos < out_size - 2; in++) {
-        unsigned char c = (unsigned char)*in;
+        uint8_t c = (uint8_t)*in;
         if (c == '"' || c == '\\') {
             if (pos + 2 >= out_size) break;
             out[pos++] = '\\';
@@ -156,7 +157,7 @@ void airframesFeedSendAcars(const acars_msg_t *msg)
 
     // acarsdec JSON format
     char buf[4096];
-    int len = snprintf(buf, sizeof(buf),
+    int32_t len = snprintf(buf, sizeof(buf),
         "{\"timestamp\":%.3f,"
         "\"station_id\":\"%s\","
         "\"channel\":%d,"
@@ -186,7 +187,7 @@ void airframesFeedSendAcars(const acars_msg_t *msg)
         msg->msgno,
         text_esc);
 
-    if (len > 0 && len < (int)sizeof(buf)) {
+    if (len > 0 && len < (int32_t)sizeof(buf)) {
         ssize_t n = sendto(acars_fd, buf, (size_t)len, 0,
                            (struct sockaddr *)&acars_addr, sizeof(acars_addr));
         if (n > 0)
@@ -213,7 +214,7 @@ void airframesFeedSendVdl2(const vdl2_msg_t *msg)
     json_escape_str(flight_esc, sizeof(flight_esc), msg->flight);
 
     char buf[4096];
-    int len;
+    int32_t len;
 
     if (msg->has_acars) {
         // VDL2 frame with ACARS payload — full dumpvdl2-compatible JSON
@@ -242,8 +243,8 @@ void airframesFeedSendVdl2(const vdl2_msg_t *msg)
             "}"   // acars
             "}"   // avlc
             "}}\n",  // vdl2
-            (long)ts.tv_sec, (long)(ts.tv_nsec / 1000),
-            (long)msg->freq,
+            (int64_t)ts.tv_sec, (int64_t)(ts.tv_nsec / 1000),
+            (int64_t)msg->freq,
             msg->level,
             msg->level - msg->snr,
             Modes.airframes_station_id,
@@ -270,8 +271,8 @@ void airframesFeedSendVdl2(const vdl2_msg_t *msg)
             "\"frame_type\":\"%s\""
             "}"   // avlc
             "}}\n",  // vdl2
-            (long)ts.tv_sec, (long)(ts.tv_nsec / 1000),
-            (long)msg->freq,
+            (int64_t)ts.tv_sec, (int64_t)(ts.tv_nsec / 1000),
+            (int64_t)msg->freq,
             msg->level,
             msg->level - msg->snr,
             Modes.airframes_station_id,
@@ -280,7 +281,7 @@ void airframesFeedSendVdl2(const vdl2_msg_t *msg)
             msg->frame_type);
     }
 
-    if (len > 0 && len < (int)sizeof(buf)) {
+    if (len > 0 && len < (int32_t)sizeof(buf)) {
         ssize_t n = sendto(vdl2_fd, buf, (size_t)len, 0,
                            (struct sockaddr *)&vdl2_addr, sizeof(vdl2_addr));
         if (n > 0)

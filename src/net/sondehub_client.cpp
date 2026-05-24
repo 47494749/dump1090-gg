@@ -15,6 +15,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <cstdint>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -105,7 +106,7 @@ static uint32_t queue_count(void)
 static bool sondehub_put(const char *path, const char *json_body, size_t body_len)
 {
     struct addrinfo hints = {}, *res;
-    int fd = -1;
+    int32_t fd = -1;
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
     bool ok = false;
@@ -134,7 +135,7 @@ static bool sondehub_put(const char *path, const char *json_body, size_t body_le
             FD_SET(fd, &wfds);
 
             if (select(fd + 1, NULL, &wfds, NULL, &tv) > 0) {
-                int so_error;
+                int32_t so_error;
                 socklen_t len = sizeof(so_error);
                 getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len);
                 if (so_error == 0) {
@@ -206,8 +207,8 @@ connected:
         if (SSL_write(ssl, header.data(), (int)header.size()) != (int)header.size()) goto cleanup;
 
         // Send body
-        int total = 0;
-        while (total < (int)body_len) {
+        int32_t total = 0;
+        while (total < (int32_t)body_len) {
             int w = SSL_write(ssl, json_body + total, (int)body_len - total);
             if (w <= 0) goto cleanup;
             total += w;
@@ -220,7 +221,7 @@ connected:
         int n = SSL_read(ssl, rbuf, sizeof(rbuf) - 1);
         if (n > 0) {
             std::string resp(rbuf, n);
-            int status = 0;
+            int32_t status = 0;
             if (sscanf(resp.c_str(), "HTTP/%*d.%*d %d", &status) == 1 && status >= 200 && status < 300) {
                 ok = true;
             } else {
@@ -259,7 +260,7 @@ static std::string sfmt(const char *fmt, ...) {
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int32_t n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n < 0) return {};
     if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);

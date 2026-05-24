@@ -11,6 +11,7 @@
 // option) any later version.
 
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -51,13 +52,13 @@ static sdrgg_ctx_t *get_ctx(void)
 struct ring_slot {
     uint8_t data[SDRGG_RING_BUFSIZE];
     uint32_t len;
-    volatile int ready;  // 0=free, 1=filled
+    volatile int32_t ready;  // 0=free, 1=filled
 };
 
 struct sdrgg_ring {
     struct ring_slot slots[SDRGG_RING_SLOTS];
-    volatile int write_idx;
-    volatile int read_idx;
+    volatile int32_t write_idx;
+    volatile int32_t read_idx;
 };
 
 // ======================== Streaming adapter ========================
@@ -65,12 +66,12 @@ struct sdrgg_ring {
 struct stream_adapter {
     sdr_async_cb_t user_cb;
     void          *user_ctx;
-    volatile int   stopping;
+    volatile int32_t   stopping;
     struct sdrgg_ring *ring;
     volatile uint32_t cb_count;      // debug: sdrgg callback invocations
     volatile uint32_t ring_full;     // debug: ring full drops
     volatile uint32_t deliver_count; // debug: deliveries to user callback
-    int               adapter_id;   // debug: adapter identifier
+    int32_t               adapter_id;   // debug: adapter identifier
 };
 
 // Called from libsdrgg event_loop_thread — must return quickly!
@@ -86,7 +87,7 @@ static void sdrgg_stream_callback(sdrgg_dev_t * /*dev*/, const sdrgg_buffer_t *b
     if (!ring) return;
 
     // Push to ring buffer (fast memcpy, no heavy processing here)
-    int idx = ring->write_idx;
+    int32_t idx = ring->write_idx;
     struct ring_slot *slot = &ring->slots[idx];
     if (slot->ready) { adapter->ring_full++; return; }  // ring full — drop this buffer
     uint32_t copy_len = buf->length < SDRGG_RING_BUFSIZE ? buf->length : SDRGG_RING_BUFSIZE;
@@ -98,15 +99,15 @@ static void sdrgg_stream_callback(sdrgg_dev_t * /*dev*/, const sdrgg_buffer_t *b
 
 // ======================== Backend operations ========================
 
-static int gg_enumerate(sdr_dev_info_t *devs, int max_devs)
+static int32_t gg_enumerate(sdr_dev_info_t *devs, int32_t max_devs)
 {
     sdrgg_ctx_t *ctx = get_ctx();
     if (!ctx) return 0;
 
     sdrgg_devinfo_t gg_devs[8];
-    int count = sdrgg_enumerate(ctx, gg_devs, max_devs < 8 ? max_devs : 8);
+    int32_t count = sdrgg_enumerate(ctx, gg_devs, max_devs < 8 ? max_devs : 8);
 
-    for (int i = 0; i < count && i < max_devs; i++) {
+    for (int32_t i = 0; i < count && i < max_devs; i++) {
         devs[i].index = i;
         strncpy(devs[i].serial, gg_devs[i].serial, sizeof(devs[i].serial) - 1);
         devs[i].serial[sizeof(devs[i].serial) - 1] = '\0';
@@ -128,7 +129,7 @@ static int gg_enumerate(sdr_dev_info_t *devs, int max_devs)
     return count;
 }
 
-static sdr_device_t *gg_open_by_index(int index)
+static sdr_device_t *gg_open_by_index(int32_t index)
 {
     sdrgg_ctx_t *ctx = get_ctx();
     if (!ctx) return nullptr;
@@ -167,8 +168,8 @@ static sdr_device_t *gg_open_by_serial(const char *serial)
 
     // Enumerate and find by serial
     sdrgg_devinfo_t devs[8];
-    int count = sdrgg_enumerate(ctx, devs, 8);
-    for (int i = 0; i < count; i++) {
+    int32_t count = sdrgg_enumerate(ctx, devs, 8);
+    for (int32_t i = 0; i < count; i++) {
         if (strcmp(devs[i].serial, serial) == 0) {
             return gg_open_by_index(i);
         }
@@ -202,7 +203,7 @@ static void gg_close(sdr_device_t *dev)
     delete dev;
 }
 
-static int gg_set_frequency(sdr_device_t *dev, uint32_t freq_hz)
+static int32_t gg_set_frequency(sdr_device_t *dev, uint32_t freq_hz)
 {
     uint32_t actual = 0;
     int32_t rc = sdr::set_frequency(static_cast<sdrgg_dev_t *>(dev->handle), freq_hz, &actual);
@@ -224,7 +225,7 @@ static uint32_t gg_get_frequency(sdr_device_t *dev)
     return dev->current_freq;
 }
 
-static int gg_set_sample_rate(sdr_device_t *dev, uint32_t rate_hz)
+static int32_t gg_set_sample_rate(sdr_device_t *dev, uint32_t rate_hz)
 {
     uint32_t actual = 0;
     int32_t rc = sdr::set_sample_rate(static_cast<sdrgg_dev_t *>(dev->handle), rate_hz, &actual);
@@ -243,7 +244,7 @@ static int gg_set_sample_rate(sdr_device_t *dev, uint32_t rate_hz)
     return rc;
 }
 
-static int gg_set_gain_mode(sdr_device_t *dev, int manual)
+static int32_t gg_set_gain_mode(sdr_device_t *dev, int32_t manual)
 {
     if (!manual) {
         // Auto gain: set SDRGG_GAIN_AUTO
@@ -252,55 +253,55 @@ static int gg_set_gain_mode(sdr_device_t *dev, int manual)
     return SDRGG_OK;  // manual mode is implicit when setting a specific gain
 }
 
-static int gg_set_gain(sdr_device_t *dev, int gain_tenth_db)
+static int32_t gg_set_gain(sdr_device_t *dev, int32_t gain_tenth_db)
 {
     int32_t rc = sdr::set_gain(static_cast<sdrgg_dev_t *>(dev->handle), (int32_t)gain_tenth_db);
     if (rc == SDRGG_OK) dev->current_gain = gain_tenth_db;
     return rc;
 }
 
-static int gg_get_gain(sdr_device_t *dev)
+static int32_t gg_get_gain(sdr_device_t *dev)
 {
     int32_t gain = 0;
     sdr::get_gain(static_cast<sdrgg_dev_t *>(dev->handle), &gain);
-    return (int)gain;
+    return (int32_t)gain;
 }
 
-static int gg_set_freq_correction(sdr_device_t *dev, int ppm)
+static int32_t gg_set_freq_correction(sdr_device_t *dev, int32_t ppm)
 {
     return sdr::set_freq_correction(static_cast<sdrgg_dev_t *>(dev->handle), (int32_t)ppm);
 }
 
-static int gg_set_agc(sdr_device_t *dev, int enable)
+static int32_t gg_set_agc(sdr_device_t *dev, int32_t enable)
 {
     return sdr::set_digital_agc(static_cast<sdrgg_dev_t *>(dev->handle), enable != 0);
 }
 
-static int gg_set_direct_sampling(sdr_device_t * /*dev*/, int /*mode*/)
+static int32_t gg_set_direct_sampling(sdr_device_t * /*dev*/, int32_t /*mode*/)
 {
     // libsdrgg does not support direct sampling (RTL2832U limitation)
     return 0;
 }
 
-static int gg_reset_buffer(sdr_device_t * /*dev*/)
+static int32_t gg_reset_buffer(sdr_device_t * /*dev*/)
 {
     // libsdrgg uses zero-copy URBs — no explicit buffer reset needed
     return 0;
 }
 
-static int gg_get_tuner_gains(sdr_device_t *dev, int *gains, int max_count)
+static int32_t gg_get_tuner_gains(sdr_device_t *dev, int32_t *gains, int32_t max_count)
 {
     // For R820T, always use the well-known 29-step gain table (librtlsdr compatible)
     if (dev->tuner_type == SDR_TUNER_R820T || dev->tuner_type == SDR_TUNER_R820T2) {
-        static const int r820t_gains[] = {
+        static const int32_t r820t_gains[] = {
             0, 9, 14, 27, 37, 77, 87, 125, 144, 157,
             166, 197, 207, 229, 254, 280, 297, 328, 338, 364,
             372, 386, 402, 421, 434, 439, 445, 480, 496
         };
-        int count = 29;
+        int32_t count = 29;
         if (!gains) return count;
         if (count > max_count) count = max_count;
-        memcpy(gains, r820t_gains, (size_t)count * sizeof(int));
+        memcpy(gains, r820t_gains, (size_t)count * sizeof(int32_t));
         return count;
     }
 
@@ -309,11 +310,11 @@ static int gg_get_tuner_gains(sdr_device_t *dev, int *gains, int max_count)
         const int16_t *fc_gains = nullptr;
         int32_t fc_count = 0;
         fc0012::get_gains(&fc_gains, &fc_count);
-        if (!gains) return (int)fc_count;
+        if (!gains) return (int32_t)fc_count;
         if (fc_gains && fc_count > 0) {
-            int count = fc_count > max_count ? max_count : (int)fc_count;
-            for (int i = 0; i < count; i++)
-                gains[i] = (int)fc_gains[i];
+            int32_t count = fc_count > max_count ? max_count : (int32_t)fc_count;
+            for (int32_t i = 0; i < count; i++)
+                gains[i] = (int32_t)fc_gains[i];
             return count;
         }
     }
@@ -324,22 +325,22 @@ static int gg_get_tuner_gains(sdr_device_t *dev, int *gains, int max_count)
     if (rc == SDRGG_OK && caps) {
         int32_t min_g = caps->total_gain_min_tenth_db;
         int32_t max_g = caps->total_gain_max_tenth_db;
-        if (!gains) return (int)((max_g - min_g) / 10 + 1);
-        int count = 0;
+        if (!gains) return (int32_t)((max_g - min_g) / 10 + 1);
+        int32_t count = 0;
         for (int32_t g = min_g; g <= max_g && count < max_count; g += 10)
-            gains[count++] = (int)g;
+            gains[count++] = (int32_t)g;
         return count;
     }
 
     return 0;
 }
 
-static int gg_get_tuner_type(sdr_device_t *dev)
+static int32_t gg_get_tuner_type(sdr_device_t *dev)
 {
-    return (int)dev->tuner_type;
+    return (int32_t)dev->tuner_type;
 }
 
-static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
+static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
                          uint32_t buf_count, uint32_t buf_size)
 {
     // Allocate ring buffer (large — ~2MB per device)
@@ -352,7 +353,7 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     adapter->user_cb = cb;
     adapter->user_ctx = ctx;
     adapter->stopping = 0;
-    static int next_adapter_id = 0;
+    static int32_t next_adapter_id = 0;
     adapter->cb_count = 0;
     adapter->ring_full = 0;
     adapter->deliver_count = 0;
@@ -385,7 +386,7 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     struct timespec ts_poll = { .tv_sec = 0, .tv_nsec = 1000000 }; // 1ms poll interval
     uint32_t poll_empty = 0;
     while (dev->handle && dev->async_running) {
-        int idx = ring->read_idx;
+        int32_t idx = ring->read_idx;
         struct ring_slot *slot = &ring->slots[idx];
         if (__atomic_load_n(&slot->ready, __ATOMIC_ACQUIRE)) {
             // Deliver data to user callback (heavy processing happens HERE, not in event_loop)
@@ -427,7 +428,7 @@ static int gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     return 0;
 }
 
-static int gg_cancel_async(sdr_device_t *dev)
+static int32_t gg_cancel_async(sdr_device_t *dev)
 {
     if (dev) {
         // Just signal the spin-wait to exit; gg_read_async handles stop_stream
@@ -436,7 +437,7 @@ static int gg_cancel_async(sdr_device_t *dev)
     return 0;
 }
 
-static int gg_read_sync(sdr_device_t *dev, uint8_t *buf, uint32_t len, int *n_read)
+static int32_t gg_read_sync(sdr_device_t *dev, uint8_t *buf, uint32_t len, int32_t *n_read)
 {
     int32_t rc = sdr::read_sync(static_cast<sdrgg_dev_t *>(dev->handle),
                                 buf, len, 10000 /* 10s timeout for large reads */);
@@ -446,7 +447,7 @@ static int gg_read_sync(sdr_device_t *dev, uint8_t *buf, uint32_t len, int *n_re
 
 // ======================== Extended operations ========================
 
-static int gg_get_tuner_caps(sdr_device_t *dev, sdr_tuner_caps_t *out)
+static int32_t gg_get_tuner_caps(sdr_device_t *dev, sdr_tuner_caps_t *out)
 {
     const tuner_caps *caps = nullptr;
     int32_t rc = sdr::get_tuner_caps(static_cast<sdrgg_dev_t *>(dev->handle), &caps);
@@ -466,7 +467,7 @@ static int gg_get_tuner_caps(sdr_device_t *dev, sdr_tuner_caps_t *out)
 
     // Copy gain stages (up to 4)
     out->num_gain_stages = caps->num_gain_stages > 4 ? 4 : caps->num_gain_stages;
-    for (int i = 0; i < out->num_gain_stages; i++) {
+    for (int32_t i = 0; i < out->num_gain_stages; i++) {
         out->stages[i].name = caps->gain_stages[i].name;
         out->stages[i].min_tenth_db = caps->gain_stages[i].min_tenth_db;
         out->stages[i].max_tenth_db = caps->gain_stages[i].max_tenth_db;
@@ -476,7 +477,7 @@ static int gg_get_tuner_caps(sdr_device_t *dev, sdr_tuner_caps_t *out)
     return 0;
 }
 
-static int gg_set_bandwidth(sdr_device_t *dev, uint32_t bw_khz)
+static int32_t gg_set_bandwidth(sdr_device_t *dev, uint32_t bw_khz)
 {
     // Only R820T supports bandwidth control through libsdrgg
     if (dev->tuner_type == SDR_TUNER_R820T || dev->tuner_type == SDR_TUNER_R820T2) {
@@ -485,7 +486,7 @@ static int gg_set_bandwidth(sdr_device_t *dev, uint32_t bw_khz)
     return -1;
 }
 
-static int gg_set_lna_gain(sdr_device_t *dev, int index)
+static int32_t gg_set_lna_gain(sdr_device_t *dev, int32_t index)
 {
     if (dev->tuner_type == SDR_TUNER_R820T || dev->tuner_type == SDR_TUNER_R820T2) {
         return r820t::set_lna_gain(static_cast<sdrgg_dev_t *>(dev->handle), (int32_t)index);
@@ -493,7 +494,7 @@ static int gg_set_lna_gain(sdr_device_t *dev, int index)
     return -1;
 }
 
-static int gg_set_mixer_gain(sdr_device_t *dev, int index)
+static int32_t gg_set_mixer_gain(sdr_device_t *dev, int32_t index)
 {
     if (dev->tuner_type == SDR_TUNER_R820T || dev->tuner_type == SDR_TUNER_R820T2) {
         return r820t::set_mixer_gain(static_cast<sdrgg_dev_t *>(dev->handle), (int32_t)index);
@@ -501,7 +502,7 @@ static int gg_set_mixer_gain(sdr_device_t *dev, int index)
     return -1;
 }
 
-static int gg_set_vga_gain(sdr_device_t *dev, int index)
+static int32_t gg_set_vga_gain(sdr_device_t *dev, int32_t index)
 {
     if (dev->tuner_type == SDR_TUNER_R820T || dev->tuner_type == SDR_TUNER_R820T2) {
         return r820t::set_vga_gain(static_cast<sdrgg_dev_t *>(dev->handle), (int32_t)index);
@@ -509,12 +510,12 @@ static int gg_set_vga_gain(sdr_device_t *dev, int index)
     return -1;
 }
 
-static int gg_read_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t *val)
+static int32_t gg_read_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t *val)
 {
     return tuner::read_reg(static_cast<sdrgg_dev_t *>(dev->handle), reg, val);
 }
 
-static int gg_write_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t val)
+static int32_t gg_write_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t val)
 {
     return tuner::write_reg(static_cast<sdrgg_dev_t *>(dev->handle), reg, val);
 }

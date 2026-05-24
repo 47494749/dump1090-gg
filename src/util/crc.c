@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 
 #include <assert.h>
 
@@ -38,12 +39,12 @@ static uint32_t single_bit_syndrome[112];
 
 static void initLookupTables()
 {
-    int i;
+    int32_t i;
     uint8_t msg[112/8];
 
     for (i = 0; i < 256; ++i) {
         uint32_t c = i << 16;
-        int j;
+        int32_t j;
         for (j = 0; j < 8; ++j) {
             if (c & 0x800000)
                 c = (c<<1) ^ MODES_GENERATOR_POLY;
@@ -62,11 +63,11 @@ static void initLookupTables()
     }
 }
 
-uint32_t modesChecksum(const uint8_t *message, int bits)
+uint32_t modesChecksum(const uint8_t *message, int32_t bits)
 {
     uint32_t rem = 0;
-    int i;
-    int n = bits/8;
+    int32_t i;
+    int32_t n = bits/8;
 
     assert(bits % 8 == 0);
     assert(n >= 3);
@@ -81,22 +82,22 @@ uint32_t modesChecksum(const uint8_t *message, int bits)
 }
 
 static struct errorinfo *bitErrorTable_short;
-static int bitErrorTableSize_short;
+static int32_t bitErrorTableSize_short;
 
 static struct errorinfo *bitErrorTable_long;
-static int bitErrorTableSize_long;
+static int32_t bitErrorTableSize_long;
 
 // compare two errorinfo structures
-static int syndrome_compare(const void *x, const void *y) {
+static int32_t syndrome_compare(const void *x, const void *y) {
     struct errorinfo *ex = (struct errorinfo*)x;
     struct errorinfo *ey = (struct errorinfo*)y;
-    return (int)ex->syndrome - (int)ey->syndrome;
+    return (int32_t)ex->syndrome - (int32_t)ey->syndrome;
 }
 
 // (n k), the number of ways of selecting k distinct items from a set of n items
-static int combinations(int n, int k)
+static int32_t combinations(int32_t n, int32_t k)
 {
-    int result = 1, i;
+    int32_t result = 1, i;
 
     if (k == 0 || k == n)
         return 1;
@@ -127,9 +128,9 @@ static int combinations(int n, int k)
 // out:
 //   returns:    the next free entry in the table
 //   table:      has been populated between [n, return value)
-static int prepareSubtable(struct errorinfo *table, int n, int maxsize, int offset, int startbit, int endbit, struct errorinfo *base_entry, int error_bit, int max_errors)
+static int32_t prepareSubtable(struct errorinfo *table, int32_t n, int32_t maxsize, int32_t offset, int32_t startbit, int32_t endbit, struct errorinfo *base_entry, int32_t error_bit, int32_t max_errors)
 {
-    int i = 0;
+    int32_t i = 0;
 
     if (error_bit >= max_errors)
         return n;
@@ -149,10 +150,10 @@ static int prepareSubtable(struct errorinfo *table, int n, int maxsize, int offs
     return n;
 }
 
-static int flagCollisions(struct errorinfo *table, int tablesize, int offset, int startbit, int endbit, uint32_t base_syndrome, int error_bit, int first_error, int last_error)
+static int32_t flagCollisions(struct errorinfo *table, int32_t tablesize, int32_t offset, int32_t startbit, int32_t endbit, uint32_t base_syndrome, int32_t error_bit, int32_t first_error, int32_t last_error)
 {
-    int i = 0;
-    int count = 0;
+    int32_t i = 0;
+    int32_t count = 0;
 
     if (error_bit > last_error)
         return 0;
@@ -179,12 +180,12 @@ static int flagCollisions(struct errorinfo *table, int tablesize, int offset, in
 
 // Allocate and build an error table for messages of length "bits" (max 112)
 // returns a pointer to the new table and sets *size_out to the table length
-static struct errorinfo *prepareErrorTable(int bits, int max_correct, int max_detect, int *size_out)
+static struct errorinfo *prepareErrorTable(int32_t bits, int32_t max_correct, int32_t max_detect, int32_t *size_out)
 {
-    int maxsize, usedsize;
+    int32_t maxsize, usedsize;
     struct errorinfo *table;
     struct errorinfo base_entry;
-    int i, j;
+    int32_t i, j;
 
     assert (bits >= 0 && bits <= 112);
     assert (max_correct >=0 && max_correct <= MODES_MAX_BITERRORS);
@@ -224,7 +225,7 @@ static struct errorinfo *prepareErrorTable(int bits, int max_correct, int max_de
         // Show the table stats
         fprintf(stderr, "Undetectable errors:\n");
         for (i = 1; i <= max_correct; ++i) {
-            int j, count;
+            int32_t j, count;
 
             count = 0;
             for (j = 0; j < usedsize; ++j)
@@ -266,7 +267,7 @@ static struct errorinfo *prepareErrorTable(int bits, int max_correct, int max_de
 
     // Flag collisions we want to detect but not correct
     if (max_detect > max_correct) {
-        int flagged;
+        int32_t flagged;
 
 #ifdef CRCDEBUG
         fprintf(stderr, "Flagging collisions between %d - %d bits..\n", max_correct+1, max_detect);
@@ -310,7 +311,7 @@ static struct errorinfo *prepareErrorTable(int bits, int max_correct, int max_de
         uint8_t *msg = malloc(bits/8);
 
         for (i = 0; i < usedsize; ++i) {
-            int j;
+            int32_t j;
             struct errorinfo *ei;
             uint32_t result;
 
@@ -333,7 +334,7 @@ static struct errorinfo *prepareErrorTable(int bits, int max_correct, int max_de
         // Show the table stats
         fprintf(stderr, "Syndrome table summary:\n");
         for (i = 1; i <= max_correct; ++i) {
-            int j, count, possible;
+            int32_t j, count, possible;
 
             count = 0;
             for (j = 0; j < usedsize; ++j)
@@ -352,7 +353,7 @@ static struct errorinfo *prepareErrorTable(int bits, int max_correct, int max_de
 }
 
 // Precompute syndrome tables for 56- and 112-bit messages.
-void modesChecksumInit(int fixBits)
+void modesChecksumInit(int32_t fixBits)
 {
     initLookupTables();
 
@@ -383,10 +384,10 @@ void modesChecksumInit(int fixBits)
 // Given an error syndrome and message length, return
 // an error-correction descriptor, or NULL if the
 // syndrome is uncorrectable
-struct errorinfo *modesChecksumDiagnose(uint32_t syndrome, int bitlen)
+struct errorinfo *modesChecksumDiagnose(uint32_t syndrome, int32_t bitlen)
 {
     struct errorinfo *table;
-    int tablesize;
+    int32_t tablesize;
 
     struct errorinfo ei;
 
@@ -408,7 +409,7 @@ struct errorinfo *modesChecksumDiagnose(uint32_t syndrome, int bitlen)
 // apply the error correction to the given message.
 void modesChecksumFix(uint8_t *msg, struct errorinfo *info)
 {
-    int i;
+    int32_t i;
 
     if (!info)
         return;
@@ -420,8 +421,8 @@ void modesChecksumFix(uint8_t *msg, struct errorinfo *info)
 #ifdef CRCDEBUG
 int main(int argc, char **argv)
 {
-    int shortlen, longlen;
-    int i;
+    int32_t shortlen, longlen;
+    int32_t i;
     struct errorinfo *shorttable, *longtable;
 
     if (argc < 3) {
@@ -480,17 +481,17 @@ int main(int argc, char **argv)
     fprintf(stderr, "checking %d syndromes for DF11 collisions..\n", shortlen);
     for (i = 0; i < shortlen; ++i) {
         if ((shorttable[i].syndrome & 0xFF) == 0) {
-            int j;
+            int32_t j;
             // all syndromes with the same first 17 bits should sort immediately after entry i,
             // so this is fairly easy
             for (j = i+1; j < shortlen; ++j) {
                 if ((shorttable[i].syndrome & 0xFFFF80) == (shorttable[j].syndrome & 0xFFFF80)) {
-                    int k;
-                    int mismatch = 0;
+                    int32_t k;
+                    int32_t mismatch = 0;
 
                     // we don't care if the only differences are in bits that lie in the checksum
                     for (k = 0; k < shorttable[i].errors; ++k) {
-                        int l, matched = 0;
+                        int32_t l, matched = 0;
 
                         if (shorttable[i].bit[k] >= 49)
                             continue; // bit is in the final 7 bits, we don't care
@@ -507,7 +508,7 @@ int main(int argc, char **argv)
                     }
 
                     for (k = 0; k < shorttable[j].errors; ++k) {
-                        int l, matched = 0;
+                        int32_t l, matched = 0;
 
                         if (shorttable[j].bit[k] >= 49)
                             continue; // bit is in the final 7 bits, we don't care

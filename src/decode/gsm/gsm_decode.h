@@ -165,7 +165,7 @@ typedef struct {
 // System Information Type 1 — Cell Allocation
 typedef struct {
     bool     valid;
-    int      n_arfcn;               // number of ARFCNs in cell allocation
+    int32_t      n_arfcn;               // number of ARFCNs in cell allocation
     uint16_t arfcn[GSM_MAX_ARFCN / 16]; // bitmap or list of ARFCNs
     uint16_t arfcn_list[64];        // decoded ARFCN list
 } gsm_si1_t;
@@ -173,7 +173,7 @@ typedef struct {
 // System Information Type 2 — Neighbour Cell Description
 typedef struct {
     bool     valid;
-    int      n_neighbours;
+    int32_t      n_neighbours;
     uint16_t neighbour_arfcn[GSM_MAX_NEIGHBOURS];
     uint8_t  ncc_permitted;         // bitmask of permitted NCCs
 } gsm_si2_t;
@@ -199,7 +199,7 @@ typedef struct {
     uint8_t  total_pages;           // total pages
     uint8_t  page_nr;               // current page number (1-based)
     char     text[GSM_CB_PAGE_LEN + 1]; // decoded text (NUL-terminated)
-    int      text_len;
+    int32_t      text_len;
 } gsm_cb_msg_t;
 
 // Paging message from PCH
@@ -251,17 +251,17 @@ typedef struct {
 // Burst buffer (decoded soft bits from one timeslot)
 typedef struct {
     float    soft_bits[GSM_BURST_BITS]; // soft decisions (-1.0 to +1.0)
-    int      hard_bits[GSM_BURST_BITS]; // hard decisions (0 or 1)
+    int32_t      hard_bits[GSM_BURST_BITS]; // hard decisions (0 or 1)
     gsm_chan_type_t chan_type;
     uint32_t fn;                        // TDMA frame number
-    int      ts;                        // timeslot (0 for BCCH carrier)
+    int32_t      ts;                        // timeslot (0 for BCCH carrier)
     float    snr;                       // estimated SNR
-    int      tsc;                       // detected training sequence code
+    int32_t      tsc;                       // detected training sequence code
 } gsm_burst_t;
 
 // Message callback
 typedef void (*gsm_message_callback_t)(const gsm_cell_info_t *cell, const char *msg_type,
-                                       const uint8_t *l3_data, int l3_len, void *ctx);
+                                       const uint8_t *l3_data, int32_t l3_len, void *ctx);
 
 // Cell Broadcast callback
 typedef void (*gsm_cb_callback_t)(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb, void *ctx);
@@ -271,7 +271,7 @@ typedef struct {
     double   center_freq;           // tuned center frequency (ARFCN freq - IF offset)
     double   arfcn_freq;            // actual ARFCN frequency (before IF offset)
     double   sample_rate;           // sample rate (should be ~1 MHz)
-    int      tsc;                   // expected TSC (0-7), or -1 for auto-detect
+    int32_t      tsc;                   // expected TSC (0-7), or -1 for auto-detect
     gsm_message_callback_t msg_cb;  // L3 message callback
     gsm_cb_callback_t      cb_cb;   // Cell Broadcast callback
     void    *callback_ctx;          // opaque context for callbacks
@@ -319,19 +319,19 @@ gsm_sync_state_t gsm_get_sync_state(const struct gsm_state *st);
 
 // Convolutional encoder (rate 1/2, K=5, TS 05.03)
 // input: 'n' bits, output: 2*n bits (interleaved c0,c1)
-void gsm_conv_encode(const uint8_t *input, int n, uint8_t *output);
+void gsm_conv_encode(const uint8_t *input, int32_t n, uint8_t *output);
 
 // Viterbi decoder (rate 1/2, K=5)
 // input: 2*n soft bits (float, positive=1, negative=0), output: n hard bits
 // Returns number of bit errors (path metric).
-int gsm_viterbi_decode(const float *soft_input, int n_input_bits, uint8_t *output);
+int32_t gsm_viterbi_decode(const float *soft_input, int32_t n_input_bits, uint8_t *output);
 
 // Fire code encoder for BCCH/CCCH (TS 05.03, section 4.1)
 // input: 184 bits, output: 40 parity bits
-void gsm_fire_encode(const uint8_t *data, int n_bits, uint8_t *parity);
+void gsm_fire_encode(const uint8_t *data, int32_t n_bits, uint8_t *parity);
 
 // Fire code check: returns true if CRC is valid
-bool gsm_fire_check(const uint8_t *data_with_parity, int total_bits);
+bool gsm_fire_check(const uint8_t *data_with_parity, int32_t total_bits);
 
 // BCCH interleaver (TS 05.03, section 4.1)
 // coded_bits: 456 bits in, burst_bits[4][114]: bits per burst out
@@ -357,19 +357,19 @@ void gsm_sch_parse(const uint8_t *info, uint8_t *bsic, uint32_t *fn);
 void gsm_sch_build(uint8_t bsic, uint32_t fn, uint8_t *info);
 
 // Parse L2 LAPDm frame (TS 04.06)
-bool gsm_l2_parse(const uint8_t *data, int len, gsm_l2_frame_t *frame);
+bool gsm_l2_parse(const uint8_t *data, int32_t len, gsm_l2_frame_t *frame);
 
 // Parse L3 System Information messages (TS 04.08)
-bool gsm_parse_si1(const uint8_t *l3, int len, gsm_si1_t *out);
-bool gsm_parse_si2(const uint8_t *l3, int len, gsm_si2_t *out);
-bool gsm_parse_si3(const uint8_t *l3, int len, gsm_si3_t *out);
-bool gsm_parse_si4(const uint8_t *l3, int len, gsm_si4_t *out);
+bool gsm_parse_si1(const uint8_t *l3, int32_t len, gsm_si1_t *out);
+bool gsm_parse_si2(const uint8_t *l3, int32_t len, gsm_si2_t *out);
+bool gsm_parse_si3(const uint8_t *l3, int32_t len, gsm_si3_t *out);
+bool gsm_parse_si4(const uint8_t *l3, int32_t len, gsm_si4_t *out);
 
 // Parse Cell Broadcast message (TS 23.041)
-bool gsm_parse_cb(const uint8_t *data, int len, gsm_cb_msg_t *out);
+bool gsm_parse_cb(const uint8_t *data, int32_t len, gsm_cb_msg_t *out);
 
 // Parse Paging message (TS 04.08)
-bool gsm_parse_paging(const uint8_t *l3, int len, gsm_paging_t *out);
+bool gsm_parse_paging(const uint8_t *l3, int32_t len, gsm_paging_t *out);
 
 // ARFCN to downlink frequency (MHz)
 double gsm_arfcn_to_freq(uint16_t arfcn, gsm_band_t band);
@@ -378,10 +378,10 @@ double gsm_arfcn_to_freq(uint16_t arfcn, gsm_band_t band);
 uint16_t gsm_freq_to_arfcn(double freq_mhz, gsm_band_t *band);
 
 // Get channel type for frame number within 51-multiframe (TS 05.02, Table 5)
-gsm_chan_type_t gsm_get_channel_type(int fn_mod51);
+gsm_chan_type_t gsm_get_channel_type(int32_t fn_mod51);
 
 // FCCH detection in frequency buffer
-int detect_fcch(const float *freq_buf, int n_freq,
+int32_t detect_fcch(const float *freq_buf, int32_t n_freq,
                 float samples_per_symbol, float carrier_rps,
                 double *freq_offset_out);
 

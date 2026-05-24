@@ -15,6 +15,7 @@
 // option) any later version.
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -23,7 +24,7 @@
 // ======================== Internal Constants ========================
 
 // Supported baud rates for auto-detection
-static const int BAUD_RATES[] = { 512, 1200, 2400 };
+static const int32_t BAUD_RATES[] = { 512, 1200, 2400 };
 #define NUM_BAUD_RATES  3
 
 // BCH(31,21) generator polynomial for POCSAG
@@ -42,7 +43,7 @@ static const int BAUD_RATES[] = { 512, 1200, 2400 };
 // ======================== Per-baud-rate state ========================
 
 typedef struct {
-    int      baud_rate;
+    int32_t      baud_rate;
     double   samples_per_bit;
 
     // Clock recovery
@@ -50,27 +51,27 @@ typedef struct {
     double   clock_freq;         // current estimated samples/bit
 
     // Preamble detection
-    int      preamble_count;     // consecutive alternating bits
+    int32_t      preamble_count;     // consecutive alternating bits
     bool     preamble_found;
 
     // Sync + batch reception
     uint32_t shift_reg;          // 32-bit shift register for sync search
     bool     synced;
-    int      batch_bit_count;    // bits received in current batch
+    int32_t      batch_bit_count;    // bits received in current batch
     uint32_t batch_words[POCSAG_BATCH_WORDS]; // current batch
-    int      batch_word_idx;     // current word index in batch
+    int32_t      batch_word_idx;     // current word index in batch
 
     // Message assembly
     bool     in_message;
     uint32_t msg_address;
-    int      msg_function;
+    int32_t      msg_function;
     char     alpha_buf[POCSAG_MSG_MAX_LEN];
-    int      alpha_len;
+    int32_t      alpha_len;
     char     numeric_buf[POCSAG_MSG_MAX_LEN];
-    int      numeric_len;
-    int      alpha_bit_buf;      // partial character bits
-    int      alpha_bit_count;
-    int      errors_total;
+    int32_t      numeric_len;
+    int32_t      alpha_bit_buf;      // partial character bits
+    int32_t      alpha_bit_count;
+    int32_t      errors_total;
     bool     inverted;           // true if FSK polarity is inverted
 } baud_state_t;
 
@@ -94,7 +95,7 @@ typedef struct {
 
     // Decimation accumulator (integrate POCSAG_DECIMATION samples)
     float    decim_acc;
-    int      decim_count;
+    int32_t      decim_count;
 
     // DC offset removal (operates on decimated stream)
     float    dc_avg;
@@ -107,7 +108,7 @@ typedef struct {
 
     // Per-channel signal level
     float    signal_acc;
-    int      sample_count;
+    int32_t      sample_count;
 } channel_state_t;
 
 // ======================== Main decoder state ========================
@@ -116,7 +117,7 @@ struct pocsag_state {
     pocsag_config_t config;
     pocsag_stats_t  stats;
 
-    int              num_channels;
+    int32_t              num_channels;
     channel_state_t  channels[POCSAG_MAX_CHANNELS];
 };
 
@@ -130,7 +131,7 @@ static uint32_t bch_syndrome(uint32_t cw)
     uint32_t data = cw >> 1;  // strip parity bit
 
     uint32_t syndrome = 0;
-    for (int i = 30; i >= 0; i--) {
+    for (int32_t i = 30; i >= 0; i--) {
         syndrome <<= 1;
         syndrome |= ((data >> i) & 1);
         if (syndrome & (1u << BCH_PARITY_BITS))
@@ -152,7 +153,7 @@ static bool pocsag_even_parity_ok(uint32_t cw)
 
 // Try to correct up to two bit errors in the BCH(31,21)+parity codeword.
 // Returns number of bits corrected (0, 1, or 2), or -1 if uncorrectable.
-static int bch_correct(uint32_t *cw)
+static int32_t bch_correct(uint32_t *cw)
 {
     uint32_t syndrome = bch_syndrome(*cw);
     if (syndrome == 0) {
@@ -164,7 +165,7 @@ static int bch_correct(uint32_t *cw)
     }
 
     // Try all single-bit flips first, including the explicit parity bit.
-    for (int i = 0; i <= 31; i++) {
+    for (int32_t i = 0; i <= 31; i++) {
         uint32_t trial = *cw ^ (1u << i);
         if (bch_syndrome(trial) == 0 && pocsag_even_parity_ok(trial)) {
             *cw = trial;
@@ -174,8 +175,8 @@ static int bch_correct(uint32_t *cw)
 
     // BCH(31,21) has minimum distance 6, so up to 2 bit errors are correctable.
     // Exhaustive search is small enough here: C(32,2)=496 trials.
-    for (int i = 0; i <= 31; i++) {
-        for (int j = i + 1; j <= 31; j++) {
+    for (int32_t i = 0; i <= 31; i++) {
+        for (int32_t j = i + 1; j <= 31; j++) {
             uint32_t trial = *cw ^ (1u << i) ^ (1u << j);
             if (bch_syndrome(trial) == 0 && pocsag_even_parity_ok(trial)) {
                 *cw = trial;
@@ -189,7 +190,7 @@ static int bch_correct(uint32_t *cw)
 
 // ======================== Baud-rate state helpers ========================
 
-static void baud_state_init(baud_state_t *bs, int baud, double sample_rate)
+static void baud_state_init(baud_state_t *bs, int32_t baud, double sample_rate)
 {
     memset(bs, 0, sizeof(*bs));
     bs->baud_rate = baud;
@@ -253,16 +254,16 @@ static void deliver_message(struct pocsag_state *st, baud_state_t *bs, float sig
 // Some transmitters (e.g. SX1262-based) apply PN9 data whitening to the payload.
 // Polynomial: x^9 + x^5 + 1 (Fibonacci LFSR)
 // The whitening is applied after the sync word, with MSB-first bit packing.
-static void pn9_dewhiten_batch(uint32_t *codewords, int n_codewords, uint16_t seed) {
+static void pn9_dewhiten_batch(uint32_t *codewords, int32_t n_codewords, uint16_t seed) {
     uint16_t state = seed & 0x1FF;
     // Skip first 32 PN9 bits (they correspond to the sync word, which is not whitened)
-    for (int i = 0; i < 32; i++) {
+    for (int32_t i = 0; i < 32; i++) {
         uint8_t feedback = ((state >> 0) ^ (state >> 5)) & 1;
         state = (state >> 1) | (feedback << 8);
     }
-    for (int w = 0; w < n_codewords; w++) {
+    for (int32_t w = 0; w < n_codewords; w++) {
         uint32_t mask = 0;
-        for (int b = 0; b < 32; b++) {
+        for (int32_t b = 0; b < 32; b++) {
             uint8_t out_bit = state & 1;
             uint8_t feedback = ((state >> 0) ^ (state >> 5)) & 1;
             state = (state >> 1) | (feedback << 8);
@@ -280,19 +281,19 @@ static const char POCSAG_NUMERIC_CHARS[] = "0123456789*U -)( ";
 // Process a complete batch of 17 codewords (sync + 8 pairs of 2 codewords)
 static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, double channel_freq)
 {
-    int bch_ok = 0, bch_fail = 0, idle_cnt = 0, addr_cnt = 0, msg_cnt = 0;
+    int32_t bch_ok = 0, bch_fail = 0, idle_cnt = 0, addr_cnt = 0, msg_cnt = 0;
 
     // Adaptive realignment: check if batch has 1-bit clock/sync offset.
     // Try BCH on word[1] as-is; if it fails, try right-shifted version.
     uint32_t test_cw = bs->batch_words[1];
-    int need_realign = (bch_syndrome(test_cw) != 0);
+    int32_t need_realign = (bch_syndrome(test_cw) != 0);
     if (need_realign) {
         // Check if realigned word passes BCH
         uint32_t sync_lsb = bs->batch_words[0] & 1;
         uint32_t realigned = (test_cw >> 1) | (sync_lsb << 31);
         if (bch_syndrome(realigned) == 0 || realigned == POCSAG_IDLE_WORD) {
             // Apply realignment to all data words
-            for (int i = POCSAG_BATCH_WORDS - 1; i >= 1; i--) {
+            for (int32_t i = POCSAG_BATCH_WORDS - 1; i >= 1; i--) {
                 uint32_t msb_from_prev = bs->batch_words[i - 1] & 1;
                 bs->batch_words[i] = (bs->batch_words[i] >> 1) | (msb_from_prev << 31);
             }
@@ -303,7 +304,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
     // If first data word fails BCH raw, try PN9 de-whitening with known seeds
     if (bch_syndrome(bs->batch_words[1]) != 0 && bs->batch_words[1] != POCSAG_IDLE_WORD) {
         static const uint16_t pn9_seeds[] = { 0x02E, 0x1FF, 0x100 };
-        for (int s = 0; s < 3; s++) {
+        for (int32_t s = 0; s < 3; s++) {
             uint32_t test_copy[16];
             memcpy(test_copy, &bs->batch_words[1], 16 * sizeof(uint32_t));
             pn9_dewhiten_batch(test_copy, 16, pn9_seeds[s]);
@@ -315,11 +316,11 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
     }
 
     // Words 0 = sync word (already verified), words 1..16 = 8 pairs
-    for (int i = 1; i < POCSAG_BATCH_WORDS; i++) {
+    for (int32_t i = 1; i < POCSAG_BATCH_WORDS; i++) {
         uint32_t cw = bs->batch_words[i];
 
         // BCH error correction
-        int corr = bch_correct(&cw);
+        int32_t corr = bch_correct(&cw);
         if (corr < 0) {
             bch_fail++;
             st->stats.bch_failures++;
@@ -357,7 +358,7 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
             // Address: bits 30..13 = 18 address bits, bits 12..11 = function
             // Full address = (18-bit address << 3) | frame position (i/2)
             uint32_t addr18 = (cw >> 13) & 0x3FFFF;
-            int frame_pos = (i - 1) / 2;  // 0..7
+            int32_t frame_pos = (i - 1) / 2;  // 0..7
             bs->msg_address = (addr18 << 3) | frame_pos;
             bs->msg_function = (cw >> 11) & 3;
             bs->in_message = true;
@@ -383,15 +384,15 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
 
             if (bs->msg_function == POCSAG_FUNC_NUMERIC) {
                 // Numeric: 5 BCD digits per codeword (ITU-R M.584: nibble bits reversed)
-                for (int d = 0; d < 5 && bs->numeric_len < POCSAG_MSG_MAX_LEN - 1; d++) {
-                    int nibble = (data >> (16 - d * 4)) & 0xF;
+                for (int32_t d = 0; d < 5 && bs->numeric_len < POCSAG_MSG_MAX_LEN - 1; d++) {
+                    int32_t nibble = (data >> (16 - d * 4)) & 0xF;
                     nibble = ((nibble & 1) << 3) | ((nibble & 2) << 1) |
                              ((nibble & 4) >> 1) | ((nibble & 8) >> 3);
                     bs->numeric_buf[bs->numeric_len++] = POCSAG_NUMERIC_CHARS[nibble];
                 }
             } else {
                 // Alpha: 20 bits → 7-bit chars
-                for (int b = 19; b >= 0; b--) {
+                for (int32_t b = 19; b >= 0; b--) {
                     bs->alpha_bit_buf |= ((data >> b) & 1) << bs->alpha_bit_count;
                     bs->alpha_bit_count++;
                     if (bs->alpha_bit_count == 7) {
@@ -415,21 +416,21 @@ static void process_batch(struct pocsag_state *st, baud_state_t *bs, float sig, 
 // ======================== Bit processing ========================
 
 // Count number of differing bits (Hamming distance)
-static inline int popcount32(uint32_t x) {
+static inline int32_t popcount32(uint32_t x) {
     x = x - ((x >> 1) & 0x55555555u);
     x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
-    return (int)(((x + (x >> 4)) & 0x0F0F0F0Fu) * 0x01010101u >> 24);
+    return (int32_t)(((x + (x >> 4)) & 0x0F0F0F0Fu) * 0x01010101u >> 24);
 }
 
 // Maximum allowed bit errors in sync word detection
 #define POCSAG_SYNC_MAX_ERRORS  2
 
-static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, float sig, double channel_freq)
+static void process_bit(struct pocsag_state *st, baud_state_t *bs, int32_t bit, float sig, double channel_freq)
 {
     // --- Preamble detection ---
     if (!bs->synced) {
         // Look for alternating 1/0 pattern
-        int expected = (bs->preamble_count & 1) ? 0 : 1;
+        int32_t expected = (bs->preamble_count & 1) ? 0 : 1;
         if (bs->preamble_count == 0) expected = bit;  // accept either polarity to start
 
         if (bit == expected || bs->preamble_count == 0) {
@@ -448,8 +449,8 @@ static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, floa
 
         // Check for sync word with fuzzy matching (require preamble seen earlier)
         if (bs->preamble_found) {
-            int dist_normal = popcount32(bs->shift_reg ^ POCSAG_SYNC_WORD);
-            int dist_inv = popcount32(bs->shift_reg ^ ~POCSAG_SYNC_WORD);
+            int32_t dist_normal = popcount32(bs->shift_reg ^ POCSAG_SYNC_WORD);
+            int32_t dist_inv = popcount32(bs->shift_reg ^ ~POCSAG_SYNC_WORD);
 
             if (dist_normal <= POCSAG_SYNC_MAX_ERRORS) {
                 bs->synced = true;
@@ -487,8 +488,8 @@ static void process_bit(struct pocsag_state *st, baud_state_t *bs, int bit, floa
     // We have sync, now collecting the 16 remaining codewords (16 × 32 = 512 bits)
     if (bs->inverted) bit = !bit;  // Correct inverted polarity
 
-    int word_bit = bs->batch_bit_count % 32;
-    int word_idx = bs->batch_word_idx;
+    int32_t word_bit = bs->batch_bit_count % 32;
+    int32_t word_idx = bs->batch_word_idx;
 
     if (word_idx < POCSAG_BATCH_WORDS) {
         if (word_bit == 0)
@@ -560,7 +561,7 @@ static void channel_state_init(channel_state_t *ch, double channel_freq, double 
     ch->lpf_alpha = (float)(1.0 - exp(-2.0 * M_PI * fc / sample_rate));
 
     // Initialize 3 baud-rate decoders for this channel
-    for (int i = 0; i < NUM_BAUD_RATES; i++) {
+    for (int32_t i = 0; i < NUM_BAUD_RATES; i++) {
         baud_state_init(&ch->baud[i], BAUD_RATES[i], sample_rate);
     }
 
@@ -583,7 +584,7 @@ struct pocsag_state *pocsag_create(const pocsag_config_t *cfg)
     if (cfg->num_channels > 0 && cfg->num_channels <= POCSAG_MAX_CHANNELS) {
         // Multi-channel mode
         st->num_channels = cfg->num_channels;
-        for (int i = 0; i < st->num_channels; i++) {
+        for (int32_t i = 0; i < st->num_channels; i++) {
             channel_state_init(&st->channels[i], cfg->channel_freqs[i],
                                cfg->center_freq, cfg->sample_rate);
             fprintf(stderr, "  POCSAG ch%d: %.3f MHz (offset %+.1f kHz)\n",
@@ -605,9 +606,9 @@ void pocsag_destroy(struct pocsag_state *st)
     if (!st) return;
 
     // Flush any in-progress messages on all channels
-    for (int c = 0; c < st->num_channels; c++) {
+    for (int32_t c = 0; c < st->num_channels; c++) {
         channel_state_t *ch = &st->channels[c];
-        for (int i = 0; i < NUM_BAUD_RATES; i++) {
+        for (int32_t i = 0; i < NUM_BAUD_RATES; i++) {
             if (ch->baud[i].in_message) {
                 deliver_message(st, &ch->baud[i], 0.0f, ch->channel_freq);
             }
@@ -627,7 +628,7 @@ void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, uint32_t le
         float q_raw = ((float)iq_data[k + 1] - 127.5f) / 127.5f;
 
         // Feed each channel
-        for (int c = 0; c < st->num_channels; c++) {
+        for (int32_t c = 0; c < st->num_channels; c++) {
             channel_state_t *ch = &st->channels[c];
 
             float i_val, q_val;
@@ -677,7 +678,7 @@ void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, uint32_t le
                 float sample = decimated - ch->dc_avg;
 
                 // Feed to each baud-rate decoder (now at decimated rate)
-                for (int b = 0; b < NUM_BAUD_RATES; b++) {
+                for (int32_t b = 0; b < NUM_BAUD_RATES; b++) {
                     baud_state_t *bs = &ch->baud[b];
 
                     bs->clock_phase += 1.0;
@@ -686,7 +687,7 @@ void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, uint32_t le
                         bs->clock_phase -= bs->clock_freq;
 
                         // Bit decision: FSK — positive = 1, negative = 0
-                        int bit = (sample > 0.0f) ? 1 : 0;
+                        int32_t bit = (sample > 0.0f) ? 1 : 0;
 
                         float sig = (ch->sample_count > 0) ?
                             10.0f * log10f(ch->signal_acc / ch->sample_count + 1e-10f) : -40.0f;

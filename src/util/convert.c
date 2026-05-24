@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 
 static void convert_uc8(void *iq_data,
                         uint16_t *mag_data,
@@ -93,7 +94,7 @@ static void convert_sc16q11(void *iq_data,
 
 iq_convert_fn init_converter(input_format_t format,
                              double sample_rate,
-                             int filter_dc,
+                             int32_t filter_dc,
                              struct converter_state **out_state)
 {
     MODES_NOTUSED(sample_rate);

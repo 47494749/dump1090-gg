@@ -14,6 +14,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <ctype.h>
 #include "cpdlc_decode.h"
@@ -22,17 +23,17 @@
 
 typedef struct {
     const uint8_t *data;
-    int len;       // total bytes
-    int bit_pos;   // current bit position
+    int32_t len;       // total bytes
+    int32_t bit_pos;   // current bit position
 } uper_t;
 
-static void uper_init(uper_t *u, const uint8_t *data, int len) {
+static void uper_init(uper_t *u, const uint8_t *data, int32_t len) {
     u->data = data;
     u->len = len;
     u->bit_pos = 0;
 }
 
-static int uper_bits_left(const uper_t *u) {
+static int32_t uper_bits_left(const uper_t *u) {
     return u->len * 8 - u->bit_pos;
 }
 
@@ -40,26 +41,26 @@ static int32_t uper_read(uper_t *u, int nbits) {
     if (nbits <= 0 || nbits > 32 || uper_bits_left(u) < nbits)
         return -1;
     uint32_t val = 0;
-    for (int i = 0; i < nbits; i++) {
-        int byte_idx = u->bit_pos / 8;
-        int bit_idx = 7 - (u->bit_pos % 8);
+    for (int32_t i = 0; i < nbits; i++) {
+        int32_t byte_idx = u->bit_pos / 8;
+        int32_t bit_idx = 7 - (u->bit_pos % 8);
         val = (val << 1) | ((u->data[byte_idx] >> bit_idx) & 1);
         u->bit_pos++;
     }
     return (int32_t)val;
 }
 
-static int uper_skip(uper_t *u, int nbits) {
+static int32_t uper_skip(uper_t *u, int32_t nbits) {
     if (uper_bits_left(u) < nbits) return -1;
     u->bit_pos += nbits;
     return 0;
 }
 
-static int32_t uper_read_constrained(uper_t *u, int lower, int upper) {
+static int32_t uper_read_constrained(uper_t *u, int32_t lower, int32_t upper) {
     if (upper < lower) return -1;
-    int range = upper - lower + 1;
-    int nbits = 0;
-    int tmp = range - 1;
+    int32_t range = upper - lower + 1;
+    int32_t nbits = 0;
+    int32_t tmp = range - 1;
     while (tmp > 0) { nbits++; tmp >>= 1; }
     if (nbits == 0) return lower;
     int32_t v = uper_read(u, nbits);
@@ -67,8 +68,8 @@ static int32_t uper_read_constrained(uper_t *u, int lower, int upper) {
     return v + lower;
 }
 
-static int uper_read_ia5string(uper_t *u, char *buf, int bufsize, int lmin, int lmax) {
-    int slen;
+static int32_t uper_read_ia5string(uper_t *u, char *buf, int32_t bufsize, int32_t lmin, int32_t lmax) {
+    int32_t slen;
     if (lmin == lmax) {
         slen = lmin;
     } else {
@@ -76,7 +77,7 @@ static int uper_read_ia5string(uper_t *u, char *buf, int bufsize, int lmin, int 
         if (slen < 0) return -1;
     }
     if (slen >= bufsize) slen = bufsize - 1;
-    for (int i = 0; i < slen; i++) {
+    for (int32_t i = 0; i < slen; i++) {
         int32_t ch = uper_read(u, 7);
         if (ch < 0) return -1;
         buf[i] = (char)(ch & 0x7f);
@@ -436,7 +437,7 @@ static const msg_element_t um_table[] = {
 
 // ========== Primitive Decoders ==========
 
-static int decode_altitude(uper_t *u, char *buf, int sz) {
+static int32_t decode_altitude(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u, 3);
     if (c < 0) return -1;
     int32_t v;
@@ -454,7 +455,7 @@ static int decode_altitude(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_speed(uper_t *u, char *buf, int sz) {
+static int32_t decode_speed(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u, 3);
     if (c < 0) return -1;
     int32_t v;
@@ -472,14 +473,14 @@ static int decode_speed(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_time(uper_t *u, char *buf, int sz) {
+static int32_t decode_time(uper_t *u, char *buf, int32_t sz) {
     int32_t h = uper_read_constrained(u,0,23); if(h<0) return -1;
     int32_t m = uper_read_constrained(u,0,59); if(m<0) return -1;
     snprintf(buf,sz,"%02d:%02dZ",h,m);
     return 0;
 }
 
-static int decode_frequency(uper_t *u, char *buf, int sz) {
+static int32_t decode_frequency(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,2); if(c<0) return -1;
     int32_t v;
     switch (c) {
@@ -492,14 +493,14 @@ static int decode_frequency(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_degrees(uper_t *u, char *buf, int sz) {
+static int32_t decode_degrees(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
     int32_t v = uper_read_constrained(u,1,360); if(v<0) return -1;
     snprintf(buf,sz, c==0 ? "%03d" : "%03dT", v);
     return 0;
 }
 
-static int decode_position(uper_t *u, char *buf, int sz) {
+static int32_t decode_position(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,3); if(c<0) return -1;
     switch (c) {
     case 0: if(uper_read_ia5string(u,buf,sz,1,5)<0) return -1; break;
@@ -541,12 +542,12 @@ static int decode_position(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_version(uper_t *u, char *buf, int sz) {
+static int32_t decode_version(uper_t *u, char *buf, int32_t sz) {
     int32_t v = uper_read_constrained(u,0,15); if(v<0) return -1;
     snprintf(buf,sz,"%d",v); return 0;
 }
 
-static int decode_error(uper_t *u, char *buf, int sz) {
+static int32_t decode_error(uper_t *u, char *buf, int32_t sz) {
     static const char *e[] = {"unrecognizedMsgRefNum","logicalAckNotAccepted",
         "insufficientResources","invalidMsgElement","flightPlanNotHeld",
         "intentConflict","msgRefNumInUse","versionNotSupported",
@@ -556,13 +557,13 @@ static int decode_error(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_atis(uper_t *u, char *buf, int sz) {
+static int32_t decode_atis(uper_t *u, char *buf, int32_t sz) {
     return uper_read_ia5string(u,buf,sz,1,1);
 }
 
 // ========== New Decoders ==========
 
-static int decode_beacon_code(uper_t *u, char *buf, int sz) {
+static int32_t decode_beacon_code(uper_t *u, char *buf, int32_t sz) {
     int32_t d0=uper_read_constrained(u,0,7); if(d0<0) return -1;
     int32_t d1=uper_read_constrained(u,0,7); if(d1<0) return -1;
     int32_t d2=uper_read_constrained(u,0,7); if(d2<0) return -1;
@@ -571,21 +572,21 @@ static int decode_beacon_code(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_direction(uper_t *u, char *buf, int sz) {
+static int32_t decode_direction(uper_t *u, char *buf, int32_t sz) {
     static const char *dirs[] = {"LEFT","RIGHT","EITHER","N","S","E","W","NE","NW","SE","SW"};
     int32_t v = uper_read_constrained(u,0,10); if(v<0) return -1;
     snprintf(buf,sz,"%s",dirs[v]);
     return 0;
 }
 
-static int decode_distance_offset(uper_t *u, char *buf, int sz) {
+static int32_t decode_distance_offset(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
     if (c==0) { int32_t v=uper_read_constrained(u,1,128); if(v<0) return -1; snprintf(buf,sz,"%dNM",v); }
     else { int32_t v=uper_read_constrained(u,1,256); if(v<0) return -1; snprintf(buf,sz,"%dKM",v); }
     return 0;
 }
 
-static int decode_offset(uper_t *u, char *buf, int sz) {
+static int32_t decode_offset(uper_t *u, char *buf, int32_t sz) {
     char dir[16], dist[16];
     if(decode_direction(u,dir,sizeof(dir))<0) return -1;
     if(decode_distance_offset(u,dist,sizeof(dist))<0) return -1;
@@ -593,21 +594,21 @@ static int decode_offset(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_vertical_rate(uper_t *u, char *buf, int sz) {
+static int32_t decode_vertical_rate(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
     if (c==0) { int32_t v=uper_read_constrained(u,0,60); if(v<0) return -1; snprintf(buf,sz,"%dfpm",v*100); }
     else { int32_t v=uper_read_constrained(u,0,200); if(v<0) return -1; snprintf(buf,sz,"%dm/min",v*10); }
     return 0;
 }
 
-static int decode_altimeter(uper_t *u, char *buf, int sz) {
+static int32_t decode_altimeter(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
     if (c==0) { int32_t v=uper_read_constrained(u,2200,3200); if(v<0) return -1; snprintf(buf,sz,"%d.%02dinHg",v/100,v%100); }
     else { int32_t v=uper_read_constrained(u,7500,12500); if(v<0) return -1; snprintf(buf,sz,"%d.%dhPa",v/10,v%10); }
     return 0;
 }
 
-static int decode_runway(uper_t *u, char *buf, int sz) {
+static int32_t decode_runway(uper_t *u, char *buf, int32_t sz) {
     static const char *cfg[] = {"L","R","C",""};
     int32_t dir=uper_read_constrained(u,1,36); if(dir<0) return -1;
     int32_t ci=uper_read_constrained(u,0,3); if(ci<0) return -1;
@@ -619,7 +620,7 @@ static const char *facility_functions[] = {
     "CTR","APP","TWR","FINAL","GND","CLR","DEP","CTRL"
 };
 
-static int decode_icao_unit_name(uper_t *u, char *buf, int sz) {
+static int32_t decode_icao_unit_name(uper_t *u, char *buf, int32_t sz) {
     int32_t idc = uper_read(u,1); if(idc<0) return -1;
     char name[32];
     if (idc==0) { if(uper_read_ia5string(u,name,sizeof(name),4,4)<0) return -1; }
@@ -629,7 +630,7 @@ static int decode_icao_unit_name(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_unit_name_freq(uper_t *u, char *buf, int sz) {
+static int32_t decode_unit_name_freq(uper_t *u, char *buf, int32_t sz) {
     char unit[64], freq[32];
     if(decode_icao_unit_name(u,unit,sizeof(unit))<0) return -1;
     if(decode_frequency(u,freq,sizeof(freq))<0) return -1;
@@ -637,7 +638,7 @@ static int decode_unit_name_freq(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_procedure_name(uper_t *u, char *buf, int sz) {
+static int32_t decode_procedure_name(uper_t *u, char *buf, int32_t sz) {
     static const char *ptypes[] = {"ARR","APP","DEP"};
     int32_t opt = uper_read(u,1); if(opt<0) return -1;
     int32_t pt = uper_read_constrained(u,0,2); if(pt<0) return -1;
@@ -651,21 +652,21 @@ static int decode_procedure_name(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_distance(uper_t *u, char *buf, int sz) {
+static int32_t decode_distance(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
     if (c==0) { int32_t v=uper_read_constrained(u,0,9999); if(v<0) return -1; snprintf(buf,sz,"%dNM",v); }
     else { int32_t v=uper_read_constrained(u,1,1024); if(v<0) return -1; snprintf(buf,sz,"%dKM",v); }
     return 0;
 }
 
-static int decode_temperature(uper_t *u, char *buf, int sz) {
+static int32_t decode_temperature(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
     if (c==0) { int32_t v=uper_read_constrained(u,-80,47); if(v==-81) return -1; snprintf(buf,sz,"%dC",v); }
     else { int32_t v=uper_read_constrained(u,-105,150); if(v==-106) return -1; snprintf(buf,sz,"%dF",v); }
     return 0;
 }
 
-static int decode_winds(uper_t *u, char *buf, int sz) {
+static int32_t decode_winds(uper_t *u, char *buf, int32_t sz) {
     int32_t dir = uper_read_constrained(u,1,360); if(dir<0) return -1;
     int32_t sc = uper_read(u,1); if(sc<0) return -1;
     if (sc==0) { int32_t v=uper_read_constrained(u,0,255); if(v<0) return -1; snprintf(buf,sz,"%03d/%dkt",dir,v); }
@@ -673,20 +674,20 @@ static int decode_winds(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_vertical_change(uper_t *u, char *buf, int sz) {
+static int32_t decode_vertical_change(uper_t *u, char *buf, int32_t sz) {
     int32_t vdir = uper_read(u,1); if(vdir<0) return -1;
     char rate[16]; if(decode_vertical_rate(u,rate,sizeof(rate))<0) return -1;
     snprintf(buf,sz,"%s%s",vdir?"DN":"UP",rate);
     return 0;
 }
 
-static int decode_position_report(uper_t *u, char *buf, int sz) {
+static int32_t decode_position_report(uper_t *u, char *buf, int32_t sz) {
     int32_t opt = uper_read(u,19); if(opt<0) return -1;
     char pos[64], time[16], alt[32];
     if(decode_position(u,pos,sizeof(pos))<0) return -1;
     if(decode_time(u,time,sizeof(time))<0) return -1;
     if(decode_altitude(u,alt,sizeof(alt))<0) return -1;
-    int n = snprintf(buf,sz,"%s %s %s",pos,time,alt);
+    int32_t n = snprintf(buf,sz,"%s %s %s",pos,time,alt);
     if (opt & (1<<18)) { char t[64]; if(decode_position(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n,sz-n," NEXT:%s",t); }
     if (opt & (1<<17)) { char t[16]; if(decode_time(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n,sz-n," ETA:%s",t); }
     if (opt & (1<<16)) { char t[64]; if(decode_position(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n,sz-n," NEXT+1:%s",t); }
@@ -709,7 +710,7 @@ static int decode_position_report(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_route_info(uper_t *u, char *buf, int sz) {
+static int32_t decode_route_info(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u, 3); if (c < 0) return -1;
     switch (c) {
     case 0: { // publishedIdentifier: fixName(IA5 1..5) + OPT latlon
@@ -755,14 +756,14 @@ static int decode_route_info(uper_t *u, char *buf, int sz) {
     case 5: { // trackDetail: trackName(IA5 3..6) + LatLonSeq(1..128)
         char name[8]; if(uper_read_ia5string(u,name,sizeof(name),3,6)<0) return -1;
         int32_t cnt=uper_read_constrained(u,1,128); if(cnt<0) return -1;
-        int n=snprintf(buf,sz,"TRK:%s",name);
-        for(int i=0;i<cnt&&i<4;i++){
+        int32_t n=snprintf(buf,sz,"TRK:%s",name);
+        for(int32_t i=0;i<cnt&&i<4;i++){
             int32_t la_d=uper_read_constrained(u,0,90),la_m=uper_read_constrained(u,0,59),la_s=uper_read(u,1);
             int32_t lo_d=uper_read_constrained(u,0,180),lo_m=uper_read_constrained(u,0,59),lo_s=uper_read(u,1);
             if(la_d<0||lo_d<0) return -1;
             if(n<sz) n+=snprintf(buf+n,sz-n," %02d%02d%c/%03d%02d%c",la_d,la_m,la_s?'S':'N',lo_d,lo_m,lo_s?'W':'E');
         }
-        for(int i=4;i<cnt;i++) uper_skip(u,29);
+        for(int32_t i=4;i<cnt;i++) uper_skip(u,29);
         if(cnt>4&&n<sz) n+=snprintf(buf+n,sz-n," +%d",cnt-4);
         break;
     }
@@ -771,10 +772,10 @@ static int decode_route_info(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_route_info_seq(uper_t *u, char *buf, int sz) {
+static int32_t decode_route_info_seq(uper_t *u, char *buf, int32_t sz) {
     int32_t cnt = uper_read_constrained(u, 1, 128); if (cnt < 0) return -1;
-    int n = 0;
-    for (int i = 0; i < cnt; i++) {
+    int32_t n = 0;
+    for (int32_t i = 0; i < cnt; i++) {
         char ri[128];
         if (decode_route_info(u, ri, sizeof(ri)) < 0) {
             if (n < sz) n += snprintf(buf+n, sz-n, "%s(?)", n ? " " : "");
@@ -786,9 +787,9 @@ static int decode_route_info_seq(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_route_clearance(uper_t *u, char *buf, int sz) {
+static int32_t decode_route_clearance(uper_t *u, char *buf, int32_t sz) {
     int32_t opt = uper_read(u,10); if(opt<0) return -1;
-    int n = 0; buf[0] = '\0';
+    int32_t n = 0; buf[0] = '\0';
     if (opt & (1<<9)) { char t[8]; if(uper_read_ia5string(u,t,sizeof(t),4,4)>=0) n+=snprintf(buf+n,sz-n,"%sDEP:%s",n?" ":"",t); }
     if (opt & (1<<8)) { char t[8]; if(uper_read_ia5string(u,t,sizeof(t),4,4)>=0) n+=snprintf(buf+n,sz-n,"%sDST:%s",n?" ":"",t); }
     if (opt & (1<<7)) { char t[16]; if(decode_runway(u,t,sizeof(t))==0) n+=snprintf(buf+n,sz-n,"%sRWYDEP:%s",n?" ":"",t); }
@@ -803,10 +804,10 @@ static int decode_route_clearance(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_hold_at_waypoint(uper_t *u, char *buf, int sz) {
+static int32_t decode_hold_at_waypoint(uper_t *u, char *buf, int32_t sz) {
     int32_t opt = uper_read(u,7); if(opt<0) return -1;
     char pos[64]; if(decode_position(u,pos,sizeof(pos))<0) return -1;
-    int n = snprintf(buf,sz,"%s",pos);
+    int32_t n = snprintf(buf,sz,"%s",pos);
     if (opt & (1<<6)) { char t[32]; if(decode_speed(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n,sz-n," SPDLO:%s",t); }
     if (opt & (1<<5)) { char t[32]; if(decode_altitude(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n,sz-n," ALT:%s",t); }
     if (opt & (1<<4)) { char t[32]; if(decode_speed(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n,sz-n," SPDHI:%s",t); }
@@ -823,7 +824,7 @@ static int decode_hold_at_waypoint(uper_t *u, char *buf, int sz) {
     return 0;
 }
 
-static int decode_fuel_persons(uper_t *u, char *buf, int sz) {
+static int32_t decode_fuel_persons(uper_t *u, char *buf, int32_t sz) {
     int32_t h = uper_read_constrained(u,0,23); if(h<0) return -1;
     int32_t m = uper_read_constrained(u,0,59); if(m<0) return -1;
     int32_t pob = uper_read_constrained(u,1,1024); if(pob<0) return -1;
@@ -834,7 +835,7 @@ static int decode_fuel_persons(uper_t *u, char *buf, int sz) {
 // ========== Master Decode Dispatcher ==========
 // Takes the format string, decodes params, and fills buf with COMPLETE formatted text.
 
-static int decode_param(uper_t *u, param_type_t ptype, const char *fmt, char *buf, int bufsize) {
+static int32_t decode_param(uper_t *u, param_type_t ptype, const char *fmt, char *buf, int32_t bufsize) {
     char t1[128], t2[128], t3[128];
     switch (ptype) {
     case PT_NULL:
@@ -1019,20 +1020,20 @@ static int decode_param(uper_t *u, param_type_t ptype, const char *fmt, char *bu
 
 // ========== Top-Level Message Decoder ==========
 
-static int try_decode_message(uint32_t addr, const uint8_t *data, int len,
-                              int is_uplink) {
+static int32_t try_decode_message(uint32_t addr, const uint8_t *data, int32_t len,
+                              int32_t is_uplink) {
     uper_t u;
     uper_init(&u, data, len);
 
     const char *dir = is_uplink ? "UP" : "DN";
-    int max_choice = is_uplink ? 182 : 128;
+    int32_t max_choice = is_uplink ? 182 : 128;
     const msg_element_t *table = is_uplink ? um_table : dm_table;
-    int table_size = is_uplink ? (int)UM_TABLE_SIZE : (int)DM_TABLE_SIZE;
+    int32_t table_size = is_uplink ? (int32_t)UM_TABLE_SIZE : (int32_t)DM_TABLE_SIZE;
 
     int32_t opt_bitmap = uper_read(&u, 2);
     if (opt_bitmap < 0) return 0;
-    int has_msgref = (opt_bitmap >> 1) & 1;
-    int has_timestamp = opt_bitmap & 1;
+    int32_t has_msgref = (opt_bitmap >> 1) & 1;
+    int32_t has_timestamp = opt_bitmap & 1;
 
     int32_t msg_id = uper_read_constrained(&u, 0, 63);
     if (msg_id < 0) return 0;
@@ -1043,7 +1044,7 @@ static int try_decode_message(uint32_t addr, const uint8_t *data, int len,
         if (msg_ref < 0) return 0;
     }
 
-    int ts_year=-1, ts_month=-1, ts_day=-1, ts_hour=-1, ts_min=-1;
+    int32_t ts_year=-1, ts_month=-1, ts_day=-1, ts_hour=-1, ts_min=-1;
     if (has_timestamp) {
         ts_year = uper_read_constrained(&u, 0, 99);
         ts_month = uper_read_constrained(&u, 1, 12);
@@ -1067,7 +1068,7 @@ static int try_decode_message(uint32_t addr, const uint8_t *data, int len,
                2000+ts_year, ts_month, ts_day, ts_hour, ts_min);
     printf(": ");
 
-    for (int i = 0; i < elem_count; i++) {
+    for (int32_t i = 0; i < elem_count; i++) {
         if (i > 0) printf("; ");
 
         int32_t elem_idx = uper_read_constrained(&u, 0, max_choice);
@@ -1092,17 +1093,17 @@ static int try_decode_message(uint32_t addr, const uint8_t *data, int len,
 
 // ========== Public API ==========
 
-int cpdlc_try_decode(uint32_t addr, const uint8_t *data, int len) {
+int32_t cpdlc_try_decode(uint32_t addr, const uint8_t *data, int32_t len) {
     if (!data || len < 3) return 0;
 
-    int decoded = try_decode_message(addr, data, len, 0);
+    int32_t decoded = try_decode_message(addr, data, len, 0);
     if (!decoded)
         decoded = try_decode_message(addr, data, len, 1);
 
     return decoded;
 }
 
-int cpdlc_try_decode_dir(uint32_t addr, const uint8_t *data, int len, int dir) {
+int32_t cpdlc_try_decode_dir(uint32_t addr, const uint8_t *data, int32_t len, int32_t dir) {
     if (!data || len < 3) return 0;
 
     if (dir == 0)

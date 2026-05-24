@@ -48,6 +48,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <cstdint>
 #include "dispatcher.h"
 
 /* for PRIX64 */
@@ -66,7 +67,7 @@ static std::string sfmt(const char *fmt, ...) {
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int32_t n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n < 0) return {};
     if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
@@ -90,10 +91,10 @@ static std::string sfmt(const char *fmt, ...) {
 //    handled via non-blocking I/O and manually polling clients to see if
 //    they have something new to share with us when reading is needed.
 
-static int handleBeastCommand(struct client *c, char *p);
-static int decodeBinMessage(struct client *c, char *p);
-static int decodeHexMessage(struct client *c, char *hex);
-static int handleFaupCommand(struct client *c, char *hex);
+static int32_t handleBeastCommand(struct client *c, char *p);
+static int32_t decodeBinMessage(struct client *c, char *p);
+static int32_t decodeHexMessage(struct client *c, char *hex);
+static int32_t handleFaupCommand(struct client *c, char *hex);
 
 static void moveNetClient(struct client *c, struct net_service *new_service);
 
@@ -102,7 +103,7 @@ static void send_beast_heartbeat(struct net_service *service);
 static void send_sbs_heartbeat(struct net_service *service);
 static void send_stratux_heartbeat(struct net_service *service);
 
-static void writeBeastMessage(struct net_writer *writer, uint64_t timestamp, double signalLevel, uint8_t *msg, int msgLen);
+static void writeBeastMessage(struct net_writer *writer, uint64_t timestamp, double signalLevel, uint8_t *msg, int32_t msgLen);
 
 static void writeFATSVEvent(struct modesMessage *mm, struct aircraft *a);
 static void writeFATSVPositionUpdate(float lat, float lon, float alt);
@@ -157,14 +158,14 @@ struct net_service *serviceInit(const char *descr, struct net_writer *writer, he
 }
 
 // Create a client attached to the given service using the provided socket FD
-struct client *createSocketClient(struct net_service *service, int fd)
+struct client *createSocketClient(struct net_service *service, int32_t fd)
 {
     anetSetSendBuffer(Modes.aneterr, fd, (MODES_NET_SNDBUF_SIZE << Modes.net_sndbuf_size));
     return createGenericClient(service, fd);
 }
 
 // Create a client attached to the given service using the provided FD (might not be a socket!)
-struct client *createGenericClient(struct net_service *service, int fd)
+struct client *createGenericClient(struct net_service *service, int32_t fd)
 {
     struct client *c;
 
@@ -191,9 +192,9 @@ struct client *createGenericClient(struct net_service *service, int fd)
 
 // Initiate an outgoing connection which will use the given service.
 // Return the new client or NULL if the connection failed
-struct client *serviceConnect(struct net_service *service, char *addr, int port)
+struct client *serviceConnect(struct net_service *service, char *addr, int32_t port)
 {
-    int s;
+    int32_t s;
 
     std::string port_str = std::to_string(port);
     s = anetTcpConnect(Modes.aneterr, addr, port_str.data());
@@ -207,8 +208,8 @@ struct client *serviceConnect(struct net_service *service, char *addr, int port)
 // _exits_ on failure!
 void serviceListen(struct net_service *service, char *bind_addr, char *bind_ports)
 {
-    int *fds = NULL;
-    int n = 0;
+    int32_t *fds = NULL;
+    int32_t n = 0;
     char *p, *end;
 
     if (service->listener_count > 0) {
@@ -221,8 +222,8 @@ void serviceListen(struct net_service *service, char *bind_addr, char *bind_port
 
     p = bind_ports;
     while (p && *p) {
-        int newfds[16];
-        int nfds, i;
+        int32_t newfds[16];
+        int32_t nfds, i;
 
         end = strpbrk(p, ", ");
         std::string port_token;
@@ -241,7 +242,7 @@ void serviceListen(struct net_service *service, char *bind_addr, char *bind_port
             exit(1);
         }
 
-        fds = (int*)realloc(fds, (n+nfds) * sizeof(int));
+        fds = (int32_t*)realloc(fds, (n+nfds) * sizeof(int32_t));
         if (!fds) {
             fprintf(stderr, "out of memory\n");
             exit(1);
@@ -327,11 +328,11 @@ void modesInitNet(void) {
 // awakened by new data arriving. This usually happens a few times every second
 //
 static struct client * modesAcceptClients(void) {
-    int fd;
+    int32_t fd;
     struct net_service *s;
 
     for (s = Modes.services; s; s = s->next) {
-        int i;
+        int32_t i;
         for (i = 0; i < s->listener_count; ++i) {
             while ((fd = anetTcpAccept(Modes.aneterr, s->listener_fds[i])) >= 0) {
                 createSocketClient(s, fd);
@@ -382,7 +383,7 @@ static void flushWrites(struct net_writer *writer) {
 #ifndef _WIN32
             int nwritten = write(c->fd, writer->data, writer->dataUsed);
 #else
-            int nwritten = send(c->fd, writer->data, writer->dataUsed, 0 );
+            int32_t nwritten = send(c->fd, writer->data, writer->dataUsed, 0 );
 #endif
             if (nwritten > 0) {
                 __atomic_fetch_add(&writer->service->bytes_out_total,
@@ -400,7 +401,7 @@ static void flushWrites(struct net_writer *writer) {
 
 // Prepare to write up to 'len' bytes to the given net_writer.
 // Returns a pointer to write to, or NULL to skip this write.
-static char *prepareWrite(struct net_writer *writer, int len) {
+static char *prepareWrite(struct net_writer *writer, int32_t len) {
     if (!writer ||
         !writer->service ||
         !writer->service->connections ||
@@ -469,10 +470,10 @@ static void modesSendBeastCookedOutput(struct modesMessage *mm, struct aircraft 
     writeBeastMessage(&Modes.beast_cooked_out, mm->timestampMsg, mm->signalLevel, mm->msg, mm->msgbits / 8);
 }
 
-static void writeBeastMessage(struct net_writer *writer, uint64_t timestamp, double signalLevel, uint8_t *msg, int msgLen) {
+static void writeBeastMessage(struct net_writer *writer, uint64_t timestamp, double signalLevel, uint8_t *msg, int32_t msgLen) {
     char ch;
-    int  j;
-    int sig;
+    int32_t  j;
+    int32_t sig;
 
     char *p = prepareWrite(writer, 2 + 2 * (7 + msgLen));
     if (!p)
@@ -553,7 +554,7 @@ static void modesSendRawOutput(struct modesMessage *mm, struct aircraft *a) {
     if ((a && !a->reliable) && !mm->reliable)
         return;
 
-    int msgLen = mm->msgbits / 8;
+    int32_t msgLen = mm->msgbits / 8;
     char *p = prepareWrite(&Modes.raw_out, msgLen*2 + 15);
     if (!p)
         return;
@@ -564,7 +565,7 @@ static void modesSendRawOutput(struct modesMessage *mm, struct aircraft *a) {
         /* timestamp, big-endian */
         *p++ = '@';
         uint64_t ts = mm->timestampMsg;
-        for (int i = 11; i >= 0; --i) {
+        for (int32_t i = 11; i >= 0; --i) {
             p[i] = hexchars[ts & 0xF];
             ts >>= 4;
         }
@@ -573,7 +574,7 @@ static void modesSendRawOutput(struct modesMessage *mm, struct aircraft *a) {
         *p++ = '*';
 
     uint8_t *msg = mm->msg;
-    for (int j = 0; j < msgLen; j++) {
+    for (int32_t j = 0; j < msgLen; j++) {
         *p++ = hexchars[msg[j] >> 4];
         *p++ = hexchars[msg[j] & 0x0F];
     }
@@ -588,7 +589,7 @@ static void send_raw_heartbeat(struct net_service *service)
 {
     static const char *heartbeat_message = "*0000;\n";
     char *data;
-    int len = strlen(heartbeat_message);
+    int32_t len = strlen(heartbeat_message);
 
     if (!service->writer)
         return;
@@ -609,7 +610,7 @@ static void send_raw_heartbeat(struct net_service *service)
 static void modesSendSBSOutput(struct modesMessage *mm, struct aircraft *a) {
     struct timespec now;
     struct tm    stTime_receive, stTime_now;
-    int          msgType;
+    int32_t          msgType;
 
     // We require a tracked aircraft for SBS output
     if (!a)
@@ -825,7 +826,7 @@ static void send_sbs_heartbeat(struct net_service *service)
 {
     static const char *heartbeat_message = "\r\n";  // is there a better one?
     char *data;
-    int len = strlen(heartbeat_message);
+    int32_t len = strlen(heartbeat_message);
 
     if (!service->writer)
         return;
@@ -869,7 +870,7 @@ static void modesSendStratuxOutput(struct modesMessage *mm, struct aircraft *a) 
     // Begin populating the traffic.go fields.
     // ICAO address, Mode S message types, and signal level
 
-    int cacf = 0; // overload the JSON "CA" field to report CA (DF11 or DF17), CF (DF18), or zero (all other DF types)
+    int32_t cacf = 0; // overload the JSON "CA" field to report CA (DF11 or DF17), CF (DF18), or zero (all other DF types)
     if ((mm->msgtype == 11) || (mm->msgtype == 17)) {
         cacf = mm->CA;
     } else if (mm->msgtype == 18) {
@@ -985,7 +986,7 @@ static void modesSendStratuxOutput(struct modesMessage *mm, struct aircraft *a) 
     }
 
     // emitter type
-    int emitter = -1;
+    int32_t emitter = -1;
     if ((mm->msgtype ==  17) || (mm->msgtype == 18)) {
         switch (mm->metype) {
             case 1:
@@ -1023,14 +1024,14 @@ static void modesSendStratuxOutput(struct modesMessage *mm, struct aircraft *a) 
     if (p < end)
         completeWrite(&Modes.stratux_out, p);
     else
-        fprintf(stderr, "stratux: output too large (max %d, overran by %d)\n", STRATUX_MAX_PACKET_SIZE, (int) (p - end));
+        fprintf(stderr, "stratux: output too large (max %d, overran by %d)\n", STRATUX_MAX_PACKET_SIZE, (int32_t) (p - end));
 }
 
 static void send_stratux_heartbeat(struct net_service *service)
 {
     static const char *heartbeat_message = "{\"Icao_addr\":134217727}\r\n";  // 0x07FFFFFF. Overflows 24-bit ICAO to signal invalic #, need to validate that this won't cause problems with traffic.go
     char *data;
-    int len = strlen(heartbeat_message);
+    int32_t len = strlen(heartbeat_message);
 
     if (!service->writer)
         return;
@@ -1127,7 +1128,7 @@ static void autoset_modeac() {
 // Send some Beast settings commands to a client
 void sendBeastSettings(struct client *c, const char *settings)
 {
-    int len;
+    int32_t len;
 
     len = strlen(settings) * 3;
     std::string buf(len, '\0');
@@ -1165,7 +1166,7 @@ static void moveNetClient(struct client *c, struct net_service *new_service)
     c->service = new_service;
 }
 
-static int handleFaupCommand(struct client *c, char *p) {
+static int32_t handleFaupCommand(struct client *c, char *p) {
     if (p == NULL)
         return 0;
 
@@ -1219,7 +1220,7 @@ static void handleOptionsChange(struct client *c) {
 // Handle a Beast command message. Currently we support only j/J, l/L, v/V
 // and ignore other options
 //
-static int handleBeastCommand(struct client *c, char *p) {
+static int32_t handleBeastCommand(struct client *c, char *p) {
     if (p[0] != '1') {
         // huh?
         return 0;
@@ -1268,9 +1269,9 @@ static int handleBeastCommand(struct client *c, char *p) {
 // The function always returns 0 (success) to the caller as there is no
 // case where we want broken messages here to close the client connection.
 //
-static int decodeBinMessage(struct client *c, char *p) {
-    int msgLen = 0;
-    int  j;
+static int32_t decodeBinMessage(struct client *c, char *p) {
+    int32_t msgLen = 0;
+    int32_t  j;
     char ch;
     uint8_t msg[MODES_LONG_MSG_BYTES + 7];
     static struct modesMessage zeroMessage;
@@ -1336,7 +1337,7 @@ static int decodeBinMessage(struct client *c, char *p) {
             Modes.stats_current.remote_received_modeac++;
             decodeModeAMessage(&mm, ((msg[0] << 8) | msg[1]));
         } else {
-            int result;
+            int32_t result;
 
             Modes.stats_current.remote_received_modes++;
             result = decodeModesMessage(&mm, msg);
@@ -1361,7 +1362,7 @@ static int decodeBinMessage(struct client *c, char *p) {
 // Turn an hex digit into its 4 bit decimal value.
 // Returns -1 if the digit is not in the 0-F range.
 //
-static int hexDigitVal(int c) {
+static int32_t hexDigitVal(int32_t c) {
     c = tolower(c);
     if (c >= '0' && c <= '9') return c-'0';
     else if (c >= 'a' && c <= 'f') return c-'a'+10;
@@ -1374,7 +1375,7 @@ static bool timestampFromHex(const char *hex, uint64_t *timestamp)
 {
     uint64_t ts = 0;
     for (uint32_t i = 0; i < 12; ++i) {
-        int v = hexDigitVal(hex[i]);
+        int32_t v = hexDigitVal(hex[i]);
         if (v < 0)
             return false;
         ts = (ts << 4) | v;
@@ -1387,8 +1388,8 @@ static bool timestampFromHex(const char *hex, uint64_t *timestamp)
 // decode 2 hex digits as a signal level
 static bool signalFromHex(const char *hex, double *signal)
 {
-    int d1 = hexDigitVal(hex[0]);
-    int d2 = hexDigitVal(hex[1]);
+    int32_t d1 = hexDigitVal(hex[0]);
+    int32_t d2 = hexDigitVal(hex[1]);
     if (d1 < 0 || d2 < 0)
         return false;
 
@@ -1411,8 +1412,8 @@ static bool signalFromHex(const char *hex, double *signal)
 // The function always returns 0 (success) to the caller as there is no
 // case where we want broken messages here to close the client connection.
 //
-static int decodeHexMessage(struct client *c, char *hex) {
-    int l = strlen(hex), j;
+static int32_t decodeHexMessage(struct client *c, char *hex) {
+    int32_t l = strlen(hex), j;
     uint8_t msg[MODES_LONG_MSG_BYTES];
     struct modesMessage mm;
     static struct modesMessage zeroMessage;
@@ -1487,15 +1488,15 @@ static int decodeHexMessage(struct client *c, char *hex) {
     if ( (l != (MODEAC_MSG_BYTES      * 2))
       && (l != (MODES_SHORT_MSG_BYTES * 2))
       && (l != (MODES_LONG_MSG_BYTES  * 2)) )
-        {return (0);} // Too short or long message... broken
+        {return (0);} // Too int16_t or int64_t message... broken
 
     if ( (0 == Modes.mode_ac)
       && (l == (MODEAC_MSG_BYTES * 2)) )
         {return (0);} // Right length for ModeA/C, but not enabled
 
     for (j = 0; j < l; j += 2) {
-        int high = hexDigitVal(hex[j]);
-        int low  = hexDigitVal(hex[j+1]);
+        int32_t high = hexDigitVal(hex[j]);
+        int32_t low  = hexDigitVal(hex[j+1]);
 
         if (high == -1 || low == -1) return 0;
         msg[j/2] = (high << 4) | low;
@@ -1508,7 +1509,7 @@ static int decodeHexMessage(struct client *c, char *hex) {
         Modes.stats_current.remote_received_modeac++;
         decodeModeAMessage(&mm, ((msg[0] << 8) | msg[1]));
     } else {       // Assume ModeS
-        int result;
+        int32_t result;
 
         Modes.stats_current.remote_received_modes++;
         result = decodeModesMessage(&mm, msg);
@@ -1655,7 +1656,7 @@ static std::string append_nav_modes(nav_modes_t flags, const char *quote, const 
 {
     std::string s;
     bool first = true;
-    for (int i = 0; nav_modes_names[i].name; ++i) {
+    for (int32_t i = 0; nav_modes_names[i].name; ++i) {
         if (!(flags & nav_modes_names[i].flag))
             continue;
         if (!first)
@@ -1756,10 +1757,10 @@ static const char *hazard_enum_string(hazard_t hazard)
     }
 }
 
-char *generateAircraftJson(const char *url_path, int *len) {
+char *generateAircraftJson(const char *url_path, int32_t *len) {
     uint64_t now = mstime();
     struct aircraft *a;
-    int first = 1;
+    int32_t first = 1;
 
     MODES_NOTUSED(url_path);
 
@@ -1846,7 +1847,7 @@ char *generateAircraftJson(const char *url_path, int *len) {
             s += sfmt(",\"fanet_hw\":{\"dev\":%u,\"uptime\":%u,\"rssi\":%d}",
                           (uint32_t)a->fanet_hwinfo.device_type,
                           (uint32_t)a->fanet_hwinfo.uptime_minutes,
-                          (int)a->fanet_hwinfo.rssi);
+                          (int32_t)a->fanet_hwinfo.rssi);
         }
         // FANET thermal info (type 9)
         if (a->fanet_thermal.valid) {
@@ -2036,7 +2037,7 @@ static void appendStatsJson(std::string &s,
                             struct stats *st,
                             const char *key)
 {
-    int i;
+    int32_t i;
 
     s += sfmt("\"%s\":{\"start\":%.1f,\"end\":%.1f",
               key,
@@ -2182,7 +2183,7 @@ static void appendStatsJson(std::string &s,
     s += '}';
 }
 
-char *generateStatsJson(const char *url_path, int *len) {
+char *generateStatsJson(const char *url_path, int32_t *len) {
     MODES_NOTUSED(url_path);
 
     std::string s = "{\n";
@@ -2208,9 +2209,9 @@ char *generateStatsJson(const char *url_path, int *len) {
 //
 // Return a description of the receiver in json.
 //
-char *generateReceiverJson(const char *url_path, int *len)
+char *generateReceiverJson(const char *url_path, int32_t *len)
 {
-    int history_size;
+    int32_t history_size;
 
     MODES_NOTUSED(url_path);
 
@@ -2246,9 +2247,9 @@ char *generateReceiverJson(const char *url_path, int *len)
     return strdup(s.c_str());
 }
 
-char *generateHistoryJson(const char *url_path, int *len)
+char *generateHistoryJson(const char *url_path, int32_t *len)
 {
-    int history_index = -1;
+    int32_t history_index = -1;
 
     if (sscanf(url_path, "/data/history_%d.json", &history_index) != 1)
         return NULL;
@@ -2288,11 +2289,11 @@ static void ratelimitWriteError(const char *format, ...)
 }
 
 // Write JSON to file
-void writeJsonToFile(const char *file, char * (*generator) (const char *,int*))
+void writeJsonToFile(const char *file, char * (*generator) (const char *,int32_t*))
 {
 #ifndef _WIN32
-    int fd;
-    int len = 0;
+    int32_t fd;
+    int32_t len = 0;
     mode_t mask;
     char *content;
 
@@ -2360,9 +2361,9 @@ void writeJsonToFile(const char *file, char * (*generator) (const char *,int*))
 // close the connection with the client in case of non-recoverable errors.
 //
 static void modesReadFromClient(struct client *c) {
-    int left;
-    int nread;
-    int bContinue = 1;
+    int32_t left;
+    int32_t nread;
+    int32_t bContinue = 1;
 
     while (bContinue) {
         left = MODES_CLIENT_BUF_SIZE - c->buflen - 1; // leave 1 extra byte for NUL termination in the ASCII case
@@ -2593,7 +2594,7 @@ static void writeFATSVPositionUpdate(float lat, float lon, float alt)
     if (p < end)
         completeWrite(&Modes.fatsv_out, p);
     else
-        fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int) (p - end));
+        fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
 }
 
 static void writeFATSVEventMessage(struct modesMessage *mm, const char *datafield, uint8_t *data, size_t len)
@@ -2620,7 +2621,7 @@ static void writeFATSVEventMessage(struct modesMessage *mm, const char *datafiel
     if (p < end)
         completeWrite(&Modes.fatsv_out, p);
     else
-        fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int) (p - end));
+        fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
 #       undef bufsize
 }
 
@@ -2805,12 +2806,12 @@ static void writeFATSV()
         _messageNow = a->seen;
 
         // some special cases:
-        int altValid = trackDataValid(&a->altitude_baro_valid);
-        int airgroundValid = trackDataValid(&a->airground_valid) && a->airground_valid.source >= SOURCE_MODE_S_CHECKED; // for non-ADS-B transponders, only trust DF11 CA field
-        int gsValid = trackDataValid(&a->gs_valid);
-        int squawkValid = trackDataValid(&a->squawk_valid);
-        int callsignValid = trackDataValid(&a->callsign_valid) && strcmp(a->callsign, "        ") != 0;
-        int positionValid = trackDataValid(&a->position_valid);
+        int32_t altValid = trackDataValid(&a->altitude_baro_valid);
+        int32_t airgroundValid = trackDataValid(&a->airground_valid) && a->airground_valid.source >= SOURCE_MODE_S_CHECKED; // for non-ADS-B transponders, only trust DF11 CA field
+        int32_t gsValid = trackDataValid(&a->gs_valid);
+        int32_t squawkValid = trackDataValid(&a->squawk_valid);
+        int32_t callsignValid = trackDataValid(&a->callsign_valid) && strcmp(a->callsign, "        ") != 0;
+        int32_t positionValid = trackDataValid(&a->position_valid);
 
         // If we are definitely on the ground, suppress any unreliable altitude info.
         // When on the ground, ADS-B transponders don't emit an ADS-B message that includes
@@ -2821,7 +2822,7 @@ static void writeFATSV()
 
         // if it hasn't changed altitude, heading, or speed much,
         // don't update so often
-        int changed =
+        int32_t changed =
             (altValid && abs(a->altitude_baro - a->fatsv_emitted_altitude_baro) >= 50) ||
             (trackDataValid(&a->altitude_geom_valid) && abs(a->altitude_geom - a->fatsv_emitted_altitude_geom) >= 50) ||
             (trackDataValid(&a->baro_rate_valid) && abs(a->baro_rate - a->fatsv_emitted_baro_rate) > 500) ||
@@ -2836,7 +2837,7 @@ static void writeFATSV()
             (trackDataValid(&a->tas_valid) && unsigned_difference(a->tas, a->fatsv_emitted_tas) >= 25) ||
             (trackDataValid(&a->mach_valid) && fabs(a->mach - a->fatsv_emitted_mach) >= 0.02);
 
-        int immediate =
+        int32_t immediate =
             (trackDataValid(&a->nav_altitude_mcp_valid) && abs(a->nav_altitude_mcp - a->fatsv_emitted_nav_altitude_mcp) > 50) ||
             (trackDataValid(&a->nav_altitude_fms_valid) && abs(a->nav_altitude_fms - a->fatsv_emitted_nav_altitude_fms) > 50) ||
             (trackDataValid(&a->nav_altitude_src_valid) && a->nav_altitude_src != a->fatsv_emitted_nav_altitude_src) ||
@@ -2894,7 +2895,7 @@ static void writeFATSV()
 
         // for fields we only emit on change,
         // occasionally re-emit them all
-        int forceEmit = (now - a->fatsv_last_force_emit) > 600000;
+        int32_t forceEmit = (now - a->fatsv_last_force_emit) > 600000;
 
         // these don't change often / at all, only emit when they change
         if (forceEmit || a->addrtype != a->fatsv_emitted_addrtype) {
@@ -2979,7 +2980,7 @@ static void writeFATSV()
         if (p < end)
             completeWrite(&Modes.fatsv_out, p);
         else
-            fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int) (p - end));
+            fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
 
         a->fatsv_emitted_altitude_baro = a->altitude_baro;
         a->fatsv_emitted_altitude_geom = a->altitude_geom;
@@ -3026,7 +3027,7 @@ void modesNetPeriodicWork(void) {
     struct client *c, **prev;
     struct net_service *s;
     uint64_t now = mstime();
-    int need_flush = 0;
+    int32_t need_flush = 0;
 
     // Accept new connections
     modesAcceptClients();

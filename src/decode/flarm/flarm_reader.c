@@ -13,6 +13,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -41,7 +42,7 @@ flarm_reader_config_t FlarmConfig;
 
 static struct {
     pthread_t        thread;
-    int              thread_running;
+    int32_t              thread_running;
 
 #ifdef ENABLE_RTLSDR
     rtlsdr_dev_t    *dev;
@@ -56,7 +57,7 @@ static struct {
     msg_queue_t      p3i_queue;
     msg_queue_t      adsl_queue;
 
-    volatile int     stop_flag;
+    volatile int32_t     stop_flag;
 } Flarm;
 
 // Dispatcher aircraft queue for FLARM/OGNTP/P3I/ADS-L (registered at init)
@@ -126,7 +127,7 @@ static bool adsl_dequeue_message(adsl_message_t *msg)
 static void ogntp_log_status(const ogntp_message_t *msg)
 {
     char line[256];
-    int len = snprintf(line, sizeof(line),
+    int32_t len = snprintf(line, sizeof(line),
                        "OGNTP v%d %d:%06X status relay=%d time=%02ds hw=%02X fw=%02X sats=%d fix=%d V=%.2f Tx=%ddBm",
                        msg->version,
                        msg->addr_type,
@@ -140,15 +141,15 @@ static void ogntp_log_status(const ogntp_message_t *msg)
                        msg->status.voltage_v,
                        msg->status.tx_power_dbm);
 
-    if (msg->status.has_pressure && len > 0 && len < (int)sizeof(line)) {
+    if (msg->status.has_pressure && len > 0 && len < (int32_t)sizeof(line)) {
         len += snprintf(line + len, sizeof(line) - (size_t)len,
                         " P=%.1fhPa", msg->status.pressure_hpa);
     }
-    if (msg->status.has_temperature && len > 0 && len < (int)sizeof(line)) {
+    if (msg->status.has_temperature && len > 0 && len < (int32_t)sizeof(line)) {
         len += snprintf(line + len, sizeof(line) - (size_t)len,
                         " T=%.1fC", msg->status.temperature_c);
     }
-    if (msg->status.has_humidity && len > 0 && len < (int)sizeof(line)) {
+    if (msg->status.has_humidity && len > 0 && len < (int32_t)sizeof(line)) {
         len += snprintf(line + len, sizeof(line) - (size_t)len,
                         " H=%.1f%%", msg->status.humidity_percent);
     }
@@ -238,7 +239,7 @@ static void *flarm_ifile_reader_thread(void *arg)
             if (sleep_us > 0) {
                 struct timespec ts;
                 ts.tv_sec = (time_t)(sleep_us / 1e6);
-                ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+                ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
                 nanosleep(&ts, NULL);
             }
         }
@@ -277,12 +278,12 @@ static void *flarm_reader_thread(void *arg)
 // ======================== Find RTL-SDR by serial ========================
 
 #ifdef ENABLE_RTLSDR
-static int find_flarm_device(const char *serial)
+static int32_t find_flarm_device(const char *serial)
 {
-    int count = rtlsdr_get_device_count();
+    int32_t count = rtlsdr_get_device_count();
     if (count == 0) return -1;
 
-    for (int i = 0; i < count; i++) {
+    for (int32_t i = 0; i < count; i++) {
         char vendor[256], product[256], sn[256];
         if (rtlsdr_get_device_usb_strings(i, vendor, product, sn) == 0) {
             if (strcmp(sn, serial) == 0) {
@@ -315,7 +316,7 @@ bool flarmReaderOpen(void)
         }
         // Get file size for info
         fseek(fp, 0, SEEK_END);
-        long file_size = ftell(fp);
+        int64_t file_size = ftell(fp);
         fclose(fp);
 
         double duration = (file_size / 2.0) / sample_rate;
@@ -379,14 +380,14 @@ bool flarmReaderOpen(void)
         return false;
     }
 
-    int dev_index = find_flarm_device(FlarmConfig.device_serial);
+    int32_t dev_index = find_flarm_device(FlarmConfig.device_serial);
     if (dev_index < 0) {
         fprintf(stderr, "flarm: no RTL-SDR device with serial '%s' found\n", FlarmConfig.device_serial);
 
         // List available devices
-        int count = rtlsdr_get_device_count();
+        int32_t count = rtlsdr_get_device_count();
         fprintf(stderr, "flarm: available devices:\n");
-        for (int i = 0; i < count; i++) {
+        for (int32_t i = 0; i < count; i++) {
             char vendor[256], product[256], sn[256];
             if (rtlsdr_get_device_usb_strings(i, vendor, product, sn) == 0) {
                 fprintf(stderr, "  %d: %s %s SN:%s\n", i, vendor, product, sn);
@@ -636,7 +637,7 @@ static void flarm_push_update(
     const char *callsign,
     uint32_t category,
     double lat, double lon,
-    int altitude_m,         // meters MSL (converted to feet internally)
+    int32_t altitude_m,         // meters MSL (converted to feet internally)
     float speed_ms,         // m/s ground speed
     float course_deg,       // degrees track
     float vs_ms,            // m/s vertical speed
@@ -677,7 +678,7 @@ static void flarm_push_update(
 
     // Altitude (convert m → ft)
     if (altitude_m != 0 || (lat != 0 && lon != 0)) {
-        upd.altitude_ft = (int)(altitude_m * 3.28084);
+        upd.altitude_ft = (int32_t)(altitude_m * 3.28084);
         upd.altitude_valid = 1;
         upd.altitude_is_baro = 0;  // FLARM uses geometric (GPS) altitude
     }
@@ -686,7 +687,7 @@ static void flarm_push_update(
     if (speed_ms > 0.1f || fabsf(vs_ms) > 0.1f) {
         upd.ground_speed_kt = speed_ms * 1.94384f;
         upd.heading_deg = course_deg;
-        upd.vert_rate_fpm = (int)(vs_ms * 196.85f);
+        upd.vert_rate_fpm = (int32_t)(vs_ms * 196.85f);
         upd.velocity_valid = 1;
     }
 
@@ -825,7 +826,7 @@ typedef struct {
     msg_queue_t         queue;
     struct p3i_demod_state *p3i_demod;
     msg_queue_t         p3i_queue;
-    volatile int        active;   // set by process callback, cleared by drain
+    volatile int32_t        active;   // set by process callback, cleared by drain
 } flarm_decoder_state_t;
 
 static void flarm_dec_enqueue(const flarm_message_t *msg, void *ctx)
@@ -1060,7 +1061,7 @@ void flarmReaderShowHelp(void)
 
 bool flarmReaderHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j + 1 < argc);
 
     if (!strcmp(argv[j], "--flarm")) {
@@ -1076,7 +1077,7 @@ bool flarmReaderHandleOption(int argc, char **argv, int *jptr)
         FlarmConfig.ifile_once = 1;
     } else if (!strcmp(argv[j], "--flarm-gain") && more) {
         float gain_db = atof(argv[++j]);
-        FlarmConfig.gain = (int)(gain_db * 10);
+        FlarmConfig.gain = (int32_t)(gain_db * 10);
     } else if (!strcmp(argv[j], "--flarm-ppm") && more) {
         FlarmConfig.ppm_error = atoi(argv[++j]);
     } else if (!strcmp(argv[j], "--flarm-keys") && more) {

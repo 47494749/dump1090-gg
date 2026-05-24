@@ -28,33 +28,33 @@ extern "C" {
 #define PANEL_WS_MAX_CLIENTS  4
 
 typedef struct {
-    int      enabled;
-    int      port;
+    int32_t      enabled;
+    int32_t      port;
     char     password[64];      // Basic Auth password (user: admin)
     char     html_dir[256];     // Directory with panel HTML files
 
     // Log ring buffer
     char     log_buf[PANEL_LOG_LINES][PANEL_LOG_LINE_LEN];
-    int      log_head;
-    int      log_count;
-    int      log_seq;
+    int32_t      log_head;
+    int32_t      log_count;
+    int32_t      log_seq;
     pthread_mutex_t log_mutex;
 
     // Decoded message ring buffer
     char     msg_buf[PANEL_MSG_LINES][PANEL_MSG_LINE_LEN];
-    int      msg_head;
-    int      msg_count;
-    int      msg_seq;
+    int32_t      msg_head;
+    int32_t      msg_count;
+    int32_t      msg_seq;
     pthread_mutex_t msg_mutex;
 
     // Server state
-    int      listen_fd;
+    int32_t      listen_fd;
     pthread_t thread;
-    int      running;
+    int32_t      running;
 
     // WebSocket state
-    int      ws_fds[PANEL_WS_MAX_CLIENTS];
-    int      ws_count;
+    int32_t      ws_fds[PANEL_WS_MAX_CLIENTS];
+    int32_t      ws_count;
     pthread_mutex_t ws_mutex;
 } panel_state_t;
 

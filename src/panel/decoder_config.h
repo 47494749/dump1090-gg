@@ -37,7 +37,7 @@ typedef enum {
 
 typedef struct {
     // Decode options
-    int     fix_crc;            // 0 = off, 1 = 1-bit fix, 2 = 2-bit fix
+    int32_t     fix_crc;            // 0 = off, 1 = 1-bit fix, 2 = 2-bit fix
     bool    check_crc;          // only accept messages with good CRC
     bool    fix_df;             // try to correct DF field damage
     bool    enable_df24;        // decode DF24..DF31 (Comm-D ELM)
@@ -75,7 +75,7 @@ typedef struct {
     bool        enabled;
     bool        ogn_only;
     char        ogn_server[128];
-    int         ogn_port;
+    int32_t         ogn_port;
     char        ogn_station[64];
     // Encryption keys (loaded from file or set via API)
     uint32_t    key_table[12];
@@ -92,7 +92,7 @@ typedef struct {
 typedef struct {
     bool    enabled;
     double  channel_freqs[8];   // up to 8 ACARS channels
-    int     num_channels;
+    int32_t     num_channels;
     double  center_freq;
 } acars_decoder_config_t;
 
@@ -101,7 +101,7 @@ typedef struct {
 typedef struct {
     bool    enabled;
     double  channel_freqs[8];   // up to 8 VDL2 channels
-    int     num_channels;
+    int32_t     num_channels;
     double  center_freq;
     float   squelch_level;      // dBFS
 } vdl2_decoder_config_t;
@@ -123,7 +123,7 @@ typedef struct {
     bool    enabled;
     bool    output_enabled;     // show decoded messages
     double  channel_freqs[8];   // multi-channel frequencies
-    int     num_channels;
+    int32_t     num_channels;
     double  center_freq;
 } pocsag_decoder_config_t;
 
@@ -133,7 +133,7 @@ typedef struct {
     bool    enabled;
     bool    output_enabled;
     double  arfcn_freq;
-    int     tsc;                // -1 = auto-detect
+    int32_t     tsc;                // -1 = auto-detect
 } gsm_decoder_config_t;
 
 // ======================== LTE Decoder Config ========================
@@ -174,13 +174,13 @@ typedef struct {
 typedef struct {
     char    serial[64];         // RTL-SDR serial number
     float   gain;               // gain in dB
-    int     ppm;                // oscillator PPM correction
+    int32_t     ppm;                // oscillator PPM correction
     bool    digital_agc;        // enable digital AGC
-    int     direct_sampling;    // 0=off, 1=I, 2=Q
+    int32_t     direct_sampling;    // 0=off, 1=I, 2=Q
     // Runtime info (filled after device open, not persisted)
     char    tuner_name[32];     // e.g. "R820T", "FC0012"
     char    freq_range[32];     // e.g. "24-1766 MHz"
-    int     tuner_type;         // RTLSDR_TUNER_* enum
+    int32_t     tuner_type;         // RTLSDR_TUNER_* enum
 } dongle_config_t;
 
 // ======================== Global Decoder Configs ========================

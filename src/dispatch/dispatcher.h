@@ -6,6 +6,7 @@
 #define DISPATCHER_H
 
 #include "decoder_types.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 
@@ -88,14 +89,14 @@ typedef void* raw_queue_handle_t;
 typedef void* adsb_queue_handle_t;
 
 // Push functions return 1 on success, 0 if queue full
-int dispatcher_push_aircraft(aircraft_queue_handle_t q, const aircraft_update_t* upd);
-int dispatcher_push_message(message_queue_handle_t q, const text_message_t* msg);
-int dispatcher_push_ground(ground_queue_handle_t q, const ground_track_t* gt);
-int dispatcher_push_raw(raw_queue_handle_t q, const raw_modes_t* raw);
+int32_t dispatcher_push_aircraft(aircraft_queue_handle_t q, const aircraft_update_t* upd);
+int32_t dispatcher_push_message(message_queue_handle_t q, const text_message_t* msg);
+int32_t dispatcher_push_ground(ground_queue_handle_t q, const ground_track_t* gt);
+int32_t dispatcher_push_raw(raw_queue_handle_t q, const raw_modes_t* raw);
 
 // ADS-B: push a modesMessage into a registered per-source queue
 struct modesMessage;
-int dispatcher_push_adsb(adsb_queue_handle_t q, const struct modesMessage* mm);
+int32_t dispatcher_push_adsb(adsb_queue_handle_t q, const struct modesMessage* mm);
 
 // Called from main thread (backgroundTasks) to drain all queues
 void dispatcher_poll(void);

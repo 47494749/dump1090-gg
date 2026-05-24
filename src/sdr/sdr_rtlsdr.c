@@ -49,6 +49,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_rtlsdr.h"
 
 #include <rtl-sdr.h>
@@ -61,14 +62,14 @@
 static struct {
     rtlsdr_dev_t *dev;
     bool digital_agc;
-    int ppm_error;
-    int direct_sampling;
+    int32_t ppm_error;
+    int32_t direct_sampling;
     uint8_t *bounce_buffer;
     iq_convert_fn converter;
     struct converter_state *converter_state;
-    int *gains;
-    int gain_steps;
-    int current_gain;
+    int32_t *gains;
+    int32_t gain_steps;
+    int32_t current_gain;
 } RTLSDR;
 
 //
@@ -91,9 +92,9 @@ void rtlsdrInitConfig()
 
 static void show_rtlsdr_devices()
 {
-    int device_count = rtlsdr_get_device_count();
+    int32_t device_count = rtlsdr_get_device_count();
     fprintf(stderr, "rtlsdr: found %d device(s):\n", device_count);
-    for (int i = 0; i < device_count; i++) {
+    for (int32_t i = 0; i < device_count; i++) {
         char vendor[256], product[256], serial[256];
 
         if (rtlsdr_get_device_usb_strings(i, vendor, product, serial) != 0) {
@@ -104,9 +105,9 @@ static void show_rtlsdr_devices()
     }
 }
 
-static int find_device_index(char *s)
+static int32_t find_device_index(char *s)
 {
-    int device_count = rtlsdr_get_device_count();
+    int32_t device_count = rtlsdr_get_device_count();
     if (!device_count) {
         return -1;
     }
@@ -116,14 +117,14 @@ static int find_device_index(char *s)
         return 0;
     } else if (s[0] != '0') {
         char *s2;
-        int device = (int)strtol(s, &s2, 10);
+        int32_t device = (int32_t)strtol(s, &s2, 10);
         if (s2[0] == '\0' && device >= 0 && device < device_count) {
             return device;
         }
     }
 
     /* does string exact match a serial */
-    for (int i = 0; i < device_count; i++) {
+    for (int32_t i = 0; i < device_count; i++) {
         char serial[256];
         if (rtlsdr_get_device_usb_strings(i, NULL, NULL, serial) == 0 && !strcmp(s, serial)) {
             return i;
@@ -131,7 +132,7 @@ static int find_device_index(char *s)
     }
 
     /* does string prefix match a serial */
-    for (int i = 0; i < device_count; i++) {
+    for (int32_t i = 0; i < device_count; i++) {
         char serial[256];
         if (rtlsdr_get_device_usb_strings(i, NULL, NULL, serial) == 0 && !strncmp(s, serial, strlen(s))) {
             return i;
@@ -139,7 +140,7 @@ static int find_device_index(char *s)
     }
 
     /* does string suffix match a serial */
-    for (int i = 0; i < device_count; i++) {
+    for (int32_t i = 0; i < device_count; i++) {
         char serial[256];
         if (rtlsdr_get_device_usb_strings(i, NULL, NULL, serial) == 0 && strlen(s) < strlen(serial) && !strcmp(serial + strlen(serial) - strlen(s), s)) {
             return i;
@@ -162,7 +163,7 @@ void rtlsdrShowHelp()
 
 bool rtlsdrHandleOption(int argc, char **argv, int *jptr)
 {
-    int j = *jptr;
+    int32_t j = *jptr;
     bool more = (j +1  < argc);
 
     if (!strcmp(argv[j], "--enable-agc")) {
@@ -180,10 +181,10 @@ bool rtlsdrHandleOption(int argc, char **argv, int *jptr)
 }
 
 // sort function to sort by increasing gain
-static int sort_gains(const void *left, const void *right)
+static int32_t sort_gains(const void *left, const void *right)
 {
-    const int *left_int = (const int *)left;
-    const int *right_int = (const int *)right;
+    const int32_t *left_int = (const int32_t *)left;
+    const int32_t *right_int = (const int32_t *)right;
     return *left_int - *right_int;
 }
 
@@ -194,7 +195,7 @@ bool rtlsdrOpen(void)
         return false;
     }
 
-    int dev_index = 0;
+    int32_t dev_index = 0;
     if (Modes.dev_name) {
         if ((dev_index = find_device_index(Modes.dev_name)) < 0) {
             fprintf(stderr, "rtlsdr: no device matching '%s' found.\n", Modes.dev_name);
@@ -227,8 +228,8 @@ bool rtlsdrOpen(void)
         rtlsdr_set_direct_sampling(RTLSDR.dev, RTLSDR.direct_sampling);
         RTLSDR.gain_steps = 0;
     } else {
-        int *gains;
-        int numgains;
+        int32_t *gains;
+        int32_t numgains;
 
         numgains = rtlsdr_get_tuner_gains(RTLSDR.dev, NULL);
         if (numgains <= 0) {
@@ -236,7 +237,7 @@ bool rtlsdrOpen(void)
             return false;
             }
 
-        gains = malloc((numgains + 1) * sizeof(int));
+        gains = malloc((numgains + 1) * sizeof(int32_t));
         if (rtlsdr_get_tuner_gains(RTLSDR.dev, gains) != numgains) {
             fprintf(stderr, "rtlsdr: error getting tuner gains\n");
             free(gains);
@@ -254,13 +255,13 @@ bool rtlsdrOpen(void)
         RTLSDR.gain_steps = numgains + 1;
         RTLSDR.gains = gains;
 
-        int selected = -1;
+        int32_t selected = -1;
         if (Modes.gain == MODES_LEGACY_AUTO_GAIN) {
             selected = numgains;
         } else if (Modes.gain == MODES_DEFAULT_GAIN) {
             selected = numgains - 1;
         } else {
-            for (int i = 0; i <= numgains; ++i) {
+            for (int32_t i = 0; i <= numgains; ++i) {
                 if (selected == -1 || fabs(gains[i]/10.0 - Modes.gain) < fabs(gains[selected]/10.0 - Modes.gain))
                     selected = i;
             }
@@ -412,24 +413,24 @@ void rtlsdrClose()
     RTLSDR.gains = NULL;
 }
 
-int rtlsdrGetTunerType()
+int32_t rtlsdrGetTunerType()
 {
     if (RTLSDR.dev)
         return rtlsdr_get_tuner_type(RTLSDR.dev);
     return -1;
 }
 
-int rtlsdrGetGain()
+int32_t rtlsdrGetGain()
 {
     return RTLSDR.current_gain;
 }
 
-int rtlsdrGetMaxGain()
+int32_t rtlsdrGetMaxGain()
 {
     return RTLSDR.gain_steps - 1;
 }
 
-double rtlsdrGetGainDb(int step)
+double rtlsdrGetGainDb(int32_t step)
 {
     if (!RTLSDR.gains)
         return 0.0;
@@ -441,7 +442,7 @@ double rtlsdrGetGainDb(int step)
     return RTLSDR.gains[step] / 10.0;
 }
 
-int rtlsdrSetGain(int step)
+int32_t rtlsdrSetGain(int32_t step)
 {
     if (!RTLSDR.gains)
         return -1;

@@ -32,7 +32,7 @@ struct aircraft;
 struct modesMessage;
 struct client;
 struct net_service;
-typedef int (*read_fn)(struct client *, char *);
+typedef int32_t (*read_fn)(struct client *, char *);
 typedef void (*heartbeat_fn)(struct net_service *);
 
 typedef enum {
@@ -46,10 +46,10 @@ typedef enum {
 struct net_service {
     struct net_service* next;
     const char *descr;
-    int listener_count;  // number of listeners
-    int *listener_fds;   // listening FDs
+    int32_t listener_count;  // number of listeners
+    int32_t *listener_fds;   // listening FDs
 
-    int connections;     // number of active clients
+    int32_t connections;     // number of active clients
     uint64_t bytes_in_total;
     uint64_t bytes_out_total;
 
@@ -63,29 +63,29 @@ struct net_service {
 // Structure used to describe a networking client
 struct client {
     struct client*  next;                // Pointer to next client
-    int    fd;                           // File descriptor
+    int32_t    fd;                           // File descriptor
     struct net_service *service;         // Service this client is part of
-    int    buflen;                       // Amount of data on buffer
+    int32_t    buflen;                       // Amount of data on buffer
     char   buf[MODES_CLIENT_BUF_SIZE+1]; // Read buffer
-    int    modeac_requested;             // 1 if this Beast output connection has asked for A/C
-    int    verbatim_requested;           // 1 if this Beast output connection has asked for verbatim mode
-    int    local_requested;              // 1 if this Beast output connection has asked for local-only mode
+    int32_t    modeac_requested;             // 1 if this Beast output connection has asked for A/C
+    int32_t    verbatim_requested;           // 1 if this Beast output connection has asked for verbatim mode
+    int32_t    local_requested;              // 1 if this Beast output connection has asked for local-only mode
 };
 
 // Common writer state for all output sockets of one type
 struct net_writer {
     struct net_service *service; // owning service
     char *data;          // shared write buffer, sized MODES_OUT_BUF_SIZE
-    int dataUsed;        // number of bytes of write buffer currently used
+    int32_t dataUsed;        // number of bytes of write buffer currently used
     uint64_t lastWrite;  // time of last write to clients
     heartbeat_fn send_heartbeat; // function that queues a heartbeat if needed
 };
 
 struct net_service *serviceInit(const char *descr, struct net_writer *writer, heartbeat_fn hb_handler, read_mode_t mode, const char *sep, read_fn read_handler);
-struct client *serviceConnect(struct net_service *service, char *addr, int port);
+struct client *serviceConnect(struct net_service *service, char *addr, int32_t port);
 void serviceListen(struct net_service *service, char *bind_addr, char *bind_ports);
-struct client *createSocketClient(struct net_service *service, int fd);
-struct client *createGenericClient(struct net_service *service, int fd);
+struct client *createSocketClient(struct net_service *service, int32_t fd);
+struct client *createGenericClient(struct net_service *service, int32_t fd);
 
 // view1090 / faup1090 want to create these themselves:
 struct net_service *makeBeastInputService(void);
@@ -99,11 +99,11 @@ void modesQueueOutput(struct modesMessage *mm, struct aircraft *a);
 void modesNetPeriodicWork(void);
 
 // TODO: move these somewhere else
-char *generateAircraftJson(const char *url_path, int *len);
-char *generateStatsJson(const char *url_path, int *len);
-char *generateReceiverJson(const char *url_path, int *len);
-char *generateHistoryJson(const char *url_path, int *len);
-void writeJsonToFile(const char *file, char * (*generator) (const char *,int*));
+char *generateAircraftJson(const char *url_path, int32_t *len);
+char *generateStatsJson(const char *url_path, int32_t *len);
+char *generateReceiverJson(const char *url_path, int32_t *len);
+char *generateHistoryJson(const char *url_path, int32_t *len);
+void writeJsonToFile(const char *file, char * (*generator) (const char *,int32_t*));
 
 #ifdef __cplusplus
 }

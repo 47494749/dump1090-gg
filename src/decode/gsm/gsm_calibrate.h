@@ -6,6 +6,7 @@
 
 #ifndef GSM_CALIBRATE_H
 #define GSM_CALIBRATE_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,11 +15,11 @@ extern "C" {
 #include "sdr_backend.h"
 
 typedef struct {
-    int    success;           // 1 if calibration succeeded
+    int32_t    success;           // 1 if calibration succeeded
     double corrected_ppm;     // final corrected PPM value (current + offset)
     double measured_offset;   // measured PPM offset from current setting
     double rms;               // RMS of measurements (lower = more consistent)
-    int    samples;           // number of valid measurements used
+    int32_t    samples;           // number of valid measurements used
     char   error[256];        // error/warning message
 } gsm_cal_result_t;
 
@@ -28,7 +29,7 @@ typedef struct {
 // current_ppm: current PPM correction setting
 // gain_db:     tuner gain in dB (e.g. 49.6)
 // backend:     which backend library to use (AUTO/RTLSDR/SDRGG)
-gsm_cal_result_t gsm_calibrate(const char *serial, int current_ppm, float gain_db,
+gsm_cal_result_t gsm_calibrate(const char *serial, int32_t current_ppm, float gain_db,
                                 sdr_backend_type_t backend);
 
 #ifdef __cplusplus

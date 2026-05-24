@@ -22,6 +22,7 @@
 // option) any later version.
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -72,7 +73,7 @@
 
 // ======================== Country code table ========================
 
-static const struct { int code; const char *name; } country_table[] = {
+static const struct { int32_t code; const char *name; } country_table[] = {
     // Europe 201-279
     {201,"Albania"},{203,"Austria"},{205,"Belgium"},{206,"Belarus"},
     {207,"Bulgaria"},{209,"Cyprus"},{211,"Germany"},{213,"Georgia"},
@@ -154,7 +155,7 @@ struct sarsat_state {
     float prev_i, prev_q;
 
     // Decimation counter
-    int decim_count;
+    int32_t decim_count;
     float decim_accum;
 
     // DC removal (single-pole IIR)
@@ -170,15 +171,15 @@ struct sarsat_state {
     float prev_sample;
 
     // Biphase-L decoder
-    int half_sym_buf[MAX_FRAME_BITS * 2 + 48]; // half-symbol buffer
-    int half_sym_count;
+    int32_t half_sym_buf[MAX_FRAME_BITS * 2 + 48]; // half-symbol buffer
+    int32_t half_sym_count;
     bool in_burst;
-    int idle_count;        // consecutive low-energy samples
+    int32_t idle_count;        // consecutive low-energy samples
 
     // Lowpass filter
     float lpf_coeffs[SARSAT_LPF_TAPS];
     float lpf_hist[SARSAT_LPF_TAPS];
-    int   lpf_idx;
+    int32_t   lpf_idx;
 
     // Statistics
     sarsat_stats_t stats;
@@ -188,17 +189,17 @@ struct sarsat_state {
 
 static void sarsat_init_lpf(struct sarsat_state *st);
 static float sarsat_apply_lpf(struct sarsat_state *st, float sample);
-static void sarsat_process_half_symbol(struct sarsat_state *st, int level);
+static void sarsat_process_half_symbol(struct sarsat_state *st, int32_t level);
 static void sarsat_try_decode(struct sarsat_state *st);
-static bool sarsat_decode_frame(const uint8_t *bits, int nbits, bool is_test,
+static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test,
                                 sarsat_msg_t *msg);
-static uint32_t bch_syndrome(const uint8_t *bits, int n, uint32_t poly, int deg);
-static bool bch_correct(uint8_t *bits, int n, uint32_t poly, int deg,
-                        int max_errors, int *corrected);
+static uint32_t bch_syndrome(const uint8_t *bits, int32_t n, uint32_t poly, int32_t deg);
+static bool bch_correct(uint8_t *bits, int32_t n, uint32_t poly, int32_t deg,
+                        int32_t max_errors, int32_t *corrected);
 static void sarsat_decode_identification(const uint8_t *frame, sarsat_msg_t *msg);
 static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg);
-static uint32_t bits_to_int(const uint8_t *bits, int start, int len);
-static void bits_to_hex(const uint8_t *bits, int start, int nbits, char *out);
+static uint32_t bits_to_int(const uint8_t *bits, int32_t start, int32_t len);
+static void bits_to_hex(const uint8_t *bits, int32_t start, int32_t nbits, char *out);
 
 // ======================== Create / Destroy ========================
 
@@ -239,10 +240,10 @@ static void sarsat_init_lpf(struct sarsat_state *st)
     // Blackman-windowed sinc LPF
     // Cutoff at ~2 kHz (well above 400 baud, below Nyquist of 20 kHz)
     double fc = 2000.0 / SARSAT_IF_RATE;  // normalized cutoff
-    int M = SARSAT_LPF_TAPS - 1;
+    int32_t M = SARSAT_LPF_TAPS - 1;
     double sum = 0;
 
-    for (int i = 0; i < SARSAT_LPF_TAPS; i++) {
+    for (int32_t i = 0; i < SARSAT_LPF_TAPS; i++) {
         double n = i - M / 2.0;
         double sinc = (fabs(n) < 1e-6) ? 1.0 : sin(2.0 * M_PI * fc * n) / (M_PI * n);
         // Blackman window
@@ -251,7 +252,7 @@ static void sarsat_init_lpf(struct sarsat_state *st)
         sum += st->lpf_coeffs[i];
     }
     // Normalize
-    for (int i = 0; i < SARSAT_LPF_TAPS; i++)
+    for (int32_t i = 0; i < SARSAT_LPF_TAPS; i++)
         st->lpf_coeffs[i] /= (float)sum;
 
     memset(st->lpf_hist, 0, sizeof(st->lpf_hist));
@@ -262,8 +263,8 @@ static float sarsat_apply_lpf(struct sarsat_state *st, float sample)
 {
     st->lpf_hist[st->lpf_idx] = sample;
     float out = 0;
-    int idx = st->lpf_idx;
-    for (int i = 0; i < SARSAT_LPF_TAPS; i++) {
+    int32_t idx = st->lpf_idx;
+    for (int32_t i = 0; i < SARSAT_LPF_TAPS; i++) {
         out += st->lpf_coeffs[i] * st->lpf_hist[idx];
         if (--idx < 0) idx = SARSAT_LPF_TAPS - 1;
     }
@@ -343,7 +344,7 @@ void sarsat_process(struct sarsat_state *state, const uint8_t *iq_data, uint32_t
             if (state->pll_phase >= state->pll_freq) {
                 state->pll_phase -= state->pll_freq;
                 // Sample at the center of the half-symbol
-                int level = (normalized > 0) ? 1 : 0;
+                int32_t level = (normalized > 0) ? 1 : 0;
                 sarsat_process_half_symbol(state, level);
             }
         }
@@ -352,7 +353,7 @@ void sarsat_process(struct sarsat_state *state, const uint8_t *iq_data, uint32_t
 
 // ======================== Half-symbol processing ========================
 
-static void sarsat_process_half_symbol(struct sarsat_state *st, int level)
+static void sarsat_process_half_symbol(struct sarsat_state *st, int32_t level)
 {
     // Burst detection: track if we're in a signal burst
     if (!st->in_burst) {
@@ -364,11 +365,11 @@ static void sarsat_process_half_symbol(struct sarsat_state *st, int level)
         // In Biphase-L, a constant '1' bit produces alternating 1,0,1,0...
         // The preamble is 15 continuous 1-bits → 30 half-syms: 1,0,1,0,...
         if (st->half_sym_count >= 30) {
-            int transitions = 0;
-            int base = st->half_sym_count - 30;
-            for (int i = 0; i < 29; i++) {
-                int idx1 = (base + i)     % (MAX_FRAME_BITS * 2 + 48);
-                int idx2 = (base + i + 1) % (MAX_FRAME_BITS * 2 + 48);
+            int32_t transitions = 0;
+            int32_t base = st->half_sym_count - 30;
+            for (int32_t i = 0; i < 29; i++) {
+                int32_t idx1 = (base + i)     % (MAX_FRAME_BITS * 2 + 48);
+                int32_t idx2 = (base + i + 1) % (MAX_FRAME_BITS * 2 + 48);
                 if (st->half_sym_buf[idx1] != st->half_sym_buf[idx2])
                     transitions++;
             }
@@ -377,8 +378,8 @@ static void sarsat_process_half_symbol(struct sarsat_state *st, int level)
                 st->in_burst = true;
                 // Reset: start collecting from here
                 // Copy the last 30 half-syms to the beginning
-                for (int i = 0; i < 30; i++) {
-                    int src = (base + i) % (MAX_FRAME_BITS * 2 + 48);
+                for (int32_t i = 0; i < 30; i++) {
+                    int32_t src = (base + i) % (MAX_FRAME_BITS * 2 + 48);
                     st->half_sym_buf[i] = st->half_sym_buf[src];
                 }
                 st->half_sym_count = 30;
@@ -414,13 +415,13 @@ static void sarsat_try_decode(struct sarsat_state *st)
 {
     // Convert half-symbols to Biphase-L bits
     // Biphase-L: 1 → high-low (1,0), 0 → low-high (0,1)
-    int n_half = st->half_sym_count;
+    int32_t n_half = st->half_sym_count;
     uint8_t bits[MAX_FRAME_BITS];
-    int n_bits = 0;
+    int32_t n_bits = 0;
 
-    for (int i = 0; i + 1 < n_half && n_bits < MAX_FRAME_BITS; i += 2) {
-        int first  = st->half_sym_buf[i];
-        int second = st->half_sym_buf[i + 1];
+    for (int32_t i = 0; i + 1 < n_half && n_bits < MAX_FRAME_BITS; i += 2) {
+        int32_t first  = st->half_sym_buf[i];
+        int32_t second = st->half_sym_buf[i + 1];
         if (first == 1 && second == 0) {
             bits[n_bits++] = 1;
         } else if (first == 0 && second == 1) {
@@ -432,17 +433,17 @@ static void sarsat_try_decode(struct sarsat_state *st)
     }
 
     if (n_bits < SARSAT_PREAMBLE_LEN + SARSAT_FRAMESYNC_LEN + 82) {
-        return;  // Not enough bits for even a short message
+        return;  // Not enough bits for even a int16_t message
     }
 
     // Search for frame sync pattern after preamble
     // Preamble length varies: 20-64+ bits in the buffer after burst detection
     // Only require minimum data for short format (9 sync + 82 data = 91 bits)
-    for (int start = 0; start + SARSAT_FRAMESYNC_LEN + 82 <= n_bits && start < 100; start++) {
+    for (int32_t start = 0; start + SARSAT_FRAMESYNC_LEN + 82 <= n_bits && start < 100; start++) {
         // Check preamble: expect ~15 ones before frame sync
-        int ones = 0;
-        int pream_start = (start >= SARSAT_PREAMBLE_LEN) ? start - SARSAT_PREAMBLE_LEN : 0;
-        for (int j = pream_start; j < start; j++) {
+        int32_t ones = 0;
+        int32_t pream_start = (start >= SARSAT_PREAMBLE_LEN) ? start - SARSAT_PREAMBLE_LEN : 0;
+        for (int32_t j = pream_start; j < start; j++) {
             if (bits[j] == 1) ones++;
         }
         if (ones < PREAMBLE_MIN_ONES && start >= SARSAT_PREAMBLE_LEN)
@@ -453,7 +454,7 @@ static void sarsat_try_decode(struct sarsat_state *st)
             continue;
 
         uint16_t sync = 0;
-        for (int j = 0; j < SARSAT_FRAMESYNC_LEN; j++) {
+        for (int32_t j = 0; j < SARSAT_FRAMESYNC_LEN; j++) {
             sync = (sync << 1) | bits[start + j];
         }
 
@@ -469,11 +470,11 @@ static void sarsat_try_decode(struct sarsat_state *st)
         st->stats.bursts_detected++;
 
         // Extract frame data bits (after sync)
-        int data_start = start + SARSAT_FRAMESYNC_LEN;
-        int data_avail = n_bits - data_start;
+        int32_t data_start = start + SARSAT_FRAMESYNC_LEN;
+        int32_t data_avail = n_bits - data_start;
         if (data_avail < 82) continue;  // Need at least PDF-1 + BCH-1
 
-        int frame_len = (data_avail >= 120) ? 120 : 82;
+        int32_t frame_len = (data_avail >= 120) ? 120 : 82;
         uint8_t frame[120];
         memcpy(frame, &bits[data_start], frame_len);
 
@@ -495,14 +496,14 @@ static void sarsat_try_decode(struct sarsat_state *st)
 
 // ======================== Frame decode + BCH ========================
 
-static bool sarsat_decode_frame(const uint8_t *bits, int nbits, bool is_test,
+static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test,
                                 sarsat_msg_t *msg)
 {
     memset(msg, 0, sizeof(*msg));
     msg->is_test = is_test;
 
     // Copy raw bits
-    int copy_len = (nbits > SARSAT_FRAME_BITS) ? SARSAT_FRAME_BITS : nbits;
+    int32_t copy_len = (nbits > SARSAT_FRAME_BITS) ? SARSAT_FRAME_BITS : nbits;
     memcpy(msg->raw_bits, bits, copy_len);
 
     // Bit 0 (bit 25 in full frame): Format flag  0=short, 1=long
@@ -517,7 +518,7 @@ static bool sarsat_decode_frame(const uint8_t *bits, int nbits, bool is_test,
         msg->bch1_valid = true;
         msg->bch1_errors = 0;
     } else {
-        int corrected = 0;
+        int32_t corrected = 0;
         if (bch_correct(bch1_block, BCH1_N, BCH1_POLY, BCH1_DEG, BCH1_T, &corrected)) {
             msg->bch1_valid = true;
             msg->bch1_errors = corrected;
@@ -543,7 +544,7 @@ static bool sarsat_decode_frame(const uint8_t *bits, int nbits, bool is_test,
             msg->bch2_valid = true;
             msg->bch2_errors = 0;
         } else {
-            int corrected = 0;
+            int32_t corrected = 0;
             if (bch_correct(bch2_block, BCH2_N, BCH2_POLY, BCH2_DEG, BCH2_T, &corrected)) {
                 msg->bch2_valid = true;
                 msg->bch2_errors = corrected;
@@ -566,10 +567,10 @@ static bool sarsat_decode_frame(const uint8_t *bits, int nbits, bool is_test,
 
 // ======================== BCH error correction ========================
 
-static uint32_t bch_syndrome(const uint8_t *bits, int n, uint32_t poly, int deg)
+static uint32_t bch_syndrome(const uint8_t *bits, int32_t n, uint32_t poly, int32_t deg)
 {
     uint32_t remainder = 0;
-    for (int i = 0; i < n; i++) {
+    for (int32_t i = 0; i < n; i++) {
         remainder = (remainder << 1) | bits[i];
         if (remainder & (1u << deg))
             remainder ^= poly;
@@ -577,13 +578,13 @@ static uint32_t bch_syndrome(const uint8_t *bits, int n, uint32_t poly, int deg)
     return remainder;
 }
 
-static bool bch_correct(uint8_t *bits, int n, uint32_t poly, int deg,
-                         int max_errors, int *corrected)
+static bool bch_correct(uint8_t *bits, int32_t n, uint32_t poly, int32_t deg,
+                         int32_t max_errors, int32_t *corrected)
 {
     *corrected = 0;
 
     // Try single-bit error correction
-    for (int i = 0; i < n; i++) {
+    for (int32_t i = 0; i < n; i++) {
         bits[i] ^= 1;
         if (bch_syndrome(bits, n, poly, deg) == 0) {
             *corrected = 1;
@@ -595,9 +596,9 @@ static bool bch_correct(uint8_t *bits, int n, uint32_t poly, int deg,
     if (max_errors < 2) return false;
 
     // Try double-bit error correction
-    for (int i = 0; i < n - 1; i++) {
+    for (int32_t i = 0; i < n - 1; i++) {
         bits[i] ^= 1;
-        for (int j = i + 1; j < n; j++) {
+        for (int32_t j = i + 1; j < n; j++) {
             bits[j] ^= 1;
             if (bch_syndrome(bits, n, poly, deg) == 0) {
                 *corrected = 2;
@@ -611,11 +612,11 @@ static bool bch_correct(uint8_t *bits, int n, uint32_t poly, int deg,
     if (max_errors < 3) return false;
 
     // Try triple-bit error correction
-    for (int i = 0; i < n - 2; i++) {
+    for (int32_t i = 0; i < n - 2; i++) {
         bits[i] ^= 1;
-        for (int j = i + 1; j < n - 1; j++) {
+        for (int32_t j = i + 1; j < n - 1; j++) {
             bits[j] ^= 1;
-            for (int k = j + 1; k < n; k++) {
+            for (int32_t k = j + 1; k < n; k++) {
                 bits[k] ^= 1;
                 if (bch_syndrome(bits, n, poly, deg) == 0) {
                     *corrected = 3;
@@ -633,20 +634,20 @@ static bool bch_correct(uint8_t *bits, int n, uint32_t poly, int deg,
 
 // ======================== Protocol field decoding ========================
 
-static uint32_t bits_to_int(const uint8_t *bits, int start, int len)
+static uint32_t bits_to_int(const uint8_t *bits, int32_t start, int32_t len)
 {
     uint32_t val = 0;
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         val = (val << 1) | bits[start + i];
     return val;
 }
 
-static void bits_to_hex(const uint8_t *bits, int start, int nbits, char *out)
+static void bits_to_hex(const uint8_t *bits, int32_t start, int32_t nbits, char *out)
 {
-    int pos = 0;
-    for (int i = 0; i < nbits; i += 4) {
+    int32_t pos = 0;
+    for (int32_t i = 0; i < nbits; i += 4) {
         uint8_t nibble = 0;
-        for (int j = 0; j < 4 && (i + j) < nbits; j++)
+        for (int32_t j = 0; j < 4 && (i + j) < nbits; j++)
             nibble = (nibble << 1) | bits[start + i + j];
         out[pos++] = "0123456789ABCDEF"[nibble];
     }
@@ -660,7 +661,7 @@ static void sarsat_decode_identification(const uint8_t *frame, sarsat_msg_t *msg
     bool user_protocol = (frame[1] == 1);
 
     // frame[2..11] = country code (bits 27-36, 10 bits)
-    msg->country_code = (int)bits_to_int(frame, 2, 10);
+    msg->country_code = (int32_t)bits_to_int(frame, 2, 10);
     const char *cname = sarsat_country_name(msg->country_code);
     strncpy(msg->country_name, cname, sizeof(msg->country_name) - 1);
 
@@ -764,8 +765,8 @@ static void sarsat_decode_identification(const uint8_t *frame, sarsat_msg_t *msg
         // Radio call sign: modified Baudot, up to 7 chars
         // Bits 41-82 = 42 bits → 7 × 6-bit chars
         char cs[8];
-        for (int i = 0; i < 7; i++) {
-            int code = (int)bits_to_int(frame, 16 + i * 6, 6);
+        for (int32_t i = 0; i < 7; i++) {
+            int32_t code = (int32_t)bits_to_int(frame, 16 + i * 6, 6);
             if (code >= 1 && code <= 26)
                 cs[i] = (char)(code + 'A' - 1);
             else if (code >= 27 && code <= 36)
@@ -777,7 +778,7 @@ static void sarsat_decode_identification(const uint8_t *frame, sarsat_msg_t *msg
         }
         cs[7] = '\0';
         // Trim trailing spaces
-        for (int i = 6; i >= 0 && cs[i] == ' '; i--)
+        for (int32_t i = 6; i >= 0 && cs[i] == ' '; i--)
             cs[i] = '\0';
         strncpy(msg->call_sign, cs, sizeof(msg->call_sign) - 1);
         break;
@@ -814,17 +815,17 @@ static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg)
     // Bits 59-60: Lon quarter-degrees (2 bits, 0-3, ×15 minutes)
 
     bool north = (frame[40] == 0);
-    int lat_deg = (int)bits_to_int(frame, 41, 7);
-    int lat_min_coarse = (int)bits_to_int(frame, 48, 2) * 15;
+    int32_t lat_deg = (int32_t)bits_to_int(frame, 41, 7);
+    int32_t lat_min_coarse = (int32_t)bits_to_int(frame, 48, 2) * 15;
 
     bool east = (frame[50] == 0);
-    int lon_deg = (int)bits_to_int(frame, 51, 8);
-    int lon_min_coarse = (int)bits_to_int(frame, 59, 2) * 15;
+    int32_t lon_deg = (int32_t)bits_to_int(frame, 51, 8);
+    int32_t lon_min_coarse = (int32_t)bits_to_int(frame, 59, 2) * 15;
 
-    int lat_min = lat_min_coarse;
-    int lat_sec = 0;
-    int lon_min = lon_min_coarse;
-    int lon_sec = 0;
+    int32_t lat_min = lat_min_coarse;
+    int32_t lat_sec = 0;
+    int32_t lon_min = lon_min_coarse;
+    int32_t lon_sec = 0;
 
     msg->position_from_gps = false;
     msg->homing_121_5 = false;
@@ -832,7 +833,7 @@ static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg)
     // Fine position from PDF-2 (bits 107-132 = frame[82..107])
     if (msg->long_message && msg->bch2_valid) {
         // PDF-2 starts at frame[82]
-        int pdf2 = 82;
+        int32_t pdf2 = 82;
 
         // Bits 0-3: type field, must be 0b1101 (0x0D) for position data
         uint8_t pdf2_type = (uint8_t)bits_to_int(frame, pdf2, 4);
@@ -847,8 +848,8 @@ static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg)
 
         // Latitude offset: sign(1) + minutes(5) + seconds/4(4)
         bool lat_offset_pos = (frame[pdf2 + 6] == 1);
-        int lat_min_offset = (int)bits_to_int(frame, pdf2 + 7, 5);
-        int lat_sec_4 = (int)bits_to_int(frame, pdf2 + 12, 4);
+        int32_t lat_min_offset = (int32_t)bits_to_int(frame, pdf2 + 7, 5);
+        int32_t lat_sec_4 = (int32_t)bits_to_int(frame, pdf2 + 12, 4);
 
         lat_min = lat_min_coarse + (lat_offset_pos ? lat_min_offset : -lat_min_offset);
         if (lat_min < 0) { lat_min += 60; lat_deg--; }
@@ -857,8 +858,8 @@ static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg)
 
         // Longitude offset: sign(1) + minutes(5) + seconds/4(4)
         bool lon_offset_pos = (frame[pdf2 + 16] == 1);
-        int lon_min_offset = (int)bits_to_int(frame, pdf2 + 17, 5);
-        int lon_sec_4 = (int)bits_to_int(frame, pdf2 + 22, 4);
+        int32_t lon_min_offset = (int32_t)bits_to_int(frame, pdf2 + 17, 5);
+        int32_t lon_sec_4 = (int32_t)bits_to_int(frame, pdf2 + 22, 4);
 
         lon_min = lon_min_coarse + (lon_offset_pos ? lon_min_offset : -lon_min_offset);
         if (lon_min < 0) { lon_min += 60; lon_deg--; }
@@ -926,9 +927,9 @@ const char *sarsat_protocol_name(sarsat_protocol_t proto)
     }
 }
 
-const char *sarsat_country_name(int mid)
+const char *sarsat_country_name(int32_t mid)
 {
-    for (int i = 0; country_table[i].name != NULL; i++) {
+    for (int32_t i = 0; country_table[i].name != NULL; i++) {
         if (country_table[i].code == mid)
             return country_table[i].name;
     }

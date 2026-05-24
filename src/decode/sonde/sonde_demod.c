@@ -24,6 +24,7 @@
 // Based on RS41 protocol analysis by rs1729 and radiosonde_auto_rx project.
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -126,7 +127,7 @@ struct sonde_channel {
     // NCO (complex oscillator for frequency shifting)
     float nco_i, nco_q;      // current phasor (unit complex number)
     float nco_di, nco_dq;    // rotation per raw sample
-    int   nco_count;          // sample counter for normalization
+    int32_t   nco_count;          // sample counter for normalization
 
     // Decimation accumulators (shares decim_count with main)
     float decim_accum_i, decim_accum_q;
@@ -134,7 +135,7 @@ struct sonde_channel {
     // IQ lowpass filter (complex, at IF rate, for channel isolation)
     float iq_buf_i[SONDE_IQ_TAPS];
     float iq_buf_q[SONDE_IQ_TAPS];
-    int   iq_idx;
+    int32_t   iq_idx;
     float iq_coeff[SONDE_IQ_TAPS];
 
     // FM discriminator state
@@ -150,7 +151,7 @@ struct sonde_channel {
 
     // LPF state (shares coefficients with main)
     float lpf_buf[SONDE_LPF_TAPS];
-    int   lpf_idx;
+    int32_t   lpf_idx;
 
     // Pre-LPF FM output (DC-removed, before lowpass)
     float fm_raw;
@@ -194,19 +195,19 @@ static const uint8_t rs41_whitening[] = {
 
 static uint8_t gf_exp[512];  // Double-sized for modular reduction
 static uint8_t gf_log[256];
-static int gf_initialized = 0;
+static int32_t gf_initialized = 0;
 
 static void gf_init(void)
 {
     if (gf_initialized) return;
-    int x = 1;
-    for (int i = 0; i < 255; i++) {
+    int32_t x = 1;
+    for (int32_t i = 0; i < 255; i++) {
         gf_exp[i] = (uint8_t)x;
         gf_log[x] = (uint8_t)i;
         x <<= 1;
         if (x & 0x100) x ^= GF_POLY;
     }
-    for (int i = 255; i < 512; i++)
+    for (int32_t i = 255; i < 512; i++)
         gf_exp[i] = gf_exp[i - 255];
     gf_log[0] = 0;
     gf_initialized = 1;
@@ -224,7 +225,7 @@ static inline uint8_t gf_div(uint8_t a, uint8_t b)
     return gf_exp[(gf_log[a] + 255 - gf_log[b]) % 255];
 }
 
-static inline uint8_t gf_pow(uint8_t a, int n)
+static inline uint8_t gf_pow(uint8_t a, int32_t n)
 {
     if (a == 0) return 0;
     return gf_exp[(gf_log[a] * n) % 255];
@@ -234,12 +235,12 @@ static inline uint8_t gf_pow(uint8_t a, int n)
 
 // Compute syndromes S[i] = sum_j data[j] * alpha^(i*j)  (ascending polynomial)
 // Returns 1 if all syndromes are zero (no errors)
-static int rs_syndromes(const uint8_t *data, int len, uint8_t *syn)
+static int32_t rs_syndromes(const uint8_t *data, int32_t len, uint8_t *syn)
 {
-    int all_zero = 1;
-    for (int i = 0; i < RS_NROOTS; i++) {
+    int32_t all_zero = 1;
+    for (int32_t i = 0; i < RS_NROOTS; i++) {
         uint8_t s = 0;
-        for (int j = len - 1; j >= 0; j--)
+        for (int32_t j = len - 1; j >= 0; j--)
             s = gf_mul(s, gf_exp[i]) ^ data[j];
         syn[i] = s;
         if (s != 0) all_zero = 0;
@@ -248,7 +249,7 @@ static int rs_syndromes(const uint8_t *data, int len, uint8_t *syn)
 }
 
 // Berlekamp-Massey: find error locator polynomial sigma(x)
-static int rs_berlekamp_massey(const uint8_t *syn, uint8_t *sigma)
+static int32_t rs_berlekamp_massey(const uint8_t *syn, uint8_t *sigma)
 {
     uint8_t C[RS_NROOTS + 1];
     uint8_t B[RS_NROOTS + 1];
@@ -256,12 +257,12 @@ static int rs_berlekamp_massey(const uint8_t *syn, uint8_t *sigma)
     memset(B, 0, sizeof(B));
     C[0] = 1;
     B[0] = 1;
-    int L = 0, m = 1;
+    int32_t L = 0, m = 1;
     uint8_t b = 1;
 
-    for (int n = 0; n < RS_NROOTS; n++) {
+    for (int32_t n = 0; n < RS_NROOTS; n++) {
         uint8_t d = syn[n];
-        for (int i = 1; i <= L; i++)
+        for (int32_t i = 1; i <= L; i++)
             d ^= gf_mul(C[i], syn[n - i]);
 
         if (d == 0) {
@@ -270,7 +271,7 @@ static int rs_berlekamp_massey(const uint8_t *syn, uint8_t *sigma)
             uint8_t T[RS_NROOTS + 1];
             memcpy(T, C, sizeof(T));
             uint8_t coef = gf_div(d, b);
-            for (int i = m; i <= RS_NROOTS; i++)
+            for (int32_t i = m; i <= RS_NROOTS; i++)
                 C[i] ^= gf_mul(coef, B[i - m]);
             L = n + 1 - L;
             memcpy(B, T, sizeof(B));
@@ -278,7 +279,7 @@ static int rs_berlekamp_massey(const uint8_t *syn, uint8_t *sigma)
             m = 1;
         } else {
             uint8_t coef = gf_div(d, b);
-            for (int i = m; i <= RS_NROOTS; i++)
+            for (int32_t i = m; i <= RS_NROOTS; i++)
                 C[i] ^= gf_mul(coef, B[i - m]);
             m++;
         }
@@ -291,16 +292,16 @@ static int rs_berlekamp_massey(const uint8_t *syn, uint8_t *sigma)
 // Chien search: find error locations
 // Search all 255 nonzero GF elements.
 // sigma(alpha^m) = 0  =>  error at position j = (255 - m) % 255
-static int rs_chien_search(const uint8_t *sigma, int deg, int n,
-                           int *positions, int *roots)
+static int32_t rs_chien_search(const uint8_t *sigma, int32_t deg, int32_t n,
+                           int32_t *positions, int32_t *roots)
 {
-    int count = 0;
-    for (int m = 0; m < 255; m++) {
+    int32_t count = 0;
+    for (int32_t m = 0; m < 255; m++) {
         uint8_t val = 1;
-        for (int j = 1; j <= deg; j++)
+        for (int32_t j = 1; j <= deg; j++)
             val ^= gf_mul(sigma[j], gf_exp[(m * j) % 255]);
         if (val == 0) {
-            int pos = (255 - m) % 255;
+            int32_t pos = (255 - m) % 255;
             if (pos >= 0 && pos < n) {
                 positions[count] = pos;
                 roots[count] = m;
@@ -315,26 +316,26 @@ static int rs_chien_search(const uint8_t *sigma, int deg, int n,
 // Forney algorithm: compute error magnitudes
 // roots[k] = Chien search index m where sigma(alpha^m) = 0
 // Xi_inv = alpha^m, X_k = Xi_inv^(-1) = alpha^(255-m)
-static void rs_forney(const uint8_t *syn, const uint8_t *sigma, int deg,
-                      const int *roots, int num_errors, uint8_t *magnitudes)
+static void rs_forney(const uint8_t *syn, const uint8_t *sigma, int32_t deg,
+                      const int32_t *roots, int32_t num_errors, uint8_t *magnitudes)
 {
     // Error evaluator: omega(x) = S(x)*sigma(x) mod x^2t
     uint8_t omega[RS_NROOTS];
     memset(omega, 0, sizeof(omega));
-    for (int i = 0; i < RS_NROOTS; i++) {
+    for (int32_t i = 0; i < RS_NROOTS; i++) {
         uint8_t v = 0;
-        for (int j = 0; j <= deg && j <= i; j++)
+        for (int32_t j = 0; j <= deg && j <= i; j++)
             v ^= gf_mul(sigma[j], syn[i - j]);
         omega[i] = v;
     }
 
-    for (int k = 0; k < num_errors; k++) {
+    for (int32_t k = 0; k < num_errors; k++) {
         uint8_t Xi_inv = gf_exp[roots[k]];  // alpha^m
 
         // Evaluate omega(Xi_inv)
         uint8_t O = 0;
         uint8_t xi_pow = 1;
-        for (int i = 0; i < RS_NROOTS; i++) {
+        for (int32_t i = 0; i < RS_NROOTS; i++) {
             O ^= gf_mul(omega[i], xi_pow);
             xi_pow = gf_mul(xi_pow, Xi_inv);
         }
@@ -342,7 +343,7 @@ static void rs_forney(const uint8_t *syn, const uint8_t *sigma, int deg,
         // Evaluate sigma'(Xi_inv) — formal derivative (odd-degree terms only)
         uint8_t Sp = 0;
         xi_pow = 1;
-        for (int i = 1; i <= deg; i += 2) {
+        for (int32_t i = 1; i <= deg; i += 2) {
             Sp ^= gf_mul(sigma[i], xi_pow);
             xi_pow = gf_mul(xi_pow, gf_mul(Xi_inv, Xi_inv));
         }
@@ -358,7 +359,7 @@ static void rs_forney(const uint8_t *syn, const uint8_t *sigma, int deg,
 
 // Full RS decode: correct errors in data[0..len-1]
 // Returns number of errors corrected, or -1 if uncorrectable
-static int rs_decode(uint8_t *data, int len)
+static int32_t rs_decode(uint8_t *data, int32_t len)
 {
     uint8_t syn[RS_NROOTS];
 
@@ -366,13 +367,13 @@ static int rs_decode(uint8_t *data, int len)
         return 0;  // No errors
 
     uint8_t sigma[RS_NROOTS + 1];
-    int deg = rs_berlekamp_massey(syn, sigma);
+    int32_t deg = rs_berlekamp_massey(syn, sigma);
 
     if (deg > RS_T)
         return -1;  // Too many errors
 
-    int positions[RS_T], roots[RS_T];
-    int num_errors = rs_chien_search(sigma, deg, len, positions, roots);
+    int32_t positions[RS_T], roots[RS_T];
+    int32_t num_errors = rs_chien_search(sigma, deg, len, positions, roots);
 
     if (num_errors != deg)
         return -1;  // Chien search didn't find all roots
@@ -380,7 +381,7 @@ static int rs_decode(uint8_t *data, int len)
     uint8_t magnitudes[RS_T];
     rs_forney(syn, sigma, deg, roots, num_errors, magnitudes);
 
-    for (int i = 0; i < num_errors; i++) {
+    for (int32_t i = 0; i < num_errors; i++) {
         if (positions[i] >= 0 && positions[i] < len)
             data[positions[i]] ^= magnitudes[i];
     }
@@ -396,7 +397,7 @@ static int rs_decode(uint8_t *data, int len)
 //   [48..311]: Data (264 bytes): CW1=even positions (48,50,...,310), CW2=odd (49,51,...,311)
 //   [312..319]: Extra bytes beyond valid frame (ignored)
 // Codeword layout for RS decoder: [parity(24) | data(132)] = 156 bytes
-static int rs41_rs_correct(uint8_t *frame, int len)
+static int32_t rs41_rs_correct(uint8_t *frame, int32_t len)
 {
     if (len < 64) return -1;
     gf_init();
@@ -405,8 +406,8 @@ static int rs41_rs_correct(uint8_t *frame, int len)
     //   CW0 = frame[0,2,4,...,310] (156 even-indexed bytes)
     //   CW1 = frame[1,3,5,...,311] (156 odd-indexed bytes)
     // Each codeword: first 24 bytes = parity, next 132 bytes = data
-    int cw_len = 156;
-    int frame_rs_len = 312;  // 2 × 156
+    int32_t cw_len = 156;
+    int32_t frame_rs_len = 312;  // 2 × 156
     if (frame_rs_len > len) frame_rs_len = len & ~1;  // round down to even
     cw_len = frame_rs_len / 2;
 
@@ -415,21 +416,21 @@ static int rs41_rs_correct(uint8_t *frame, int len)
     if (!cw0 || !cw1) { free(cw0); free(cw1); return -1; }
 
     // De-interleave: even bytes → CW0, odd bytes → CW1
-    for (int i = 0; i < cw_len; i++) {
+    for (int32_t i = 0; i < cw_len; i++) {
         cw0[i] = frame[2 * i];
         cw1[i] = frame[2 * i + 1];
     }
 
-    int err0 = rs_decode(cw0, cw_len);
-    int err1 = rs_decode(cw1, cw_len);
+    int32_t err0 = rs_decode(cw0, cw_len);
+    int32_t err1 = rs_decode(cw1, cw_len);
 
     // Write back corrected bytes
     if (err0 >= 0) {
-        for (int i = 0; i < cw_len; i++)
+        for (int32_t i = 0; i < cw_len; i++)
             frame[2 * i] = cw0[i];
     }
     if (err1 >= 0) {
-        for (int i = 0; i < cw_len; i++)
+        for (int32_t i = 0; i < cw_len; i++)
             frame[2 * i + 1] = cw1[i];
     }
 
@@ -445,14 +446,14 @@ static int rs41_rs_correct(uint8_t *frame, int len)
 // Used to verify each RS41 sub-block
 
 static uint16_t crc16_table[256];
-static int crc16_init_done = 0;
+static int32_t crc16_init_done = 0;
 
 static void crc16_init(void)
 {
     if (crc16_init_done) return;
-    for (int i = 0; i < 256; i++) {
+    for (int32_t i = 0; i < 256; i++) {
         uint16_t crc = (uint16_t)(i << 8);
-        for (int j = 0; j < 8; j++) {
+        for (int32_t j = 0; j < 8; j++) {
             if (crc & 0x8000)
                 crc = (uint16_t)((crc << 1) ^ 0x1021);
             else
@@ -463,10 +464,10 @@ static void crc16_init(void)
     crc16_init_done = 1;
 }
 
-static uint16_t crc16_ccitt(const uint8_t *data, int len)
+static uint16_t crc16_ccitt(const uint8_t *data, int32_t len)
 {
     uint16_t crc = 0xFFFF;
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         crc = (uint16_t)((crc << 8) ^ crc16_table[((crc >> 8) ^ data[i]) & 0xFF]);
     return crc;
 }
@@ -474,7 +475,7 @@ static uint16_t crc16_ccitt(const uint8_t *data, int len)
 // Verify CRC of an RS41 subblock
 // Format: ID(1) + LEN(1) + data(LEN) + CRC(2)
 // CRC covers ID + LEN + data (everything except the 2-byte CRC itself), stored little-endian
-static bool __attribute__((unused)) rs41_check_block_crc(const uint8_t *block, int block_total_len)
+static bool __attribute__((unused)) rs41_check_block_crc(const uint8_t *block, int32_t block_total_len)
 {
     if (block_total_len < 4) return false;
     uint16_t stored_crc = (uint16_t)(block[block_total_len - 2] |
@@ -487,9 +488,9 @@ static bool __attribute__((unused)) rs41_check_block_crc(const uint8_t *block, i
 // XOR de-whitening with offset 8 (frame data starts at position 8 in full packet)
 // Reference: rs1729/rs41mod.c uses mask[byte_count % 64] where byte_count starts at FRAMESTART=8
 
-static void __attribute__((unused)) rs41_dewhiten(uint8_t *frame, int len)
+static void __attribute__((unused)) rs41_dewhiten(uint8_t *frame, int32_t len)
 {
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         frame[i] ^= rs41_whitening[(i + 8) % RS41_WHITENING_LEN];
 }
 
@@ -517,7 +518,7 @@ static void __attribute__((unused)) ecef_to_lla(double x, double y, double z,
     double p = sqrt(x * x + y * y);
     double lat = atan2(z, p * (1.0 - e2));
 
-    for (int i = 0; i < 5; i++) {
+    for (int32_t i = 0; i < 5; i++) {
         double sin_lat = sin(lat);
         double N = a / sqrt(1.0 - e2 * sin_lat * sin_lat);
         lat = atan2(z + e2 * N * sin_lat, p);
@@ -549,18 +550,18 @@ static const uint8_t dfm_He[8] = {0x7, 0xB, 0xD, 0xE, 0x8, 0x4, 0x2, 0x1};
 
 // Check/correct one Hamming(8,4) codeword (8 bits → 4 data + 4 parity)
 // Returns: 0=no error, 1=corrected 1-bit error, -1=uncorrectable
-static int dfm_hamming_check(uint8_t code[8])
+static int32_t dfm_hamming_check(uint8_t code[8])
 {
     uint8_t syndrom[4];
     uint32_t synval;
-    for (int i = 0; i < 4; i++) {
+    for (int32_t i = 0; i < 4; i++) {
         syndrom[i] = 0;
-        for (int j = 0; j < 8; j++)
+        for (int32_t j = 0; j < 8; j++)
             syndrom[i] ^= dfm_H[i][j] & code[j];
     }
     synval = (uint32_t)((syndrom[0]<<3) | (syndrom[1]<<2) | (syndrom[2]<<1) | syndrom[3]);
     if (synval == 0) return 0;
-    for (int j = 0; j < 8; j++) {
+    for (int32_t j = 0; j < 8; j++) {
         if (synval == dfm_He[j]) {
             code[j] ^= 1;
             return 1;
@@ -570,44 +571,44 @@ static int dfm_hamming_check(uint8_t code[8])
 }
 
 // Deinterleave DFM bit block: str[L*8] → block[L*8]
-static void dfm_deinterleave(const uint8_t *str, int L, uint8_t *block)
+static void dfm_deinterleave(const uint8_t *str, int32_t L, uint8_t *block)
 {
-    for (int j = 0; j < 8; j++)
-        for (int i = 0; i < L; i++)
+    for (int32_t j = 0; j < 8; j++)
+        for (int32_t i = 0; i < L; i++)
             block[8*i+j] = str[L*j+i];
 }
 
 // Hamming decode L codewords from interleaved data, extract data nibbles
 // Returns: 0=OK, >0=corrected bits, -1=uncorrectable
-static int dfm_hamming_decode(const uint8_t *raw_bits, int L, uint8_t *data_bits)
+static int32_t dfm_hamming_decode(const uint8_t *raw_bits, int32_t L, uint8_t *data_bits)
 {
     uint8_t block[13*8]; // max L=13
-    int ret = 0;
+    int32_t ret = 0;
     dfm_deinterleave(raw_bits, L, block);
-    for (int i = 0; i < L; i++) {
-        int ec = dfm_hamming_check(&block[8*i]);
+    for (int32_t i = 0; i < L; i++) {
+        int32_t ec = dfm_hamming_check(&block[8*i]);
         if (ec > 0) ret |= (1 << i);
         if (ec < 0) return -1;
-        for (int j = 0; j < 4; j++)
+        for (int32_t j = 0; j < 4; j++)
             data_bits[4*i+j] = block[8*i+j]; // systematic: data in bits 0..3
     }
     return ret;
 }
 
 // Convert DFM bit array to integer (big endian, MSB first)
-static uint32_t dfm_bits2val(const uint8_t *bits, int len)
+static uint32_t dfm_bits2val(const uint8_t *bits, int32_t len)
 {
     uint32_t val = 0;
-    for (int j = 0; j < len && j < 32; j++)
+    for (int32_t j = 0; j < len && j < 32; j++)
         val |= ((uint32_t)(bits[j] & 1)) << (len-1-j);
     return val;
 }
 
 // ======================== M10 Checksum ========================
 
-static int m10_update_check(int c, uint8_t b)
+static int32_t m10_update_check(int32_t c, uint8_t b)
 {
-    int c0, c1, t, t6, t7, s;
+    int32_t c0, c1, t, t6, t7, s;
     c1 = c & 0xFF;
     b = (uint8_t)((b >> 1) | ((b & 1) << 7));
     b ^= (b >> 2) & 0xFF;
@@ -620,20 +621,20 @@ static int m10_update_check(int c, uint8_t b)
     return ((c1 << 8) | c0) & 0xFFFF;
 }
 
-static int m10_checksum(const uint8_t *msg, int len)
+static int32_t m10_checksum(const uint8_t *msg, int32_t len)
 {
-    int cs = 0;
-    for (int i = 0; i < len; i++)
+    int32_t cs = 0;
+    for (int32_t i = 0; i < len; i++)
         cs = m10_update_check(cs, msg[i]);
     return cs & 0xFFFF;
 }
 
 // Convert M10 decoded bits (0/1 uint8_t) to bytes (big endian)
-static void m10_bits2bytes(const uint8_t *bits, uint8_t *bytes, int nbytes)
+static void m10_bits2bytes(const uint8_t *bits, uint8_t *bytes, int32_t nbytes)
 {
-    for (int bp = 0; bp < nbytes; bp++) {
-        int val = 0;
-        for (int i = 0; i < 8; i++) {
+    for (int32_t bp = 0; bp < nbytes; bp++) {
+        int32_t val = 0;
+        for (int32_t i = 0; i < 8; i++) {
             if (bits[bp * 8 + 7 - i]) val |= (1 << i);
         }
         bytes[bp] = (uint8_t)val;
@@ -641,16 +642,16 @@ static void m10_bits2bytes(const uint8_t *bits, uint8_t *bytes, int nbytes)
 }
 
 // GPS Week+Seconds to calendar date (from rs1729)
-static void m10_gps2date(int week, int tow, int *year, int *month, int *day)
+static void m10_gps2date(int32_t week, int32_t tow, int32_t *year, int32_t *month, int32_t *day)
 {
-    long GpsDays = (long)week * 7 + (tow / 86400);
-    long Mjd = 44244 + GpsDays;
-    long J = Mjd + 2468570;
-    long C = 4 * J / 146097;
+    int64_t GpsDays = (int64_t)week * 7 + (tow / 86400);
+    int64_t Mjd = 44244 + GpsDays;
+    int64_t J = Mjd + 2468570;
+    int64_t C = 4 * J / 146097;
     J = J - (146097 * C + 3) / 4;
-    long Y = 4000 * (J + 1) / 1461001;
+    int64_t Y = 4000 * (J + 1) / 1461001;
     J = J - 1461 * Y / 4 + 31;
-    long M = 80 * J / 2447;
+    int64_t M = 80 * J / 2447;
     *day = (int)(J - 2447 * M / 80);
     J = M / 11;
     *month = (int)(M + 2 - 12 * J);
@@ -667,13 +668,13 @@ struct sonde_state {
     float    prev_dq;
 
     // Decimation
-    int      decim_count;
+    int32_t      decim_count;
     float    decim_accum_i;
     float    decim_accum_q;
 
     // FM output lowpass filter
     float    lpf_buf[SONDE_LPF_TAPS];
-    int      lpf_idx;
+    int32_t      lpf_idx;
     float    lpf_coeff[SONDE_LPF_TAPS];
 
     // DFM dedicated lowpass filter (narrower cutoff for 2500 baud signal)
@@ -689,7 +690,7 @@ struct sonde_state {
     float    bit_accum;
     float    prev_sample;
     float    prev_prev_sample;
-    int      bit_samples;
+    int32_t      bit_samples;
     float    last_bit_mag;   // DEBUG: magnitude of last bit decision
 
     // Syncword detection
@@ -698,15 +699,15 @@ struct sonde_state {
     // Lookback bit buffer (circular) — stores raw bits for extraction BEFORE sync
     #define LOOKBACK_BITS  4096   // Must be power of 2
     uint8_t  bit_buf[LOOKBACK_BITS / 8];  // packed bits, 512 bytes
-    int      bit_buf_pos;         // Current write position (bit index)
+    int32_t      bit_buf_pos;         // Current write position (bit index)
 
     // Frame assembly
-    int      in_frame;
-    int      invert_bits;       // 1 if inverted-polarity sync detected
-    int      frame_bit_count;
+    int32_t      in_frame;
+    int32_t      invert_bits;       // 1 if inverted-polarity sync detected
+    int32_t      frame_bit_count;
     uint8_t  frame_buf[SONDE_FRAME_LEN + 4];
-    int      frame_byte_idx;
-    int      frame_bit_idx;
+    int32_t      frame_byte_idx;
+    int32_t      frame_bit_idx;
 
     // Stats
     sonde_stats_t stats;
@@ -717,25 +718,25 @@ struct sonde_state {
         float    bit_freq;     // SPS at Manchester symbol rate
         float    bit_accum;
         float    prev_filtered; // for zero-crossing bit clock recovery
-        int      bit_samples;
+        int32_t      bit_samples;
         uint32_t shift_reg;
-        int      in_frame;
-        int      invert;
-        int      sym_count;    // 0=first half, 1=second half (data)
-        int      frame_pos;    // current decoded bit position
+        int32_t      in_frame;
+        int32_t      invert;
+        int32_t      sym_count;    // 0=first half, 1=second half (data)
+        int32_t      frame_pos;    // current decoded bit position
         uint8_t  frame_bits[DFM_FRAME_BITS + 8];
         // GPS data accumulator (across fr_id 0-8)
         double   lat, lon, alt;
         double   horiV, dir, vertV;
-        int      frnr;
-        int      year, month, day;
-        int      hour, minute;
+        int32_t      frnr;
+        int32_t      year, month, day;
+        int32_t      hour, minute;
         float    sek;
-        int      nSV;
-        int      posmode;
+        int32_t      nSV;
+        int32_t      posmode;
         uint16_t got_mask;     // bitmask of received fr_id (0-8)
         char     serial[16];
-        int      serial_valid;
+        int32_t      serial_valid;
         // Serial number detection
         uint32_t SN;
         uint32_t SN_prev;
@@ -755,23 +756,23 @@ struct sonde_state {
         float    bit_freq;     // SPS at Manchester symbol rate
         float    bit_accum;
         float    prev_filtered; // for zero-crossing bit clock recovery
-        int      bit_samples;
+        int32_t      bit_samples;
         float    last_accum;   // accumulator value of last chip decision
         uint32_t shift_reg;
-        int      in_frame;
-        int      invert;
-        int      sym_count;    // 0=first half, 1=second half
-        int      prev_sym;     // previous symbol for differential decode
+        int32_t      in_frame;
+        int32_t      invert;
+        int32_t      sym_count;    // 0=first half, 1=second half
+        int32_t      prev_sym;     // previous symbol for differential decode
         float    first_chip_accum; // accumulator of first chip for pair decision
-        int      frame_pos;    // current decoded bit position
+        int32_t      frame_pos;    // current decoded bit position
         uint8_t  frame_bits[(M10_FRAME_LEN + M10_AUX_LEN) * 8 + 8];
         uint8_t  frame_bytes[M10_FRAME_LEN + M10_AUX_LEN + 4];
         // Burst gate
-        int      burst_active; // IQ-power burst gate flag
+        int32_t      burst_active; // IQ-power burst gate flag
         float    iq_pwr_fast;  // fast exponential IQ power estimate
-        int      burst_chips;  // chips since burst start
+        int32_t      burst_chips;  // chips since burst start
         // AFC (automatic frequency correction)
-        int      afc_done;     // 1 = AFC applied
+        int32_t      afc_done;     // 1 = AFC applied
     } m10;
 
     // Per-frequency channels (DFM and M10 on different frequencies)
@@ -808,8 +809,8 @@ static inline float channel_demod(struct sonde_channel *ch, const float *lpf_coe
     ch->iq_idx = (ch->iq_idx + 1) % SONDE_IQ_TAPS;
 
     float di = 0, dq = 0;
-    for (int k = 0; k < SONDE_IQ_TAPS; k++) {
-        int idx = (ch->iq_idx + k) % SONDE_IQ_TAPS;
+    for (int32_t k = 0; k < SONDE_IQ_TAPS; k++) {
+        int32_t idx = (ch->iq_idx + k) % SONDE_IQ_TAPS;
         di += ch->iq_buf_i[idx] * ch->iq_coeff[k];
         dq += ch->iq_buf_q[idx] * ch->iq_coeff[k];
     }
@@ -833,7 +834,7 @@ static inline float channel_demod(struct sonde_channel *ch, const float *lpf_coe
     ch->lpf_idx = (ch->lpf_idx + 1) % SONDE_LPF_TAPS;
 
     float filtered = 0;
-    for (int k = 0; k < SONDE_LPF_TAPS; k++)
+    for (int32_t k = 0; k < SONDE_LPF_TAPS; k++)
         filtered += ch->lpf_buf[(ch->lpf_idx + k) % SONDE_LPF_TAPS] * lpf_coeff[k];
 
     return filtered;
@@ -855,16 +856,16 @@ struct sonde_state *sonde_create(const sonde_config_t *config)
     // Initialize lowpass filter (Blackman window, cutoff ~30 kHz / IF_rate)
     // Must pass M10 Manchester at 19230 sym/s; integrate-and-dump does final filtering
     double fc = 30000.0 / SONDE_IF_RATE;
-    int M = SONDE_LPF_TAPS - 1;
+    int32_t M = SONDE_LPF_TAPS - 1;
     double sum = 0;
-    for (int i = 0; i < SONDE_LPF_TAPS; i++) {
+    for (int32_t i = 0; i < SONDE_LPF_TAPS; i++) {
         double n = i - M / 2.0;
         double h = (fabs(n) < 1e-10) ? (2.0 * fc) : (sin(2.0 * M_PI * fc * n) / (M_PI * n));
         double w = 0.42 - 0.5 * cos(2.0 * M_PI * i / M) + 0.08 * cos(4.0 * M_PI * i / M);
         s->lpf_coeff[i] = (float)(h * w);
         sum += s->lpf_coeff[i];
     }
-    for (int i = 0; i < SONDE_LPF_TAPS; i++)
+    for (int32_t i = 0; i < SONDE_LPF_TAPS; i++)
         s->lpf_coeff[i] /= (float)sum;
 
     // Initialize DFM dedicated LPF (Blackman window, cutoff ~8 kHz for 2500 baud)
@@ -872,14 +873,14 @@ struct sonde_state *sonde_create(const sonde_config_t *config)
     {
         double fc_dfm = 8000.0 / SONDE_IF_RATE;
         double sum_dfm = 0;
-        for (int i = 0; i < SONDE_LPF_TAPS; i++) {
+        for (int32_t i = 0; i < SONDE_LPF_TAPS; i++) {
             double n = i - M / 2.0;
             double h = (fabs(n) < 1e-10) ? (2.0 * fc_dfm) : (sin(2.0 * M_PI * fc_dfm * n) / (M_PI * n));
             double w = 0.42 - 0.5 * cos(2.0 * M_PI * i / M) + 0.08 * cos(4.0 * M_PI * i / M);
             s->dfm_lpf_coeff[i] = (float)(h * w);
             sum_dfm += s->dfm_lpf_coeff[i];
         }
-        for (int i = 0; i < SONDE_LPF_TAPS; i++)
+        for (int32_t i = 0; i < SONDE_LPF_TAPS; i++)
             s->dfm_lpf_coeff[i] /= (float)sum_dfm;
     }
 
@@ -921,16 +922,16 @@ struct sonde_state *sonde_create(const sonde_config_t *config)
     // Signal bandwidth ~5 kHz, plus RTL-SDR crystal error margin
     {
         double fc = 15000.0 / SONDE_IF_RATE;
-        int M = SONDE_IQ_TAPS - 1;
+        int32_t M = SONDE_IQ_TAPS - 1;
         double fsum = 0;
-        for (int i = 0; i < SONDE_IQ_TAPS; i++) {
+        for (int32_t i = 0; i < SONDE_IQ_TAPS; i++) {
             double n = i - M / 2.0;
             double h = (fabs(n) < 1e-10) ? (2.0 * fc) : (sin(2.0 * M_PI * fc * n) / (M_PI * n));
             double w = 0.42 - 0.5 * cos(2.0 * M_PI * i / M) + 0.08 * cos(4.0 * M_PI * i / M);
             s->dfm_ch.iq_coeff[i] = (float)(h * w);
             fsum += s->dfm_ch.iq_coeff[i];
         }
-        for (int i = 0; i < SONDE_IQ_TAPS; i++)
+        for (int32_t i = 0; i < SONDE_IQ_TAPS; i++)
             s->dfm_ch.iq_coeff[i] /= (float)fsum;
     }
 
@@ -938,16 +939,16 @@ struct sonde_state *sonde_create(const sonde_config_t *config)
     // Signal bandwidth ~15 kHz, plus up to 30 kHz RTL-SDR crystal error (~75 ppm)
     {
         double fc = 45000.0 / SONDE_IF_RATE;
-        int M = SONDE_IQ_TAPS - 1;
+        int32_t M = SONDE_IQ_TAPS - 1;
         double fsum = 0;
-        for (int i = 0; i < SONDE_IQ_TAPS; i++) {
+        for (int32_t i = 0; i < SONDE_IQ_TAPS; i++) {
             double n = i - M / 2.0;
             double h = (fabs(n) < 1e-10) ? (2.0 * fc) : (sin(2.0 * M_PI * fc * n) / (M_PI * n));
             double w = 0.42 - 0.5 * cos(2.0 * M_PI * i / M) + 0.08 * cos(4.0 * M_PI * i / M);
             s->m10_ch.iq_coeff[i] = (float)(h * w);
             fsum += s->m10_ch.iq_coeff[i];
         }
-        for (int i = 0; i < SONDE_IQ_TAPS; i++)
+        for (int32_t i = 0; i < SONDE_IQ_TAPS; i++)
             s->m10_ch.iq_coeff[i] /= (float)fsum;
     }
 
@@ -980,7 +981,7 @@ void sonde_get_stats(struct sonde_state *state, sonde_stats_t *stats)
 static void sonde_parse_frame(struct sonde_state *state)
 {
     uint8_t *frame = state->frame_buf;
-    int len = state->frame_byte_idx;
+    int32_t len = state->frame_byte_idx;
 
     if (len < 64) return;
 
@@ -1006,21 +1007,21 @@ static void sonde_parse_frame(struct sonde_state *state)
         0x07,0x87,0x47,0xC7,0x27,0xA7,0x67,0xE7,0x17,0x97,0x57,0xD7,0x37,0xB7,0x77,0xF7,
         0x0F,0x8F,0x4F,0xCF,0x2F,0xAF,0x6F,0xEF,0x1F,0x9F,0x5F,0xDF,0x3F,0xBF,0x7F,0xFF
     };
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         frame[i] = bitrev[frame[i]];
 
     // Step 1: RS error correction on raw (whitened) frame — RS parity was computed
     // on whitened data, so RS must operate BEFORE dewhitening
     crc16_init();
-    int rs_errors = rs41_rs_correct(frame, len);
+    int32_t rs_errors = rs41_rs_correct(frame, len);
 
     // Step 2: Dewhiten the corrected frame
     uint8_t dw[SONDE_FRAME_LEN];
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         dw[i] = frame[i] ^ rs41_whitening[(i + 8) % RS41_WHITENING_LEN];
 
     fprintf(stderr, "Sonde: frame #%lu len=%d rs=%d\n",
-            (unsigned long)state->stats.frames_detected, len, rs_errors);
+            (uint64_t)state->stats.frames_detected, len, rs_errors);
 
     if (rs_errors < 0) {
         state->stats.rs_uncorrectable++;
@@ -1037,15 +1038,15 @@ static void sonde_parse_frame(struct sonde_state *state)
     msg.freq = (float)(state->config.center_freq / 1e6);
     msg.rs_errors = rs_errors;
 
-    int pos = 49;  // subblocks start at byte 49 (after 48 RS parity + 1 frame type)
+    int32_t pos = 49;  // subblocks start at byte 49 (after 48 RS parity + 1 frame type)
     bool got_serial = false;
-    int crc_ok_count = 0;
+    int32_t crc_ok_count = 0;
 
     while (pos + 4 <= len) {
         uint8_t blk_id = dw[pos];
         uint8_t blk_len = dw[pos + 1];
         if (blk_len < 1 || blk_len > 200) break;
-        int blk_total = 2 + (int)blk_len + 2;
+        int32_t blk_total = 2 + (int32_t)blk_len + 2;
         if (pos + blk_total > len) break;
 
         // CRC-16 CCITT over data only (not ID+LEN)
@@ -1062,9 +1063,9 @@ static void sonde_parse_frame(struct sonde_state *state)
         switch (blk_id) {
         case RS41_BLOCK_STATUS:  // 0x79
             if (blk_len >= 10) {
-                msg.frame_num = (int)read_u16_le(data);
-                int serial_len = 0;
-                for (int i = 0; i < 8 && i < SONDE_ID_LEN - 1; i++) {
+                msg.frame_num = (int32_t)read_u16_le(data);
+                int32_t serial_len = 0;
+                for (int32_t i = 0; i < 8 && i < SONDE_ID_LEN - 1; i++) {
                     char c = (char)data[2 + i];
                     if (c >= 0x20 && c < 0x7F)
                         msg.serial[serial_len++] = c;
@@ -1155,7 +1156,7 @@ static void dfm_conf_out(struct sonde_state *state, const uint8_t *conf_bits)
         if (SN6 == state->dfm.SN6_prev && SN6 != 0) {
             state->dfm.sonde_typ = sn_ch;
             snprintf(state->dfm.serial, sizeof(state->dfm.serial),
-                     "D%1X%06X", (unsigned)(sn_ch & 0xF), (unsigned)SN6);
+                     "D%1X%06X", (uint32_t)(sn_ch & 0xF), (uint32_t)SN6);
             state->dfm.serial_valid = 1;
         }
         state->dfm.SN6_prev = SN6;
@@ -1181,7 +1182,7 @@ static void dfm_conf_out(struct sonde_state *state, const uint8_t *conf_bits)
                 state->dfm.SN = SN;
                 state->dfm.sonde_typ = sn_ch;
                 snprintf(state->dfm.serial, sizeof(state->dfm.serial),
-                         "D%1X%06u", (unsigned)(sn_ch & 0xF), (unsigned)SN);
+                         "D%1X%06u", (uint32_t)(sn_ch & 0xF), (uint32_t)SN);
                 state->dfm.serial_valid = 1;
             }
             state->dfm.SN_prev = SN;
@@ -1191,20 +1192,20 @@ static void dfm_conf_out(struct sonde_state *state, const uint8_t *conf_bits)
 }
 
 // Extract GPS data from DFM DAT block (called for each fr_id)
-static void dfm_dat_out(struct sonde_state *state, const uint8_t *dat_bits, int fr_id)
+static void dfm_dat_out(struct sonde_state *state, const uint8_t *dat_bits, int32_t fr_id)
 {
     if (fr_id < 0 || fr_id > 8) return;
 
     if (fr_id == 0) {
-        int mode = (int)dfm_bits2val(dat_bits + 16, 8);
+        int32_t mode = (int32_t)dfm_bits2val(dat_bits + 16, 8);
         if (mode > 1 && mode < 5) state->dfm.posmode = mode;
-        state->dfm.frnr = (int)dfm_bits2val(dat_bits + 24, 8);
+        state->dfm.frnr = (int32_t)dfm_bits2val(dat_bits + 24, 8);
         state->dfm.got_mask |= (1 << 0);
     }
 
     if (state->dfm.posmode <= 2) {
         if (fr_id == 1) {
-            int msek = (int)dfm_bits2val(dat_bits + 32, 16);
+            int32_t msek = (int32_t)dfm_bits2val(dat_bits + 32, 16);
             state->dfm.sek = msek / 1000.0f;
             state->dfm.got_mask |= (1 << 1);
         }
@@ -1232,7 +1233,7 @@ static void dfm_dat_out(struct sonde_state *state, const uint8_t *dat_bits, int 
     } else {
         // posmode 3 or 4
         if (fr_id == 0) {
-            int msek = (int)dfm_bits2val(dat_bits, 16);
+            int32_t msek = (int32_t)dfm_bits2val(dat_bits, 16);
             state->dfm.sek = msek / 1000.0f;
             int16_t dvv = (int16_t)(uint16_t)dfm_bits2val(dat_bits + 32, 16);
             state->dfm.horiV = dvv / 1e2;
@@ -1259,12 +1260,12 @@ static void dfm_dat_out(struct sonde_state *state, const uint8_t *dat_bits, int 
     }
 
     if (fr_id == 8) {
-        state->dfm.year   = (int)dfm_bits2val(dat_bits, 12);
-        state->dfm.month  = (int)dfm_bits2val(dat_bits + 12, 4);
-        state->dfm.day    = (int)dfm_bits2val(dat_bits + 16, 5);
-        state->dfm.hour   = (int)dfm_bits2val(dat_bits + 21, 5);
-        state->dfm.minute = (int)dfm_bits2val(dat_bits + 26, 6);
-        state->dfm.nSV    = (int)dfm_bits2val(dat_bits + 32, 8);
+        state->dfm.year   = (int32_t)dfm_bits2val(dat_bits, 12);
+        state->dfm.month  = (int32_t)dfm_bits2val(dat_bits + 12, 4);
+        state->dfm.day    = (int32_t)dfm_bits2val(dat_bits + 16, 5);
+        state->dfm.hour   = (int32_t)dfm_bits2val(dat_bits + 21, 5);
+        state->dfm.minute = (int32_t)dfm_bits2val(dat_bits + 26, 6);
+        state->dfm.nSV    = (int32_t)dfm_bits2val(dat_bits + 32, 8);
         state->dfm.got_mask |= (1 << 8);
     }
 }
@@ -1323,20 +1324,20 @@ static void dfm_parse_frame(struct sonde_state *state)
 
     // Decode CONF: 56 bits at DFM_CONF → 7 Hamming codewords → 28 data bits
     uint8_t conf_data[7*4];
-    int ret_conf = dfm_hamming_decode(&frame[DFM_CONF], 7, conf_data);
+    int32_t ret_conf = dfm_hamming_decode(&frame[DFM_CONF], 7, conf_data);
 
     // Decode DAT1: 104 bits at DFM_DAT1 → 13 codewords → 52 data bits
     uint8_t dat1_data[13*4];
-    int ret_dat1 = dfm_hamming_decode(&frame[DFM_DAT1], 13, dat1_data);
+    int32_t ret_dat1 = dfm_hamming_decode(&frame[DFM_DAT1], 13, dat1_data);
 
     // Decode DAT2: 104 bits at DFM_DAT2 → 13 codewords → 52 data bits
     uint8_t dat2_data[13*4];
-    int ret_dat2 = dfm_hamming_decode(&frame[DFM_DAT2], 13, dat2_data);
+    int32_t ret_dat2 = dfm_hamming_decode(&frame[DFM_DAT2], 13, dat2_data);
 
     // Count correctable/uncorrectable blocks per section
-    int conf_ok = (ret_conf >= 0) ? 7 : 0;
-    int dat1_ok = (ret_dat1 >= 0) ? 13 : 0;
-    int dat2_ok = (ret_dat2 >= 0) ? 13 : 0;
+    int32_t conf_ok = (ret_conf >= 0) ? 7 : 0;
+    int32_t dat1_ok = (ret_dat1 >= 0) ? 13 : 0;
+    int32_t dat2_ok = (ret_dat2 >= 0) ? 13 : 0;
     // Show real data bits from CONF area (positions 16-23)
     fprintf(stderr, "DFM: frame hamming conf=%d dat1=%d dat2=%d (ok=%d/%d/%d) "
             "conf_bits=%d%d%d%d%d%d%d%d dat1=%d%d%d%d%d%d%d%d\n",
@@ -1355,12 +1356,12 @@ static void dfm_parse_frame(struct sonde_state *state)
         dfm_conf_out(state, conf_data);
 
     if (ret_dat1 != -1) {
-        int fr_id = (int)dfm_bits2val(dat1_data + 48, 4);
+        int32_t fr_id = (int32_t)dfm_bits2val(dat1_data + 48, 4);
         dfm_dat_out(state, dat1_data, fr_id);
         if (fr_id == 8) dfm_report(state);
     }
     if (ret_dat2 != -1) {
-        int fr_id = (int)dfm_bits2val(dat2_data + 48, 4);
+        int32_t fr_id = (int32_t)dfm_bits2val(dat2_data + 48, 4);
         dfm_dat_out(state, dat2_data, fr_id);
         if (fr_id == 8) dfm_report(state);
     }
@@ -1383,19 +1384,19 @@ static void m10_parse_frame(struct sonde_state *state)
     }
 
     // Determine aux length and checksum position
-    int flen = f[0];
-    int auxlen = 0;
+    int32_t flen = f[0];
+    int32_t auxlen = 0;
     if (flen != 0x64) {
         auxlen = flen - 0x64;
         if (auxlen < 0 || auxlen > M10_AUX_LEN) auxlen = 0;
     }
-    int check_pos = M10_POS_CHECK + auxlen;
+    int32_t check_pos = M10_POS_CHECK + auxlen;
 
     // Verify checksum
-    int cs_stored = (f[check_pos] << 8) | f[check_pos + 1];
-    int cs_calc = m10_checksum(f, check_pos);
+    int32_t cs_stored = (f[check_pos] << 8) | f[check_pos + 1];
+    int32_t cs_calc = m10_checksum(f, check_pos);
     if (cs_stored != cs_calc) {
-        fprintf(stderr, "M10: checksum FAIL stored=0x%04X calc=0x%04X\n", (unsigned)cs_stored, (unsigned)cs_calc);
+        fprintf(stderr, "M10: checksum FAIL stored=0x%04X calc=0x%04X\n", (uint32_t)cs_stored, (uint32_t)cs_calc);
         return;
     }
     fprintf(stderr, "M10: checksum OK!\n");
@@ -1439,10 +1440,10 @@ static void m10_parse_frame(struct sonde_state *state)
 
         msg.satellites = f[M10_POS_SATS];
 
-        int gpsweek = (f[M10_POS_WEEK]<<8) | f[M10_POS_WEEK+1];
+        int32_t gpsweek = (f[M10_POS_WEEK]<<8) | f[M10_POS_WEEK+1];
         if (gpsweek < 1304) gpsweek += 1024;
-        int gpssec = tow_ms / 1000;
-        int year, month, day;
+        int32_t gpssec = tow_ms / 1000;
+        int32_t year, month, day;
         m10_gps2date(gpsweek, gpssec, &year, &month, &day);
         (void)year; (void)month; (void)day;
         msg.frame_num = gpssec;
@@ -1477,10 +1478,10 @@ static void m10_parse_frame(struct sonde_state *state)
 
     // Serial number (5 bytes at SN offset)
     {
-        unsigned sn34 = (unsigned)f[M10_POS_SN+3] | ((unsigned)f[M10_POS_SN+4] << 8);
+        uint32_t sn34 = (uint32_t)f[M10_POS_SN+3] | ((uint32_t)f[M10_POS_SN+4] << 8);
         snprintf(msg.serial, sizeof(msg.serial), "%1X%02u%1X%1u%04u",
-                 (unsigned)((f[M10_POS_SN+2]>>4)&0xF), (unsigned)(f[M10_POS_SN+2]&0xFF),
-                 (unsigned)(f[M10_POS_SN]&0xF),
+                 (uint32_t)((f[M10_POS_SN+2]>>4)&0xF), (uint32_t)(f[M10_POS_SN+2]&0xFF),
+                 (uint32_t)(f[M10_POS_SN]&0xF),
                  (sn34>>13)&0x7, sn34&0x1FFF);
     }
 
@@ -1501,13 +1502,13 @@ static void m10_parse_frame(struct sonde_state *state)
 }
 // ======================== Bit Processing ========================
 
-static void sonde_process_bit(struct sonde_state *state, int bit)
+static void sonde_process_bit(struct sonde_state *state, int32_t bit)
 {
-    int raw_bit = bit & 1;
+    int32_t raw_bit = bit & 1;
 
     // Always store raw bit in lookback buffer
-    int byte_pos = state->bit_buf_pos / 8;
-    int bit_pos = state->bit_buf_pos % 8;
+    int32_t byte_pos = state->bit_buf_pos / 8;
+    int32_t bit_pos = state->bit_buf_pos % 8;
     if (bit_pos == 0)
         state->bit_buf[byte_pos] = 0;
     state->bit_buf[byte_pos] |= (uint8_t)(raw_bit << bit_pos);
@@ -1518,7 +1519,7 @@ static void sonde_process_bit(struct sonde_state *state, int bit)
 
     if (state->in_frame) {
         // Still capturing post-sync bits (for the forward-capture path)
-        int b = raw_bit ^ state->invert_bits;
+        int32_t b = raw_bit ^ state->invert_bits;
         state->frame_buf[state->frame_byte_idx] |=
             (uint8_t)(b << state->frame_bit_idx);
         state->frame_bit_idx++;
@@ -1547,29 +1548,29 @@ static void sonde_process_bit(struct sonde_state *state, int bit)
     uint32_t expected2 = 0x086D5388;
 
     uint32_t diff = state->shift_reg ^ expected;
-    int errors = 0;
+    int32_t errors = 0;
     uint32_t d = diff;
     while (d) { d &= d - 1; errors++; }
 
     uint32_t diff_inv = state->shift_reg ^ ~expected;
-    int errors_inv = 0;
+    int32_t errors_inv = 0;
     d = diff_inv;
     while (d) { d &= d - 1; errors_inv++; }
 
     // Check reference sync too
     uint32_t diff2 = state->shift_reg ^ expected2;
-    int errors2 = 0;
+    int32_t errors2 = 0;
     d = diff2;
     while (d) { d &= d - 1; errors2++; }
     uint32_t diff2_inv = state->shift_reg ^ ~expected2;
-    int errors2_inv = 0;
+    int32_t errors2_inv = 0;
     d = diff2_inv;
     while (d) { d &= d - 1; errors2_inv++; }
-    int match2 = 32 - errors2;
-    int match2_inv = 32 - errors2_inv;
+    int32_t match2 = 32 - errors2;
+    int32_t match2_inv = 32 - errors2_inv;
 
-    int match = 32 - errors;
-    int match_inv = 32 - errors_inv;
+    int32_t match = 32 - errors;
+    int32_t match_inv = 32 - errors_inv;
 
     // Report near-matches on the correct sync (threshold 28+ only to reduce noise)
     (void)match2;
@@ -1589,9 +1590,9 @@ static void sonde_process_bit(struct sonde_state *state, int bit)
 
 // ======================== DFM Symbol Processing ========================
 
-static void dfm_process_sym(struct sonde_state *state, int sym)
+static void dfm_process_sym(struct sonde_state *state, int32_t sym)
 {
-    int raw_sym = sym & 1;
+    int32_t raw_sym = sym & 1;
 
     // Update shift register at Manchester symbol rate (5000 sym/s)
     state->dfm.shift_reg = ((state->dfm.shift_reg << 1) | (uint32_t)raw_sym) & DFM_SYNC_MASK;
@@ -1601,7 +1602,7 @@ static void dfm_process_sym(struct sonde_state *state, int sym)
         state->dfm.sym_count++;
         if (state->dfm.sym_count == 2) {
             state->dfm.sym_count = 0;
-            int bit = state->dfm.invert ? (raw_sym ^ 1) : raw_sym;
+            int32_t bit = state->dfm.invert ? (raw_sym ^ 1) : raw_sym;
             state->dfm.frame_bits[state->dfm.frame_pos] = (uint8_t)bit;
             state->dfm.frame_pos++;
             if (state->dfm.frame_pos >= DFM_FRAME_BITS) {
@@ -1614,17 +1615,17 @@ static void dfm_process_sym(struct sonde_state *state, int sym)
 
     // Check for DFM sync (30 bits)
     uint32_t diff = state->dfm.shift_reg ^ DFM_SYNC_WORD;
-    int errors = 0;
+    int32_t errors = 0;
     uint32_t d = diff;
     while (d) { d &= d - 1; errors++; }
 
     uint32_t diff_inv = state->dfm.shift_reg ^ (~DFM_SYNC_WORD & DFM_SYNC_MASK);
-    int errors_inv = 0;
+    int32_t errors_inv = 0;
     d = diff_inv;
     while (d) { d &= d - 1; errors_inv++; }
 
-    int match = DFM_SYNC_BITS - errors;
-    int match_inv = DFM_SYNC_BITS - errors_inv;
+    int32_t match = DFM_SYNC_BITS - errors;
+    int32_t match_inv = DFM_SYNC_BITS - errors_inv;
 
     if (match >= DFM_SYNC_THRESHOLD || match_inv >= DFM_SYNC_THRESHOLD) {
         state->dfm.invert = (match_inv > match) ? 1 : 0;
@@ -1640,7 +1641,7 @@ static void dfm_process_sym(struct sonde_state *state, int sym)
         // DFM independent AFC: correct NCO frequency from DC offset
         // Only apply from HIGH-QUALITY sync to avoid noise false positives
         {
-            int best_match = (match_inv > match) ? match_inv : match;
+            int32_t best_match = (match_inv > match) ? match_inv : match;
             if (!state->m10.afc_done && best_match >= 28) {
                 float dc = state->dfm_ch.dc_avg;
                 if (fabsf(dc) > 0.03f) {  // Only apply if significant offset
@@ -1666,19 +1667,19 @@ static void dfm_process_sym(struct sonde_state *state, int sym)
 
 // ======================== M10 Symbol Processing ========================
 
-static void m10_process_sym(struct sonde_state *state, int sym)
+static void m10_process_sym(struct sonde_state *state, int32_t sym)
 {
-    int raw_sym = sym & 1;
+    int32_t raw_sym = sym & 1;
 
     // M10_DECODE diagnostic statics
     static uint8_t m10_dbg_chips[64];
     static float m10_dbg_accum[64];
-    static int m10_dbg_idx = 0;
-    static int m10_dbg_done = 0;
+    static int32_t m10_dbg_idx = 0;
+    static int32_t m10_dbg_done = 0;
     // M10_RAW diagnostic: raw (no Manchester) decode
     static uint8_t m10_raw_bits[2048];
-    static int m10_raw_pos = 0;
-    static int m10_raw_done = 0;
+    static int32_t m10_raw_pos = 0;
+    static int32_t m10_raw_done = 0;
 
     // Update shift register at Manchester symbol rate (19230 sym/s)
     state->m10.shift_reg = (state->m10.shift_reg << 1) | (uint32_t)raw_sym;
@@ -1692,24 +1693,24 @@ static void m10_process_sym(struct sonde_state *state, int sym)
             if (m10_dbg_idx == 64) {
                 m10_dbg_done = 1;
                 fprintf(stderr, "M10_DECODE: raw 64 chips: ");
-                for (int j = 0; j < 64; j++) fprintf(stderr, "%d", m10_dbg_chips[j]);
+                for (int32_t j = 0; j < 64; j++) fprintf(stderr, "%d", m10_dbg_chips[j]);
                 fprintf(stderr, "\n");
                 fprintf(stderr, "M10_DECODE: accum 64: ");
-                for (int j = 0; j < 64; j++)
+                for (int32_t j = 0; j < 64; j++)
                     fprintf(stderr, "%.2f ", m10_dbg_accum[j]);
                 fprintf(stderr, "\n");
                 // Pair decision: (accum_c1 - accum_c2) > 0 → coded=1
                 fprintf(stderr, "M10_DECODE: pair_diff: ");
-                for (int j = 0; j < 64; j += 2)
+                for (int32_t j = 0; j < 64; j += 2)
                     fprintf(stderr, "%.2f ", m10_dbg_accum[j] - m10_dbg_accum[j+1]);
                 fprintf(stderr, "\n");
                 // Pair decision → coded bits → differential → raw bits
                 {
-                    int prev = 0;
+                    int32_t prev = 0;
                     fprintf(stderr, "M10_DECODE: decoded:   ");
-                    for (int j = 0; j < 64; j += 2) {
-                        int coded = ((m10_dbg_accum[j] - m10_dbg_accum[j+1]) >= 0) ? 1 : 0;
-                        int raw = coded ^ prev;
+                    for (int32_t j = 0; j < 64; j += 2) {
+                        int32_t coded = ((m10_dbg_accum[j] - m10_dbg_accum[j+1]) >= 0) ? 1 : 0;
+                        int32_t raw = coded ^ prev;
                         prev = raw;
                         fprintf(stderr, "%d", raw);
                     }
@@ -1732,7 +1733,7 @@ static void m10_process_sym(struct sonde_state *state, int sym)
             // Pair decision: (accum_c1 - accum_c2) > 0 → coded=1
             float pair_diff = state->m10.first_chip_accum - state->m10.last_accum;
             if (state->m10.invert) pair_diff = -pair_diff;
-            int coded_bit;
+            int32_t coded_bit;
             if (fabsf(state->m10.first_chip_accum - state->m10.last_accum) > 1.0f) {
                 // Anomalous pair (freq step/transient): first chip is more reliable
                 float chip_val = state->m10.invert ? -state->m10.first_chip_accum
@@ -1742,18 +1743,18 @@ static void m10_process_sym(struct sonde_state *state, int sym)
                 coded_bit = (pair_diff >= 0) ? 1 : 0;
             }
             // Differential decode: raw_bit = coded_bit XOR prev_raw_bit
-            int decoded = coded_bit ^ state->m10.prev_sym;
+            int32_t decoded = coded_bit ^ state->m10.prev_sym;
             state->m10.prev_sym = decoded;
             state->m10.frame_bits[state->m10.frame_pos] = (uint8_t)decoded;
             state->m10.frame_pos++;
 
-            int target = M10_FRAME_LEN * 8;
+            int32_t target = M10_FRAME_LEN * 8;
             if (state->m10.frame_pos >= target) {
                 state->m10.in_frame = 0;
                 m10_bits2bytes(state->m10.frame_bits, state->m10.frame_bytes,
                                M10_FRAME_LEN);
-                int cs = m10_checksum(state->m10.frame_bytes, M10_POS_CHECK);
-                int cs_stored = (state->m10.frame_bytes[M10_POS_CHECK] << 8) |
+                int32_t cs = m10_checksum(state->m10.frame_bytes, M10_POS_CHECK);
+                int32_t cs_stored = (state->m10.frame_bytes[M10_POS_CHECK] << 8) |
                                  state->m10.frame_bytes[M10_POS_CHECK + 1];
                 if (cs == cs_stored) {
                     fprintf(stderr, "M10: checksum OK (differential decode)\n");
@@ -1762,17 +1763,17 @@ static void m10_process_sym(struct sonde_state *state, int sym)
                     // Try differential error correction: a coded-bit error at
                     // position K inverts all decoded bits from K onward.
                     // TX frequency settling can cause 1-2 errors in first pairs.
-                    int corrected = 0;
+                    int32_t corrected = 0;
                     uint8_t trial_bytes[M10_FRAME_LEN + M10_AUX_LEN + 2];
 
                     // Single coded-bit error: flip bits K..end
-                    for (int K = 1; K < 16 && K < target && !corrected; K++) {
-                        for (int j = K; j < target; j++)
+                    for (int32_t K = 1; K < 16 && K < target && !corrected; K++) {
+                        for (int32_t j = K; j < target; j++)
                             state->m10.frame_bits[j] ^= 1;
                         m10_bits2bytes(state->m10.frame_bits, trial_bytes,
                                        M10_FRAME_LEN);
-                        int tcs = m10_checksum(trial_bytes, M10_POS_CHECK);
-                        int tcs_s = (trial_bytes[M10_POS_CHECK] << 8) |
+                        int32_t tcs = m10_checksum(trial_bytes, M10_POS_CHECK);
+                        int32_t tcs_s = (trial_bytes[M10_POS_CHECK] << 8) |
                                      trial_bytes[M10_POS_CHECK + 1];
                         if (tcs == tcs_s) {
                             memcpy(state->m10.frame_bytes, trial_bytes,
@@ -1783,19 +1784,19 @@ static void m10_process_sym(struct sonde_state *state, int sym)
                             corrected = 1;
                         }
                         // Undo flip
-                        for (int j = K; j < target; j++)
+                        for (int32_t j = K; j < target; j++)
                             state->m10.frame_bits[j] ^= 1;
                     }
 
                     // Double coded-bit error: flip bits K1..K2-1
-                    for (int K1 = 1; K1 < 12 && !corrected; K1++) {
-                        for (int K2 = K1 + 1; K2 <= 16 && K2 < target && !corrected; K2++) {
-                            for (int j = K1; j < K2; j++)
+                    for (int32_t K1 = 1; K1 < 12 && !corrected; K1++) {
+                        for (int32_t K2 = K1 + 1; K2 <= 16 && K2 < target && !corrected; K2++) {
+                            for (int32_t j = K1; j < K2; j++)
                                 state->m10.frame_bits[j] ^= 1;
                             m10_bits2bytes(state->m10.frame_bits, trial_bytes,
                                            M10_FRAME_LEN);
-                            int tcs = m10_checksum(trial_bytes, M10_POS_CHECK);
-                            int tcs_s = (trial_bytes[M10_POS_CHECK] << 8) |
+                            int32_t tcs = m10_checksum(trial_bytes, M10_POS_CHECK);
+                            int32_t tcs_s = (trial_bytes[M10_POS_CHECK] << 8) |
                                          trial_bytes[M10_POS_CHECK + 1];
                             if (tcs == tcs_s) {
                                 memcpy(state->m10.frame_bytes, trial_bytes,
@@ -1806,7 +1807,7 @@ static void m10_process_sym(struct sonde_state *state, int sym)
                                 corrected = 1;
                             }
                             // Undo flip
-                            for (int j = K1; j < K2; j++)
+                            for (int32_t j = K1; j < K2; j++)
                                 state->m10.frame_bits[j] ^= 1;
                         }
                     }
@@ -1814,13 +1815,13 @@ static void m10_process_sym(struct sonde_state *state, int sym)
                     if (!corrected) {
                         // Try full inversion (polarity ambiguity)
                         uint8_t alt_bits[(M10_FRAME_LEN + M10_AUX_LEN) * 8 + 8];
-                        for (int j = 0; j < target; j++)
+                        for (int32_t j = 0; j < target; j++)
                             alt_bits[j] = state->m10.frame_bits[j] ^ 1;
                         m10_bits2bytes(alt_bits, state->m10.frame_bytes,
                                        M10_FRAME_LEN);
-                        int cs2 = m10_checksum(state->m10.frame_bytes,
+                        int32_t cs2 = m10_checksum(state->m10.frame_bytes,
                                               M10_POS_CHECK);
-                        int cs2_stored = (state->m10.frame_bytes[M10_POS_CHECK] << 8) |
+                        int32_t cs2_stored = (state->m10.frame_bytes[M10_POS_CHECK] << 8) |
                                           state->m10.frame_bytes[M10_POS_CHECK + 1];
                         if (cs2 == cs2_stored) {
                             fprintf(stderr, "M10: checksum OK (inverted polarity)\n");
@@ -1828,9 +1829,9 @@ static void m10_process_sym(struct sonde_state *state, int sym)
                         } else {
                             fprintf(stderr, "M10: checksum FAIL cs=0x%04X/0x%04X "
                                     "f[0]=0x%02X f[1]=0x%02X\n",
-                                    (unsigned)cs, (unsigned)cs_stored,
-                                    (unsigned)state->m10.frame_bytes[0],
-                                    (unsigned)state->m10.frame_bytes[1]);
+                                    (uint32_t)cs, (uint32_t)cs_stored,
+                                    (uint32_t)state->m10.frame_bytes[0],
+                                    (uint32_t)state->m10.frame_bytes[1]);
                         }
                     }
                 }
@@ -1839,55 +1840,55 @@ static void m10_process_sym(struct sonde_state *state, int sym)
 
         // Collect every chip for multi-method diagnostic
         {
-            int cur_raw = state->m10.invert ? (raw_sym ^ 1) : raw_sym;
+            int32_t cur_raw = state->m10.invert ? (raw_sym ^ 1) : raw_sym;
             if (!m10_raw_done && m10_raw_pos < 1616) {
                 m10_raw_bits[m10_raw_pos++] = (uint8_t)cur_raw;
                 if (m10_raw_pos >= 1616) {
                     m10_raw_done = 1;
-                    int nbytes = (M10_FRAME_LEN + M10_AUX_LEN);
+                    int32_t nbytes = (M10_FRAME_LEN + M10_AUX_LEN);
                     uint8_t tbits[1024], tbytes[128];
                     // Method 1: Raw (no Manchester) - first 808 chips
                     m10_bits2bytes(m10_raw_bits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY raw:  f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 2: Standard Manchester (2nd chip = data)
-                    for (int j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+1];
+                    for (int32_t j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+1];
                     m10_bits2bytes(tbits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY std:  f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 3: Manchester-2 (2nd chip inverted = data)
-                    for (int j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+1] ^ 1;
+                    for (int32_t j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+1] ^ 1;
                     m10_bits2bytes(tbits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY inv:  f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 4: Differential (prev != cur → 1)
-                    for (int j = 0; j < nbytes * 8; j++)
+                    for (int32_t j = 0; j < nbytes * 8; j++)
                         tbits[j] = (m10_raw_bits[j*2] != m10_raw_bits[j*2+1]) ? 1 : 0;
                     m10_bits2bytes(tbits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY diff: f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 5: Differential inverted
-                    for (int j = 0; j < nbytes * 8; j++)
+                    for (int32_t j = 0; j < nbytes * 8; j++)
                         tbits[j] = (m10_raw_bits[j*2] == m10_raw_bits[j*2+1]) ? 1 : 0;
                     m10_bits2bytes(tbits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY dinv: f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 6: Phase-shifted Standard (sync triggered 1 chip early)
-                    for (int j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+2];
+                    for (int32_t j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+2];
                     m10_bits2bytes(tbits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY sft:  f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 7: Phase-shifted Inverted
-                    for (int j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+2] ^ 1;
+                    for (int32_t j = 0; j < nbytes * 8; j++) tbits[j] = m10_raw_bits[j*2+2] ^ 1;
                     m10_bits2bytes(tbits, tbytes, nbytes);
                     fprintf(stderr, "M10_TRY sfti: f[0]=0x%02X type=0x%02X f[2]=0x%02X f[3]=0x%02X f[4]=0x%02X f[5]=0x%02X\n",
                             tbytes[0], tbytes[1], tbytes[2], tbytes[3], tbytes[4], tbytes[5]);
                     // Method 8: Differential Manchester (2nd chip → XOR accumulate, initial prev=0)
                     {
-                        int prev = 0;
-                        for (int j = 0; j < M10_FRAME_LEN * 8; j++) {
-                            int coded_inv = m10_raw_bits[j*2+1];
-                            int decoded = (coded_inv ^ 1) ^ prev;
+                        int32_t prev = 0;
+                        for (int32_t j = 0; j < M10_FRAME_LEN * 8; j++) {
+                            int32_t coded_inv = m10_raw_bits[j*2+1];
+                            int32_t decoded = (coded_inv ^ 1) ^ prev;
                             tbits[j] = (uint8_t)decoded;
                             prev = decoded;
                         }
@@ -1903,17 +1904,17 @@ static void m10_process_sym(struct sonde_state *state, int sym)
 
     // Check for M10 sync (32 bits)
     uint32_t diff = state->m10.shift_reg ^ M10_SYNC_WORD;
-    int errors = 0;
+    int32_t errors = 0;
     uint32_t d = diff;
     while (d) { d &= d - 1; errors++; }
 
     uint32_t diff_inv = state->m10.shift_reg ^ ~M10_SYNC_WORD;
-    int errors_inv = 0;
+    int32_t errors_inv = 0;
     d = diff_inv;
     while (d) { d &= d - 1; errors_inv++; }
 
-    int match = M10_SYNC_BITS - errors;
-    int match_inv = M10_SYNC_BITS - errors_inv;
+    int32_t match = M10_SYNC_BITS - errors;
+    int32_t match_inv = M10_SYNC_BITS - errors_inv;
 
     if ((match >= M10_SYNC_THRESHOLD || match_inv >= M10_SYNC_THRESHOLD) &&
         state->m10.iq_pwr_fast > 200.0f) {
@@ -1966,8 +1967,8 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
     state->stats.samples_processed += samples;
 
     for (uint32_t i = 0; i < samples; i++) {
-        float fi = (float)((int)iq_data[i * 2]     - 128);
-        float fq = (float)((int)iq_data[i * 2 + 1] - 128);
+        float fi = (float)((int32_t)iq_data[i * 2]     - 128);
+        float fq = (float)((int32_t)iq_data[i * 2 + 1] - 128);
 
         // ---- RS41 channel: no NCO (center frequency) ----
         state->decim_accum_i += fi;
@@ -2041,7 +2042,7 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
             state->lpf_idx = (state->lpf_idx + 1) % SONDE_LPF_TAPS;
 
             float filtered = 0;
-            for (int k = 0; k < SONDE_LPF_TAPS; k++)
+            for (int32_t k = 0; k < SONDE_LPF_TAPS; k++)
                 filtered += state->lpf_buf[(state->lpf_idx + k) % SONDE_LPF_TAPS]
                             * state->lpf_coeff[k];
 
@@ -2056,7 +2057,7 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
                 state->bit_clock -= state->bit_freq;
 
                 // Bit decision
-                int bit = (state->bit_accum >= 0) ? 1 : 0;
+                int32_t bit = (state->bit_accum >= 0) ? 1 : 0;
                 state->last_bit_mag = state->bit_accum >= 0 ? state->bit_accum : -state->bit_accum;
 
                 // Mueller-Müller timing error
@@ -2115,7 +2116,7 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
 
             if (state->dfm.bit_clock >= state->dfm.bit_freq) {
                 state->dfm.bit_clock -= state->dfm.bit_freq;
-                int sym = (state->dfm.bit_accum >= 0) ? 1 : 0;
+                int32_t sym = (state->dfm.bit_accum >= 0) ? 1 : 0;
                 state->dfm.bit_accum = 0;
                 state->dfm.bit_samples = 0;
                 dfm_process_sym(state, sym);
@@ -2160,9 +2161,9 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
                 // Per-sample FM dump for first 64 IF samples after sync
                 {
                     static float fm_samp[64];
-                    static int fm_samp_idx = 0;
-                    static int fm_samp_active = 0;
-                    static int fm_samp_done = 0;
+                    static int32_t fm_samp_idx = 0;
+                    static int32_t fm_samp_active = 0;
+                    static int32_t fm_samp_done = 0;
                     if (state->m10.in_frame && !fm_samp_done) {
                         if (!fm_samp_active) {
                             fm_samp_active = 1;
@@ -2174,7 +2175,7 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
                         if (fm_samp_idx == 64) {
                             fm_samp_done = 1;
                             fprintf(stderr, "M10_FM64 bc=%.2f: ", state->m10.bit_clock);
-                            for (int k = 0; k < 64; k++)
+                            for (int32_t k = 0; k < 64; k++)
                                 fprintf(stderr, "%.4f ", fm_samp[k]);
                             fprintf(stderr, "\n");
                         }
@@ -2186,15 +2187,15 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
 
                 if (state->m10.bit_clock >= state->m10.bit_freq) {
                     state->m10.bit_clock -= state->m10.bit_freq;
-                    int sym = (state->m10.bit_accum >= 0) ? 1 : 0;
+                    int32_t sym = (state->m10.bit_accum >= 0) ? 1 : 0;
                     state->m10.last_accum = state->m10.bit_accum;
                     // Per-chip timing diagnostic: first 16 chips after sync
                     {
                         static float chip_bc[16];
-                        static int chip_nsamp[16];
+                        static int32_t chip_nsamp[16];
                         static float chip_acc[16];
-                        static int chip_diag_idx = 0;
-                        static int chip_diag_done = 0;
+                        static int32_t chip_diag_idx = 0;
+                        static int32_t chip_diag_done = 0;
                         if (state->m10.in_frame && !chip_diag_done) {
                             if (chip_diag_idx < 16) {
                                 chip_bc[chip_diag_idx] = state->m10.bit_clock;
@@ -2205,13 +2206,13 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
                             if (chip_diag_idx == 16) {
                                 chip_diag_done = 1;
                                 fprintf(stderr, "M10_CHIPS bc: ");
-                                for (int k = 0; k < 16; k++)
+                                for (int32_t k = 0; k < 16; k++)
                                     fprintf(stderr, "%.2f ", chip_bc[k]);
                                 fprintf(stderr, "\nM10_CHIPS ns: ");
-                                for (int k = 0; k < 16; k++)
+                                for (int32_t k = 0; k < 16; k++)
                                     fprintf(stderr, "%d ", chip_nsamp[k]);
                                 fprintf(stderr, "\nM10_CHIPS ac: ");
-                                for (int k = 0; k < 16; k++)
+                                for (int32_t k = 0; k < 16; k++)
                                     fprintf(stderr, "%.3f ", chip_acc[k]);
                                 fprintf(stderr, "\n");
                             }
@@ -2229,26 +2230,26 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
                     {
                         static uint8_t bdump[256];
                         static float   baccum[256];
-                        int bc = state->m10.burst_chips - 1;
+                        int32_t bc = state->m10.burst_chips - 1;
                         if (bc < 256) {
                             bdump[bc] = (uint8_t)sym;
                             baccum[bc] = state->m10.last_accum;
                         }
                         if (bc == 255) {
                             fprintf(stderr, "M10_BURST: first 256 chips (hex bytes MSB-first):\n");
-                            for (int i = 0; i < 32; i++) {
+                            for (int32_t i = 0; i < 32; i++) {
                                 uint8_t bv = 0;
-                                for (int b = 0; b < 8; b++)
+                                for (int32_t b = 0; b < 8; b++)
                                     bv = (bv << 1) | bdump[i * 8 + b];
                                 fprintf(stderr, "%02X ", bv);
                                 if (i % 16 == 15) fprintf(stderr, "\n");
                             }
                             fprintf(stderr, "M10_BURST accum[0..31]: ");
-                            for (int i = 0; i < 32; i++)
+                            for (int32_t i = 0; i < 32; i++)
                                 fprintf(stderr, "%.2f ", baccum[i]);
                             fprintf(stderr, "(dc=%.4f)\n", state->m10_ch.dc_avg);
                             fprintf(stderr, "M10_BURST accum[32..63]: ");
-                            for (int i = 32; i < 64; i++)
+                            for (int32_t i = 32; i < 64; i++)
                                 fprintf(stderr, "%.2f ", baccum[i]);
                             fprintf(stderr, "\n");
                         }
@@ -2262,7 +2263,7 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
             {
                 static float rs41_pwr = 0, dfm_pwr = 0, m10_pwr = 0;
                 static float dfm_iq_pwr = 0, m10_iq_pwr = 0;
-                static int pwr_cnt = 0;
+                static int32_t pwr_cnt = 0;
                 rs41_pwr += filtered * filtered;
                 dfm_pwr += dfm_filtered * dfm_filtered;
                 m10_pwr += m10_filtered * m10_filtered;

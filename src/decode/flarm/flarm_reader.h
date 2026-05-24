@@ -20,27 +20,27 @@ extern "C" {
 
 // FLARM reader configuration (set before calling flarmReaderInit)
 typedef struct {
-    int    enabled;              // FLARM reception enabled
+    int32_t    enabled;              // FLARM reception enabled
     char   device_serial[64];   // RTL-SDR device serial number for 868 MHz dongle
-    int    gain;                // Gain in tenths of dB (0 = auto)
-    int    ppm_error;           // Frequency correction in PPM
+    int32_t    gain;                // Gain in tenths of dB (0 = auto)
+    int32_t    ppm_error;           // Frequency correction in PPM
 
     // Keys file
     char   keys_file[256];     // Path to FLARM decryption keys file
-    int    flarm_ogn_only;     // If set, FLARM data goes to OGN only (not other feeders)
+    int32_t    flarm_ogn_only;     // If set, FLARM data goes to OGN only (not other feeders)
 
     // OGN station info
     char   ogn_station[32];    // OGN station name (e.g. "MYSTATION")
     char   ogn_server[128];    // OGN APRS-IS server (default: aprs.glidernet.org)
-    int    ogn_port;           // OGN APRS-IS port (default: 14580)
+    int32_t    ogn_port;           // OGN APRS-IS port (default: 14580)
 
     // Virtual IQ file input (--flarm-ifile)
     char   ifile_path[512];    // Path to raw IQ file (uint8 I/Q pairs, 1.6 MSPS)
     uint32_t ifile_time;       // Unix timestamp of file (mtime), used for XXTEA decrypt
-    int    ifile_once;         // If set, stop after a single file replay pass
+    int32_t    ifile_once;         // If set, stop after a single file replay pass
 
     // P3I (PilotAware) decoder
-    int    p3i_enabled;        // Enable P3I 869.525 MHz decoder (widens SDR bandwidth)
+    int32_t    p3i_enabled;        // Enable P3I 869.525 MHz decoder (widens SDR bandwidth)
 } flarm_reader_config_t;
 
 extern flarm_reader_config_t FlarmConfig;

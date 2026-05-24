@@ -28,13 +28,14 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 #include "dump1090.h"
+#include <stdint.h>
 
 struct _Modes Modes;
 
 //
 // ============================= Utility functions ==========================
 //
-static void sigintHandler(int dummy) {
+static void sigintHandler(int32_t dummy) {
     MODES_NOTUSED(dummy);
     signal(SIGINT, SIG_DFL);  // reset signal handler - bit extra safety
     Modes.exit = 1;           // Signal to threads that we are done
@@ -145,11 +146,11 @@ static void sendSettings(struct client *c)
 //=========================================================================
 //
 int main(int argc, char **argv) {
-    int j;
+    int32_t j;
     struct client *c;
     struct net_service *s;
     char *bo_connect_ipaddr = "127.0.0.1";
-    int bo_connect_port = 30005;
+    int32_t bo_connect_port = 30005;
 
     // Set sane defaults
 
@@ -158,7 +159,7 @@ int main(int argc, char **argv) {
 
     // Parse the command line options
     for (j = 1; j < argc; j++) {
-        int more = ((j + 1) < argc); // There are more arguments
+        int32_t more = ((j + 1) < argc); // There are more arguments
 
         if        (!strcmp(argv[j],"--net-bo-port") && more) {
             bo_connect_port = atoi(argv[++j]);

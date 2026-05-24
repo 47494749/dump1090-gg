@@ -20,13 +20,13 @@ typedef enum {
 } rb_state_t;
 
 typedef struct {
-    int      enabled;
+    int32_t      enabled;
     char     sharing_key[64];
     char     serial_number[32];
     char     config_path[256];
     char     keys_file[256];
     rb_state_t state;
-    int      fd;
+    int32_t      fd;
     uint64_t next_reconnect;
     uint64_t last_stats;
     uint64_t last_data;
@@ -38,7 +38,7 @@ typedef struct {
     uint64_t aircraft_sent;
     uint64_t commands_received;
     uint8_t  recv_buf[4098];
-    int      recv_buf_len;
+    int32_t      recv_buf_len;
 } radarbox_client_t;
 
 extern radarbox_client_t RadarBoxClient;
@@ -47,9 +47,9 @@ void radarboxClientInit(void);
 void radarboxClientStart(void);
 void radarboxClientPeriodicWork(void);
 void radarboxClientStop(void);
-int radarboxLoadConfig(const char *path);
+int32_t radarboxLoadConfig(const char *path);
 bool radarboxLoadKeys(const char *path);
-int rb_keys_are_loaded(void);
+int32_t rb_keys_are_loaded(void);
 void rb_get_key(uint8_t out[16]);
 void rb_get_nonce(uint8_t out[8]);
 uint32_t rb_get_c2(void);

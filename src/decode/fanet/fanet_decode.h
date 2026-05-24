@@ -133,8 +133,8 @@ typedef struct {
     double   latitude;
     double   longitude;
     float    radius;            // for circle types (meters)
-    int      altitude_bottom;   // for 3D types (meters MSL)
-    int      altitude_top;      // for 3D types (meters MSL)
+    int32_t      altitude_bottom;   // for 3D types (meters MSL)
+    int32_t      altitude_top;      // for 3D types (meters MSL)
 } fanet_landmark_point_t;
 
 // ======================== Decoded message ========================
@@ -168,12 +168,12 @@ typedef struct {
     struct {
         double   latitude;          // degrees
         double   longitude;         // degrees
-        int      altitude;          // meters (MSL)
+        int32_t      altitude;          // meters (MSL)
         float    speed;             // km/h
         float    climb;             // m/s
         float    heading;           // degrees 0-360
         float    turn_rate;         // deg/s (optional, NaN if absent)
-        int      qne_offset;       // meters (optional, INT_MIN if absent)
+        int32_t      qne_offset;       // meters (optional, INT_MIN if absent)
         fanet_aircraft_type_t aircraft_type;
         bool     online_tracking;
         bool     position_valid;
@@ -234,14 +234,14 @@ typedef struct {
         // Subtype 2: Position
         double   latitude;
         double   longitude;
-        int      altitude;           // meters MSL
+        int32_t      altitude;           // meters MSL
         float    heading;            // degrees 0-360
         bool     has_position;
         bool     has_altitude;
         bool     has_heading;
         // Subtype 4-8: Geofence
-        int      geofence_alt_bottom;  // meters MSL
-        int      geofence_alt_top;     // meters MSL
+        int32_t      geofence_alt_bottom;  // meters MSL
+        int32_t      geofence_alt_top;     // meters MSL
         uint8_t  geofence_num_points;
         fanet_landmark_point_t geofence_points[FANET_LANDMARK_MAX_POINTS];
         // Subtype 9-33: Broadcast reply
@@ -263,7 +263,7 @@ typedef struct {
     struct {
         double   latitude;          // thermal position
         double   longitude;
-        int      altitude;          // thermal altitude (meters)
+        int32_t      altitude;          // thermal altitude (meters)
         float    climb;             // avg climb m/s (air, not glider)
         float    wind_speed;        // avg wind speed km/h
         float    wind_heading;      // avg wind heading degrees
@@ -316,7 +316,7 @@ void fanet_get_stats(const fanet_state_t *state, fanet_stats_t *stats);
 // Returns true if found, copies name into buf (up to buf_len).
 bool fanet_get_cached_name(const fanet_state_t *state,
                            uint8_t manufacturer, uint16_t id,
-                           char *buf, int buf_len);
+                           char *buf, int32_t buf_len);
 
 // Get FANET address as a 24-bit value for use as synthetic ICAO
 // Format: manufacturer(8) | id(16) → 24-bit

@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 
 // hash table size, must be a power of two:
 #define ICAO_FILTER_SIZE 4096
@@ -83,7 +84,7 @@ void icaoFilterAdd(uint32_t addr)
         icao_filter_active[h] = addr;
 }
 
-int icaoFilterTest(uint32_t addr)
+int32_t icaoFilterTest(uint32_t addr)
 {
     uint32_t h, h0;
 

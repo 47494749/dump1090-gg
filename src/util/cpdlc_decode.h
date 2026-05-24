@@ -16,10 +16,10 @@ extern "C" {
 
 // Try to decode a non-ACARS ELM payload as FANS-1/A CPDLC.
 // Returns 1 if successfully decoded (output printed to stdout), 0 if not CPDLC.
-int cpdlc_try_decode(uint32_t addr, const uint8_t *data, int len);
+int32_t cpdlc_try_decode(uint32_t addr, const uint8_t *data, int32_t len);
 
 // Direction-aware version: dir = 0 (downlink/DM), 1 (uplink/UM), -1 (try both)
-int cpdlc_try_decode_dir(uint32_t addr, const uint8_t *data, int len, int dir);
+int32_t cpdlc_try_decode_dir(uint32_t addr, const uint8_t *data, int32_t len, int32_t dir);
 
 #ifdef __cplusplus
 }

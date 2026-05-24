@@ -48,6 +48,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 
 struct _Modes Modes;
 
@@ -145,10 +146,10 @@ static void backgroundTasks(void) {
 //=========================================================================
 //
 int main(int argc, char **argv) {
-    int j;
-    int stdout_option = 0;
+    int32_t j;
+    int32_t stdout_option = 0;
     char *bo_connect_ipaddr = "127.0.0.1";
-    int bo_connect_port = 30005;
+    int32_t bo_connect_port = 30005;
     struct client *c;
     struct net_service *beast_input, *fatsv_output, *fa_cmd_input;
 
@@ -157,7 +158,7 @@ int main(int argc, char **argv) {
 
     // Parse the command line options
     for (j = 1; j < argc; j++) {
-        int more = j+1 < argc; // There are more arguments
+        int32_t more = j+1 < argc; // There are more arguments
 
         if (!strcmp(argv[j],"--net-bo-port") && more) {
             bo_connect_port = atoi(argv[++j]);

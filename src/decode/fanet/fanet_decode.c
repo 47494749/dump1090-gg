@@ -20,6 +20,7 @@
 // option) any later version.
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -61,27 +62,27 @@ struct fanet_state {
     // Accumulation buffer for one symbol
     float   *sym_buf_i;
     float   *sym_buf_q;
-    int      sym_buf_pos;
+    int32_t      sym_buf_pos;
 
     // FFT output
     float   *fft_mag;
 
     // Preamble detection state
-    int      preamble_count;
-    int      last_peak_bin;
-    int      preamble_bin_offset;
+    int32_t      preamble_count;
+    int32_t      last_peak_bin;
+    int32_t      preamble_bin_offset;
     bool     in_packet;
-    int      packet_sym_idx;
+    int32_t      packet_sym_idx;
 
     // Sync word + SFD tracking
-    int      sync_symbols[2];
-    int      sfd_count;
+    int32_t      sync_symbols[2];
+    int32_t      sfd_count;
     bool     sfd_adjust;        // true when 0.25-symbol SFD offset needs correction
     float    freq_offset;       // estimated CFO in bins (fractional)
 
     // Packet assembly
     uint8_t  raw_symbols[256];
-    int      raw_sym_count;
+    int32_t      raw_sym_count;
     float    packet_power;
 
     // Output queue (thread-safe, C-opaque handle)
@@ -89,7 +90,7 @@ struct fanet_state {
 
     // Name cache
     fanet_name_entry_t name_cache[FANET_NAME_CACHE_SIZE];
-    int                name_cache_count;
+    int32_t                name_cache_count;
     pthread_mutex_t    name_mutex;
 
     // Statistics
@@ -100,11 +101,11 @@ struct fanet_state {
 
 static void fft128(float *re, float *im)
 {
-    const int N = LORA_N;
+    const int32_t N = LORA_N;
 
     // Bit-reversal permutation
-    for (int i = 1, j = 0; i < N; i++) {
-        int bit = N >> 1;
+    for (int32_t i = 1, j = 0; i < N; i++) {
+        int32_t bit = N >> 1;
         for (; j & bit; bit >>= 1)
             j ^= bit;
         j ^= bit;
@@ -116,13 +117,13 @@ static void fft128(float *re, float *im)
     }
 
     // Cooley-Tukey butterfly
-    for (int len = 2; len <= N; len <<= 1) {
+    for (int32_t len = 2; len <= N; len <<= 1) {
         double ang = -2.0 * PI / len;
         float wn_r = (float)cos(ang);
         float wn_i = (float)sin(ang);
-        for (int i = 0; i < N; i += len) {
+        for (int32_t i = 0; i < N; i += len) {
             float w_r = 1.0f, w_i = 0.0f;
-            for (int j = 0; j < len / 2; j++) {
+            for (int32_t j = 0; j < len / 2; j++) {
                 float u_r = re[i + j];
                 float u_i = im[i + j];
                 float v_r = re[i + j + len/2] * w_r - im[i + j + len/2] * w_i;
@@ -144,19 +145,19 @@ static void fft128(float *re, float *im)
 
 static void generate_dechirp(fanet_state_t *s)
 {
-    int N = (int)s->samples_per_symbol;
+    int32_t N = (int32_t)s->samples_per_symbol;
     double bw = (double)FANET_BW;
     double T = (double)N / s->sample_rate;
     double chirp_rate = bw / T;
 
-    for (int n = 0; n < N; n++) {
+    for (int32_t n = 0; n < N; n++) {
         double t = (double)n / s->sample_rate;
         double phase = 2.0 * PI * (-bw/2.0 * t + chirp_rate/2.0 * t * t);
         s->dechirp_i[n] = (float)cos(phase);
         s->dechirp_q[n] = (float)sin(phase);
     }
 
-    for (int n = 0; n < N; n++) {
+    for (int32_t n = 0; n < N; n++) {
         double t = (double)n / s->sample_rate;
         double phase = 2.0 * PI * (bw/2.0 * t - chirp_rate/2.0 * t * t);
         s->downchirp_i[n] = (float)cos(phase);
@@ -166,23 +167,23 @@ static void generate_dechirp(fanet_state_t *s)
 
 // ======================== Symbol demodulation ========================
 
-static int demodulate_symbol(fanet_state_t *s, const float *buf_i, const float *buf_q,
+static int32_t demodulate_symbol(fanet_state_t *s, const float *buf_i, const float *buf_q,
                              float *peak_power)
 {
-    int N = (int)s->samples_per_symbol;
-    int fft_n = LORA_N;
+    int32_t N = (int32_t)s->samples_per_symbol;
+    int32_t fft_n = LORA_N;
 
     float re[LORA_N], im[LORA_N];
     memset(re, 0, sizeof(re));
     memset(im, 0, sizeof(im));
 
-    int fold = N / fft_n;
+    int32_t fold = N / fft_n;
     if (fold < 1) fold = 1;
 
-    for (int k = 0; k < N; k++) {
+    for (int32_t k = 0; k < N; k++) {
         float r = buf_i[k] * s->dechirp_i[k] + buf_q[k] * s->dechirp_q[k];
         float i = buf_q[k] * s->dechirp_i[k] - buf_i[k] * s->dechirp_q[k];
-        int bin = (k / fold) % fft_n;
+        int32_t bin = (k / fold) % fft_n;
         re[bin] += r;
         im[bin] += i;
     }
@@ -190,8 +191,8 @@ static int demodulate_symbol(fanet_state_t *s, const float *buf_i, const float *
     fft128(re, im);
 
     float max_mag = 0;
-    int peak_bin = 0;
-    for (int k = 0; k < fft_n; k++) {
+    int32_t peak_bin = 0;
+    for (int32_t k = 0; k < fft_n; k++) {
         float mag = re[k] * re[k] + im[k] * im[k];
         if (mag > max_mag) {
             max_mag = mag;
@@ -201,8 +202,8 @@ static int demodulate_symbol(fanet_state_t *s, const float *buf_i, const float *
 
     // Parabolic interpolation on magnitude to resolve +/-1 bin ambiguity
     {
-        int left  = (peak_bin - 1 + fft_n) % fft_n;
-        int right = (peak_bin + 1) % fft_n;
+        int32_t left  = (peak_bin - 1 + fft_n) % fft_n;
+        int32_t right = (peak_bin + 1) % fft_n;
         float alpha = sqrtf(re[left]*re[left]   + im[left]*im[left]);
         float beta  = sqrtf(max_mag);
         float gamma = sqrtf(re[right]*re[right] + im[right]*im[right]);
@@ -220,21 +221,21 @@ static int demodulate_symbol(fanet_state_t *s, const float *buf_i, const float *
     return peak_bin;
 }
 
-static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_q, int *dc_peak_out)
+static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_q, int32_t *dc_peak_out)
 {
-    int N = (int)s->samples_per_symbol;
-    int fft_n = LORA_N;
+    int32_t N = (int32_t)s->samples_per_symbol;
+    int32_t fft_n = LORA_N;
     float re[LORA_N], im[LORA_N];
     memset(re, 0, sizeof(re));
     memset(im, 0, sizeof(im));
 
-    int fold = N / fft_n;
+    int32_t fold = N / fft_n;
     if (fold < 1) fold = 1;
 
-    for (int k = 0; k < N; k++) {
+    for (int32_t k = 0; k < N; k++) {
         float r = buf_i[k] * s->downchirp_i[k] + buf_q[k] * s->downchirp_q[k];
         float i = buf_q[k] * s->downchirp_i[k] - buf_i[k] * s->downchirp_q[k];
-        int bin = (k / fold) % fft_n;
+        int32_t bin = (k / fold) % fft_n;
         re[bin] += r;
         im[bin] += i;
     }
@@ -242,8 +243,8 @@ static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_
     fft128(re, im);
 
     float max_mag = 0;
-    int peak_bin = 0;
-    for (int k = 0; k < fft_n; k++) {
+    int32_t peak_bin = 0;
+    for (int32_t k = 0; k < fft_n; k++) {
         float mag = re[k] * re[k] + im[k] * im[k];
         if (mag > max_mag) {
             max_mag = mag;
@@ -256,8 +257,8 @@ static bool is_downchirp(fanet_state_t *s, const float *buf_i, const float *buf_
     //   (dc_peak + preamble_bin_offset) % N ≈ 107
     // This fixed offset arises from the correlation geometry between
     // upchirp demod (demodulate_symbol) and downchirp detection.
-    int sum = (peak_bin + s->preamble_bin_offset) % fft_n;
-    int diff = abs(sum - 107);
+    int32_t sum = (peak_bin + s->preamble_bin_offset) % fft_n;
+    int32_t diff = abs(sum - 107);
     if (diff > fft_n / 2) diff = fft_n - diff;
     return (diff <= 3);
 }
@@ -285,21 +286,21 @@ static const uint8_t lora_whitening_seq[255] = {
     0xE5, 0xCA, 0x94, 0x28, 0x50, 0xA1, 0x42, 0x84, 0x09, 0x13, 0x27, 0x4F, 0x9F, 0x3F, 0x7F
 };
 
-static void lora_dewhiten(uint8_t *data, int len)
+static void lora_dewhiten(uint8_t *data, int32_t len)
 {
-    for (int i = 0; i < len && i < 255; i++) {
+    for (int32_t i = 0; i < len && i < 255; i++) {
         data[i] ^= lora_whitening_seq[i];
     }
 }
 
 // ======================== CRC-16 (LoRa) ========================
 
-static uint16_t crc16_lora(const uint8_t *data, int len)
+static uint16_t crc16_lora(const uint8_t *data, int32_t len)
 {
     uint16_t crc = 0x0000;
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
-        for (int j = 0; j < 8; j++) {
+        for (int32_t j = 0; j < 8; j++) {
             if (crc & 0x8000)
                 crc = (crc << 1) ^ 0x1021;
             else
@@ -326,13 +327,13 @@ static uint32_t sha1_rotl32(uint32_t v, uint32_t shift)
 static void sha1_transform(uint32_t state[5], const uint8_t block[64])
 {
     uint32_t w[80];
-    for (int i = 0; i < 16; i++) {
+    for (int32_t i = 0; i < 16; i++) {
         w[i] = ((uint32_t)block[i * 4] << 24)
              | ((uint32_t)block[i * 4 + 1] << 16)
              | ((uint32_t)block[i * 4 + 2] << 8)
              | (uint32_t)block[i * 4 + 3];
     }
-    for (int i = 16; i < 80; i++) {
+    for (int32_t i = 16; i < 80; i++) {
         w[i] = sha1_rotl32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
     }
 
@@ -342,7 +343,7 @@ static void sha1_transform(uint32_t state[5], const uint8_t block[64])
     uint32_t d = state[3];
     uint32_t e = state[4];
 
-    for (int i = 0; i < 80; i++) {
+    for (int32_t i = 0; i < 80; i++) {
         uint32_t f;
         uint32_t k;
         if (i < 20) {
@@ -418,13 +419,13 @@ static void sha1_final(sha1_ctx_t *ctx, uint8_t digest[20])
     while (ctx->buffer_len < 56)
         ctx->buffer[ctx->buffer_len++] = 0;
 
-    for (int i = 7; i >= 0; i--) {
+    for (int32_t i = 7; i >= 0; i--) {
         ctx->buffer[ctx->buffer_len++] = (uint8_t)(ctx->bit_count >> (i * 8));
     }
 
     sha1_transform(ctx->state, ctx->buffer);
 
-    for (int i = 0; i < 5; i++) {
+    for (int32_t i = 0; i < 5; i++) {
         digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
         digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
         digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
@@ -432,7 +433,7 @@ static void sha1_final(sha1_ctx_t *ctx, uint8_t digest[20])
     }
 }
 
-static bool fanet_get_signature_key(const uint8_t **key, int *key_len)
+static bool fanet_get_signature_key(const uint8_t **key, int32_t *key_len)
 {
     *key = NULL;
     *key_len = 0;
@@ -440,7 +441,7 @@ static bool fanet_get_signature_key(const uint8_t **key, int *key_len)
 }
 
 static bool fanet_verify_signature(const uint8_t *packet, const uint8_t *payload,
-                                   int payload_len, const uint8_t *key, int key_len,
+                                   int32_t payload_len, const uint8_t *key, int32_t key_len,
                                    uint32_t signature)
 {
     uint8_t pseudo[4] = {
@@ -472,10 +473,10 @@ static bool fanet_verify_signature(const uint8_t *packet, const uint8_t *payload
 //   2. Divide for reduced rate (header): s = s / 4
 //   3. Gray demap: result = s ^ (s >> 1)  [binary_to_gray formula]
 
-static uint8_t gray_demap(uint8_t bin, int sf, int reduced_rate)
+static uint8_t gray_demap(uint8_t bin, int32_t sf, int32_t reduced_rate)
 {
-    int N = 1 << sf;
-    int s = ((int)bin - 1 + N) & (N - 1);  // subtract 1 mod N
+    int32_t N = 1 << sf;
+    int32_t s = ((int32_t)bin - 1 + N) & (N - 1);  // subtract 1 mod N
     if (reduced_rate) s >>= 2;              // divide by 4 for header
     return (uint8_t)(s ^ (s >> 1));         // gray demap
 }
@@ -488,24 +489,24 @@ static uint8_t gray_demap(uint8_t bin, int sf, int reduced_rate)
 // For header: sf_app = SF - 2 (reduced rate)
 // For payload: sf_app = SF
 
-static void deinterleave(const uint8_t *symbols, int num_symbols,
-                         int sf_app, int cw_len,
-                         uint8_t *codewords, int *num_codewords)
+static void deinterleave(const uint8_t *symbols, int32_t num_symbols,
+                         int32_t sf_app, int32_t cw_len,
+                         uint8_t *codewords, int32_t *num_codewords)
 {
     *num_codewords = 0;
-    int blocks = num_symbols / cw_len;
+    int32_t blocks = num_symbols / cw_len;
 
-    for (int blk = 0; blk < blocks; blk++) {
+    for (int32_t blk = 0; blk < blocks; blk++) {
         // Build interleaved binary matrix: cw_len rows × sf_app columns
         // Each symbol provides sf_app bits (MSB first) — matches gr-lora_sdr int2bool()
         bool inter_bin[8][12]; // max cw_len=8, max sf_app=12
         memset(inter_bin, 0, sizeof(inter_bin));
 
-        for (int i = 0; i < cw_len; i++) {
-            int sym_idx = blk * cw_len + i;
+        for (int32_t i = 0; i < cw_len; i++) {
+            int32_t sym_idx = blk * cw_len + i;
             if (sym_idx >= num_symbols) break;
             uint8_t sym = symbols[sym_idx];
-            for (int j = 0; j < sf_app; j++) {
+            for (int32_t j = 0; j < sf_app; j++) {
                 // MSB first: bit j is bit (sf_app-1-j)
                 inter_bin[i][j] = (sym >> (sf_app - 1 - j)) & 1;
             }
@@ -515,17 +516,17 @@ static void deinterleave(const uint8_t *symbols, int num_symbols,
         bool deinter_bin[12][8]; // max sf_app=12, max cw_len=8
         memset(deinter_bin, 0, sizeof(deinter_bin));
 
-        for (int i = 0; i < cw_len; i++) {
-            for (int j = 0; j < sf_app; j++) {
-                int row = ((i - j - 1) % sf_app + sf_app) % sf_app;
+        for (int32_t i = 0; i < cw_len; i++) {
+            for (int32_t j = 0; j < sf_app; j++) {
+                int32_t row = ((i - j - 1) % sf_app + sf_app) % sf_app;
                 deinter_bin[row][i] = inter_bin[i][j];
             }
         }
 
         // Convert binary rows to codeword bytes — matches gr-lora_sdr bool2int()
-        for (int i = 0; i < sf_app; i++) {
+        for (int32_t i = 0; i < sf_app; i++) {
             uint8_t cw = 0;
-            for (int j = 0; j < cw_len; j++) {
+            for (int32_t j = 0; j < cw_len; j++) {
                 cw |= (deinter_bin[i][j] << (cw_len - 1 - j));
             }
             codewords[(*num_codewords)++] = cw;
@@ -545,12 +546,12 @@ static void deinterleave(const uint8_t *symbols, int num_symbols,
 //
 // Data nibble output (reversed): {cw[3], cw[2], cw[1], cw[0]}
 
-static uint8_t hamming_decode_nibble(uint8_t cw, int cr)
+static uint8_t hamming_decode_nibble(uint8_t cw, int32_t cr)
 {
-    int cw_len = cr + 4;
+    int32_t cw_len = cr + 4;
     // Extract bits (MSB first in cw_len bits)
     bool bits[8];
-    for (int i = 0; i < cw_len; i++) {
+    for (int32_t i = 0; i < cw_len; i++) {
         bits[i] = (cw >> (cw_len - 1 - i)) & 1;
     }
 
@@ -558,14 +559,14 @@ static uint8_t hamming_decode_nibble(uint8_t cw, int cr)
     case 4: {
         // CR 4/8: full Hamming(7,4) + overall parity
         // Overall parity check
-        int parity = 0;
-        for (int i = 0; i < 8; i++) parity ^= bits[i];
+        int32_t parity = 0;
+        for (int32_t i = 0; i < 8; i++) parity ^= bits[i];
 
         // Syndrome
-        int s0 = bits[0] ^ bits[1] ^ bits[2] ^ bits[4];
-        int s1 = bits[1] ^ bits[2] ^ bits[3] ^ bits[5];
-        int s2 = bits[0] ^ bits[1] ^ bits[3] ^ bits[6];
-        int syndrome = s0 + (s1 << 1) + (s2 << 2);
+        int32_t s0 = bits[0] ^ bits[1] ^ bits[2] ^ bits[4];
+        int32_t s1 = bits[1] ^ bits[2] ^ bits[3] ^ bits[5];
+        int32_t s2 = bits[0] ^ bits[1] ^ bits[3] ^ bits[6];
+        int32_t syndrome = s0 + (s1 << 1) + (s2 << 2);
 
         if (parity) { // odd number of errors → correct single bit
             switch (syndrome) {
@@ -580,10 +581,10 @@ static uint8_t hamming_decode_nibble(uint8_t cw, int cr)
     }
     case 3: {
         // CR 4/7: Hamming(7,4) without extra parity
-        int s0 = bits[0] ^ bits[1] ^ bits[2] ^ bits[4];
-        int s1 = bits[1] ^ bits[2] ^ bits[3] ^ bits[5];
-        int s2 = bits[0] ^ bits[1] ^ bits[3] ^ bits[6];
-        int syndrome = s0 + (s1 << 1) + (s2 << 2);
+        int32_t s0 = bits[0] ^ bits[1] ^ bits[2] ^ bits[4];
+        int32_t s1 = bits[1] ^ bits[2] ^ bits[3] ^ bits[5];
+        int32_t s2 = bits[0] ^ bits[1] ^ bits[3] ^ bits[6];
+        int32_t syndrome = s0 + (s1 << 1) + (s2 << 2);
 
         switch (syndrome) {
         case 5: bits[0] ^= 1; break;
@@ -635,7 +636,7 @@ static double fanet_decode_compressed(const uint8_t *p, double ref_coord)
     double sub_deg = sub_deg_int / 32767.0;
 
     double ref_rounded = round(ref_coord);
-    bool ref_isodd = ((int)ref_rounded) & 1;
+    bool ref_isodd = ((int32_t)ref_rounded) & 1;
 
     if (ref_isodd != odd) {
         double mysub_deg = ref_coord - ref_rounded;
@@ -667,7 +668,7 @@ static float decode_scaled_signed(uint8_t byte, float resolution, float scale_fa
 
 // ======================== FANET packet parsing ========================
 
-static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t *msg)
+static bool parse_fanet_packet(const uint8_t *payload, int32_t len, fanet_message_t *msg)
 {
     if (len < 4) return false;
 
@@ -682,7 +683,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
     msg->src_manufacturer = payload[1];
     msg->src_id = (uint16_t)payload[2] | ((uint16_t)payload[3] << 8);
 
-    int hdr_len = 4;
+    int32_t hdr_len = 4;
 
     // Extended header defaults
     msg->unicast = false;
@@ -722,13 +723,13 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
     }
 
     // Application payload
-    int raw_plen = len - hdr_len;
+    int32_t raw_plen = len - hdr_len;
     if (raw_plen < 0) raw_plen = 0;
     const uint8_t *p = payload + hdr_len;
 
     if (msg->signature_present) {
         const uint8_t *key = NULL;
-        int key_len = 0;
+        int32_t key_len = 0;
         if (fanet_get_signature_key(&key, &key_len)) {
             msg->signature_checked = true;
             msg->signature_valid = fanet_verify_signature(payload, p, raw_plen,
@@ -736,7 +737,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
         }
     }
 
-    int plen = raw_plen;
+    int32_t plen = raw_plen;
     if (plen > FANET_MAX_PAYLOAD) plen = FANET_MAX_PAYLOAD;
     if (plen > 0) memcpy(msg->payload, payload + hdr_len, plen);
     msg->payload_len = (uint8_t)plen;
@@ -756,7 +757,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
             msg->tracking.online_tracking = (type_alt >> 15) & 1;
             msg->tracking.aircraft_type = (fanet_aircraft_type_t)((type_alt >> 12) & 0x07);
             bool alt_scale = (type_alt >> 11) & 1;
-            msg->tracking.altitude = (int)(type_alt & 0x07FF);
+            msg->tracking.altitude = (int32_t)(type_alt & 0x07FF);
             if (alt_scale) msg->tracking.altitude *= 4;
         }
 
@@ -777,14 +778,14 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
 
         if (plen >= 13) {
             int8_t raw = (int8_t)((p[12] & 0x7F) | ((p[12] & 0x40) ? 0x80 : 0));
-            msg->tracking.qne_offset = (int)raw;
+            msg->tracking.qne_offset = (int32_t)raw;
             if (p[12] & 0x80) msg->tracking.qne_offset *= 4;
         }
         break;
 
     case FANET_TYPE_NAME:
         if (plen > 0) {
-            int nlen = plen > 31 ? 31 : plen;
+            int32_t nlen = plen > 31 ? 31 : plen;
             memcpy(msg->name, p, nlen);
             msg->name[nlen] = '\0';
         }
@@ -793,9 +794,9 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
     case FANET_TYPE_MESSAGE:
         if (plen >= 1) {
             msg->message.subtype = p[0];
-            int tlen = plen - 1;
-            if (tlen > (int)sizeof(msg->message.text) - 1)
-                tlen = (int)sizeof(msg->message.text) - 1;
+            int32_t tlen = plen - 1;
+            if (tlen > (int32_t)sizeof(msg->message.text) - 1)
+                tlen = (int32_t)sizeof(msg->message.text) - 1;
             if (tlen > 0) memcpy(msg->message.text, p + 1, tlen);
             msg->message.text[tlen > 0 ? tlen : 0] = '\0';
         }
@@ -804,7 +805,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
     case FANET_TYPE_SERVICE: {
         if (plen < 1) break;
         uint8_t header = p[0];
-        int idx = 1;
+        int32_t idx = 1;
 
         msg->weather.is_gateway = (header >> 7) & 1;
         msg->weather.remote_cfg = (header >> 2) & 1;
@@ -888,7 +889,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
         msg->landmark.wind_dependent = (p[1] >> 4) & 1;
         msg->landmark.layer = (fanet_landmark_layer_t)(p[1] & 0x0F);
 
-        int idx = 2;
+        int32_t idx = 2;
 
         msg->landmark.wind_sectors = 0;
         if (msg->landmark.wind_dependent && idx < plen) {
@@ -905,9 +906,9 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
 
         // For text landmarks: string follows
         if (msg->landmark.subtype == FANET_LANDMARK_TEXT && idx < plen) {
-            int tlen = plen - idx;
-            if (tlen > (int)sizeof(msg->landmark.text) - 1)
-                tlen = (int)sizeof(msg->landmark.text) - 1;
+            int32_t tlen = plen - idx;
+            if (tlen > (int32_t)sizeof(msg->landmark.text) - 1)
+                tlen = (int32_t)sizeof(msg->landmark.text) - 1;
             memcpy(msg->landmark.text, p + idx, tlen);
             msg->landmark.text[tlen] = '\0';
         } else {
@@ -919,7 +920,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
         if (msg->landmark.subtype != FANET_LANDMARK_TEXT) {
             double ref_lat = msg->landmark.latitude;
             double ref_lon = msg->landmark.longitude;
-            int pt_idx = 0;
+            int32_t pt_idx = 0;
 
             while (idx + 4 <= plen && pt_idx < FANET_LANDMARK_MAX_POINTS) {
                 double lat = fanet_decode_compressed(p + idx, ref_lat);
@@ -984,7 +985,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
                     msg->remote.has_position = true;
                 }
                 if (plen >= 8) {
-                    msg->remote.altitude = ((int)(int8_t)p[7] + 109) * 25;
+                    msg->remote.altitude = ((int32_t)(int8_t)p[7] + 109) * 25;
                     msg->remote.has_altitude = true;
                 }
                 if (plen >= 9) {
@@ -994,11 +995,11 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
             } else if (subtype >= 4 && subtype <= 8) {
                 // Geofence: altitude bottom + top, then n positions
                 if (plen >= 3) {
-                    msg->remote.geofence_alt_bottom = ((int)(int8_t)p[1] + 109) * 25;
-                    msg->remote.geofence_alt_top    = ((int)(int8_t)p[2] + 109) * 25;
+                    msg->remote.geofence_alt_bottom = ((int32_t)(int8_t)p[1] + 109) * 25;
+                    msg->remote.geofence_alt_top    = ((int32_t)(int8_t)p[2] + 109) * 25;
                     // Remaining bytes: compressed positions (4 bytes each)
-                    int idx = 3;
-                    int pt = 0;
+                    int32_t idx = 3;
+                    int32_t pt = 0;
                     double ref_lat = 0, ref_lon = 0;
                     while (idx + 3 < plen && pt < FANET_LANDMARK_MAX_POINTS) {
                         if (pt == 0) {
@@ -1067,7 +1068,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
         uint16_t type_field = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
         msg->thermal.confidence = (type_field >> 12) & 0x07;
         bool alt_scale = (type_field >> 11) & 1;
-        msg->thermal.altitude = (int)(type_field & 0x07FF);
+        msg->thermal.altitude = (int32_t)(type_field & 0x07FF);
         if (alt_scale) msg->thermal.altitude *= 4;
 
         if (plen >= 9)
@@ -1084,7 +1085,7 @@ static bool parse_fanet_packet(const uint8_t *payload, int len, fanet_message_t 
     case FANET_TYPE_HWINFO2: {
         if (plen < 1) break;
         uint8_t subhdr = p[0];
-        int idx = 1;
+        int32_t idx = 1;
 
         msg->hwinfo.has_build_date = false;
         msg->hwinfo.has_icao = false;
@@ -1140,22 +1141,22 @@ static void decode_packet(fanet_state_t *s)
     if (s->raw_sym_count < 10) return;
 
     // LoRa PHY parameters
-    int sf = FANET_SF;             // 7
-    int sf_hdr = sf - 2;           // 5 (reduced rate for header)
-    int header_cr = 4;             // header always CR 4/8
-    int header_cw_len = header_cr + 4;  // 8
+    int32_t sf = FANET_SF;             // 7
+    int32_t sf_hdr = sf - 2;           // 5 (reduced rate for header)
+    int32_t header_cr = 4;             // header always CR 4/8
+    int32_t header_cw_len = header_cr + 4;  // 8
 
     // Step 1: Gray demap all symbols at full rate (for diagnostic + payload use)
     uint8_t symbols[256];
-    for (int i = 0; i < s->raw_sym_count && i < 256; i++) {
+    for (int32_t i = 0; i < s->raw_sym_count && i < 256; i++) {
         symbols[i] = gray_demap(s->raw_symbols[i], sf, 0);
     }
 
     // Step 2: Decode header block
     // Header uses SF-2 bits per symbol and CR=4/8
     // Number of header symbols: cw_len = 8 (for CR=4/8)
-    int payload_cr = 1;
-    int expected_len = 0;
+    int32_t payload_cr = 1;
+    int32_t expected_len = 0;
     bool has_crc = true;
 
     if (s->raw_sym_count < header_cw_len) {
@@ -1165,36 +1166,36 @@ static void decode_packet(fanet_state_t *s)
 
     // Header symbols: reduced rate (divide by 4 before gray demap)
     uint8_t hdr_symbols[8];
-    for (int i = 0; i < header_cw_len; i++) {
+    for (int32_t i = 0; i < header_cw_len; i++) {
         hdr_symbols[i] = gray_demap(s->raw_symbols[i], sf, 1);
     }
 
 #ifdef FANET_DEBUG
     fprintf(stderr, "DBG: hdr_symbols (masked to %d bits): ", sf_hdr);
-    for (int i = 0; i < header_cw_len; i++) fprintf(stderr, "%d ", hdr_symbols[i]);
+    for (int32_t i = 0; i < header_cw_len; i++) fprintf(stderr, "%d ", hdr_symbols[i]);
     fprintf(stderr, "\n");
 #endif
 
     uint8_t hdr_codewords[128];
-    int hdr_num_cw = 0;
+    int32_t hdr_num_cw = 0;
     deinterleave(hdr_symbols, header_cw_len, sf_hdr, header_cw_len,
                  hdr_codewords, &hdr_num_cw);
 
 #ifdef FANET_DEBUG
     fprintf(stderr, "DBG: hdr_codewords (%d): ", hdr_num_cw);
-    for (int i = 0; i < hdr_num_cw; i++) fprintf(stderr, "0x%02X ", hdr_codewords[i]);
+    for (int32_t i = 0; i < hdr_num_cw; i++) fprintf(stderr, "0x%02X ", hdr_codewords[i]);
     fprintf(stderr, "\n");
 #endif
 
     uint8_t hdr_nibbles[64];
-    int hdr_num = 0;
-    for (int i = 0; i < hdr_num_cw && hdr_num < 64; i++) {
+    int32_t hdr_num = 0;
+    for (int32_t i = 0; i < hdr_num_cw && hdr_num < 64; i++) {
         hdr_nibbles[hdr_num++] = hamming_decode_nibble(hdr_codewords[i], header_cr);
     }
 
 #ifdef FANET_DEBUG
     fprintf(stderr, "DBG: hdr_nibbles (%d): ", hdr_num);
-    for (int i = 0; i < hdr_num; i++) fprintf(stderr, "0x%X ", hdr_nibbles[i]);
+    for (int32_t i = 0; i < hdr_num; i++) fprintf(stderr, "0x%X ", hdr_nibbles[i]);
     fprintf(stderr, "\n");
 #endif
 
@@ -1211,36 +1212,36 @@ static void decode_packet(fanet_state_t *s)
 #endif
 
     // Step 3: Decode payload symbols
-    int payload_sym_start = header_cw_len;
-    int payload_sym_count = s->raw_sym_count - payload_sym_start;
+    int32_t payload_sym_start = header_cw_len;
+    int32_t payload_sym_count = s->raw_sym_count - payload_sym_start;
     if (payload_sym_count < 0) payload_sym_count = 0;
 
-    int payload_cw_len = payload_cr + 4;
-    int sf_pay = sf; // payload uses full SF
+    int32_t payload_cw_len = payload_cr + 4;
+    int32_t sf_pay = sf; // payload uses full SF
 
     // Payload symbols: full rate gray demap (already computed in symbols[])
     uint8_t pay_symbols[256];
-    for (int i = 0; i < payload_sym_count && i < 256; i++) {
+    for (int32_t i = 0; i < payload_sym_count && i < 256; i++) {
         pay_symbols[i] = symbols[payload_sym_start + i];
     }
 
     uint8_t codewords[256];
-    int num_codewords = 0;
+    int32_t num_codewords = 0;
     if (payload_sym_count > 0) {
         deinterleave(pay_symbols, payload_sym_count, sf_pay, payload_cw_len,
                      codewords, &num_codewords);
     }
 
     uint8_t nibbles[128];
-    int num_nibbles = 0;
-    for (int i = 0; i < num_codewords && num_nibbles < 128; i++) {
+    int32_t num_nibbles = 0;
+    for (int32_t i = 0; i < num_codewords && num_nibbles < 128; i++) {
         nibbles[num_nibbles++] = hamming_decode_nibble(codewords[i], payload_cr);
     }
 
     uint8_t payload[64];
-    int payload_len = num_nibbles / 2;
+    int32_t payload_len = num_nibbles / 2;
     if (payload_len > 64) payload_len = 64;
-    for (int i = 0; i < payload_len; i++) {
+    for (int32_t i = 0; i < payload_len; i++) {
         payload[i] = (nibbles[i*2 + 1] << 4) | (nibbles[i*2] & 0x0F);
     }
 
@@ -1249,18 +1250,18 @@ static void decode_packet(fanet_state_t *s)
     }
 
     // Step 4: De-whiten (only payload bytes, not CRC)
-    int data_only_len = has_crc ? (payload_len - 2) : payload_len;
+    int32_t data_only_len = has_crc ? (payload_len - 2) : payload_len;
     if (data_only_len < 0) data_only_len = 0;
     lora_dewhiten(payload, data_only_len);
 
     // Step 5: CRC check
-    int crc_ok = 0;
+    int32_t crc_ok = 0;
     if (has_crc) {
         if (payload_len < 4) {
             s->stats.crc_errors++;
             return;
         }
-        int data_len = payload_len - 2;
+        int32_t data_len = payload_len - 2;
         uint16_t crc_recv = (uint16_t)payload[data_len] | ((uint16_t)payload[data_len + 1] << 8);
         // Method A: LoRa CRC (init=0, XOR last 2 data bytes)
         uint16_t crc_a = crc16_lora(payload, data_len - 2);
@@ -1274,9 +1275,9 @@ static void decode_packet(fanet_state_t *s)
             s->stats.crc_errors++;
             fprintf(stderr, "fanet: CRC fail sym=%d len=%d cr=%d recv=%04X calcA=%04X calcB=%04X type=%u src=%02X:%02X%02X\n",
                     s->raw_sym_count, expected_len, payload_cr, crc_recv, crc_a, crc_b,
-                    (unsigned)(payload[0] & 0x3F),
-                    (unsigned)payload[1],
-                    (unsigned)payload[3], (unsigned)payload[2]);
+                    (uint32_t)(payload[0] & 0x3F),
+                    (uint32_t)payload[1],
+                    (uint32_t)payload[3], (uint32_t)payload[2]);
             // Continue to parse for diagnostics (won't be dispatched)
         }
         payload_len -= 2;
@@ -1296,15 +1297,15 @@ static void decode_packet(fanet_state_t *s)
     if (parse_fanet_packet(payload, payload_len, &msg)) {
         fprintf(stderr, "FANET: %s type=%u src=%02X:%04X len=%d preamble_off=%d\n",
                 crc_ok ? "decoded" : "TENTATIVE",
-                (unsigned)msg.type, msg.src_manufacturer, msg.src_id, payload_len,
+                (uint32_t)msg.type, msg.src_manufacturer, msg.src_id, payload_len,
                 s->preamble_bin_offset);
 
         // Update name cache
         if (crc_ok && msg.type == FANET_TYPE_NAME && msg.name[0]) {
             pthread_mutex_lock(&s->name_mutex);
-            int found = -1, oldest = 0;
+            int32_t found = -1, oldest = 0;
             uint64_t oldest_time = UINT64_MAX;
-            for (int i = 0; i < s->name_cache_count; i++) {
+            for (int32_t i = 0; i < s->name_cache_count; i++) {
                 if (s->name_cache[i].manufacturer == msg.src_manufacturer &&
                     s->name_cache[i].id == msg.src_id) {
                     found = i;
@@ -1319,7 +1320,7 @@ static void decode_packet(fanet_state_t *s)
                 snprintf(s->name_cache[found].name, sizeof(s->name_cache[found].name), "%s", msg.name);
                 s->name_cache[found].last_seen = msg.timestamp_ms;
             } else {
-                int idx = s->name_cache_count < FANET_NAME_CACHE_SIZE
+                int32_t idx = s->name_cache_count < FANET_NAME_CACHE_SIZE
                           ? s->name_cache_count++ : oldest;
                 s->name_cache[idx].manufacturer = msg.src_manufacturer;
                 s->name_cache[idx].id = msg.src_id;
@@ -1342,11 +1343,11 @@ static void decode_packet(fanet_state_t *s)
 static void process_symbol(fanet_state_t *s, float *buf_i, float *buf_q)
 {
     float peak_pwr = 0;
-    int bin = demodulate_symbol(s, buf_i, buf_q, &peak_pwr);
+    int32_t bin = demodulate_symbol(s, buf_i, buf_q, &peak_pwr);
 
     if (!s->in_packet) {
         // --- PREAMBLE DETECTION ---
-        int diff = abs(bin - s->last_peak_bin);
+        int32_t diff = abs(bin - s->last_peak_bin);
         if (diff > LORA_N / 2) diff = LORA_N - diff;
 
         if (s->preamble_count == 0 || diff <= 1) {
@@ -1370,7 +1371,7 @@ static void process_symbol(fanet_state_t *s, float *buf_i, float *buf_q)
         }
     } else {
         // --- IN PACKET ---
-        int corrected_bin = (bin - s->preamble_bin_offset + LORA_N) % LORA_N;
+        int32_t corrected_bin = (bin - s->preamble_bin_offset + LORA_N) % LORA_N;
         s->packet_sym_idx++;
 
         // Sync word verification (2 sync symbols after preamble)
@@ -1380,13 +1381,13 @@ static void process_symbol(fanet_state_t *s, float *buf_i, float *buf_q)
             // FANET sync word 0xF1:
             // High nibble (0xF=15) → sym0 = 15 * (128/16) = 15*8 = 120
             // Low nibble  (0x1=1)  → sym1 = 1 * (128/16) = 1*8 = 8
-            int expected_s0 = ((FANET_SYNC_WORD >> 4) & 0x0F) * (LORA_N / 16);
-            int expected_s1 = ((FANET_SYNC_WORD >> 0) & 0x0F) * (LORA_N / 16);
-            int tol = 3;
+            int32_t expected_s0 = ((FANET_SYNC_WORD >> 4) & 0x0F) * (LORA_N / 16);
+            int32_t expected_s1 = ((FANET_SYNC_WORD >> 0) & 0x0F) * (LORA_N / 16);
+            int32_t tol = 3;
 
-            int d0 = abs(s->sync_symbols[0] - expected_s0);
+            int32_t d0 = abs(s->sync_symbols[0] - expected_s0);
             if (d0 > LORA_N / 2) d0 = LORA_N - d0;
-            int d1 = abs(s->sync_symbols[1] - expected_s1);
+            int32_t d1 = abs(s->sync_symbols[1] - expected_s1);
             if (d1 > LORA_N / 2) d1 = LORA_N - d1;
 
             if (d0 > tol || d1 > tol) {
@@ -1400,7 +1401,7 @@ static void process_symbol(fanet_state_t *s, float *buf_i, float *buf_q)
 
         // SFD detection: 2.25 downchirps (check 3 symbols for downchirp)
         if (s->packet_sym_idx <= 4) {
-            int dc_peak = -1;
+            int32_t dc_peak = -1;
             bool dc = is_downchirp(s, buf_i, buf_q, &dc_peak);
             if (dc) s->sfd_count++;
             // After checking all SFD slots: need at least 2 downchirps
@@ -1500,8 +1501,8 @@ void fanet_process(fanet_state_t *s, const uint8_t *iq, uint32_t len)
 {
     uint32_t num_samples = len / 2;
     for (uint32_t i = 0; i < num_samples; i++) {
-        float I = (float)((int)iq[i*2]     - 128) / 128.0f;
-        float Q = (float)((int)iq[i*2 + 1] - 128) / 128.0f;
+        float I = (float)((int32_t)iq[i*2]     - 128) / 128.0f;
+        float Q = (float)((int32_t)iq[i*2 + 1] - 128) / 128.0f;
 
         s->sym_buf_i[s->sym_buf_pos] = I;
         s->sym_buf_q[s->sym_buf_pos] = Q;
@@ -1515,8 +1516,8 @@ void fanet_process(fanet_state_t *s, const uint8_t *iq, uint32_t len)
                 // The last SFD slot contained 0.25 downchirp + 0.75 of the
                 // first data symbol. Shift the data portion to the buffer
                 // start so the next fill completes data symbol 0 correctly.
-                int quarter = (int)(s->samples_per_symbol / 4);
-                int data_len = (int)s->samples_per_symbol - quarter;
+                int32_t quarter = (int32_t)(s->samples_per_symbol / 4);
+                int32_t data_len = (int32_t)s->samples_per_symbol - quarter;
                 memmove(s->sym_buf_i, s->sym_buf_i + quarter, data_len * sizeof(float));
                 memmove(s->sym_buf_q, s->sym_buf_q + quarter, data_len * sizeof(float));
                 s->sym_buf_pos = data_len;
@@ -1542,11 +1543,11 @@ void fanet_get_stats(const fanet_state_t *s, fanet_stats_t *stats)
 
 bool fanet_get_cached_name(const fanet_state_t *s,
                            uint8_t manufacturer, uint16_t id,
-                           char *buf, int buf_len)
+                           char *buf, int32_t buf_len)
 {
     if (!s || !buf || buf_len < 1) return false;
     pthread_mutex_lock((pthread_mutex_t *)&s->name_mutex);
-    for (int i = 0; i < s->name_cache_count; i++) {
+    for (int32_t i = 0; i < s->name_cache_count; i++) {
         if (s->name_cache[i].manufacturer == manufacturer &&
             s->name_cache[i].id == id) {
             strncpy(buf, s->name_cache[i].name, buf_len - 1);

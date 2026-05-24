@@ -3,6 +3,7 @@
 // Thread-safe cell list updated from GSM decoder callbacks.
 
 #include "gsm_tracker.h"
+#include <cstdint>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,11 +34,11 @@ void gsmTrackerInit(void)
 // Find or allocate a cell slot by MCC/MNC/LAC/CID
 static gsm_tracked_cell_t *find_or_alloc(uint16_t mcc, uint16_t mnc, uint16_t lac, uint16_t cell_id)
 {
-    int free_slot = -1;
+    int32_t free_slot = -1;
     uint64_t oldest_time = UINT64_MAX;
-    int oldest_slot = 0;
+    int32_t oldest_slot = 0;
 
-    for (int i = 0; i < GSM_MAX_CELLS; i++) {
+    for (int32_t i = 0; i < GSM_MAX_CELLS; i++) {
         if (cells[i].active &&
             cells[i].mcc == mcc && cells[i].mnc == mnc &&
             cells[i].lac == lac && cells[i].cell_id == cell_id) {
@@ -53,7 +54,7 @@ static gsm_tracked_cell_t *find_or_alloc(uint16_t mcc, uint16_t mnc, uint16_t la
     }
 
     // Use free slot or evict oldest
-    int slot = (free_slot >= 0) ? free_slot : oldest_slot;
+    int32_t slot = (free_slot >= 0) ? free_slot : oldest_slot;
     memset(&cells[slot], 0, sizeof(cells[slot]));
     cells[slot].active = true;
     cells[slot].mcc = mcc;
@@ -73,8 +74,8 @@ void gsmTrackerUpdateFCCH(uint16_t arfcn, double freq_mhz,
 
     // Find existing FCCH-only entry or allocate with MCC=0
     gsm_tracked_cell_t *t = NULL;
-    int free_slot = -1;
-    for (int i = 0; i < GSM_MAX_CELLS; i++) {
+    int32_t free_slot = -1;
+    for (int32_t i = 0; i < GSM_MAX_CELLS; i++) {
         if (cells[i].active && cells[i].mcc == 0 && cells[i].arfcn == arfcn) {
             t = &cells[i];
             break;
@@ -91,7 +92,7 @@ void gsmTrackerUpdateFCCH(uint16_t arfcn, double freq_mhz,
     }
     if (t) {
         t->freq_mhz = freq_mhz;
-        t->sync_state = (int)sync_state;
+        t->sync_state = (int32_t)sync_state;
         t->last_seen_ms = now_ms();
         t->freq_offset_hz = stats->freq_offset_hz;
         t->bcch_count = stats->fcch_detected;  // repurpose: show FCCH count
@@ -113,7 +114,7 @@ void gsmTrackerUpdate(const gsm_cell_info_t *cell, const gsm_stats_t *stats,
     t->arfcn = cell->arfcn;
     t->bsic = cell->bsic;
     t->freq_mhz = cell->freq_mhz;
-    t->sync_state = (int)sync_state;
+    t->sync_state = (int32_t)sync_state;
     t->last_seen_ms = now_ms();
 
     // Update from SI3 if available
@@ -155,12 +156,12 @@ void gsmTrackerUpdateCB(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb)
     pthread_mutex_unlock(&tracker_mutex);
 }
 
-int gsmTrackerActiveCount(void)
+int32_t gsmTrackerActiveCount(void)
 {
     uint64_t cutoff = now_ms() - (uint64_t)GSM_CELL_TIMEOUT * 1000;
-    int count = 0;
+    int32_t count = 0;
     pthread_mutex_lock(&tracker_mutex);
-    for (int i = 0; i < GSM_MAX_CELLS; i++) {
+    for (int32_t i = 0; i < GSM_MAX_CELLS; i++) {
         if (cells[i].active && cells[i].last_seen_ms >= cutoff)
             count++;
     }
@@ -174,7 +175,7 @@ static std::string sfmt(const char *fmt, ...) {
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int32_t n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n < 0) return {};
     if ((size_t)n < sizeof(tmp)) return std::string(tmp, n);
@@ -211,8 +212,8 @@ std::string gsmTrackerToJSON(void)
 
     pthread_mutex_lock(&tracker_mutex);
 
-    int first = 1;
-    for (int i = 0; i < GSM_MAX_CELLS; i++) {
+    int32_t first = 1;
+    for (int32_t i = 0; i < GSM_MAX_CELLS; i++) {
         gsm_tracked_cell_t *c = &cells[i];
         if (!c->active) continue;
         bool stale = (c->last_seen_ms < cutoff);

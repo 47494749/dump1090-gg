@@ -12,6 +12,7 @@
 // This file is free software: GPL-3.0-or-later
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
@@ -56,19 +57,19 @@
 // ======================== FIR filter ========================
 
 static float p3i_fir_coeffs[P3I_FIR_TAPS];
-static int   p3i_fir_initialized = 0;
+static int32_t   p3i_fir_initialized = 0;
 
 typedef struct {
     float delay_i[P3I_FIR_TAPS];
     float delay_q[P3I_FIR_TAPS];
-    int pos;
+    int32_t pos;
 } p3i_fir_state_t;
 
-static void p3i_design_fir_lpf(float *h, int N, float cutoff, float fs)
+static void p3i_design_fir_lpf(float *h, int32_t N, float cutoff, float fs)
 {
     float fc = cutoff / fs;
-    int M = (N - 1) / 2;
-    for (int n = 0; n < N; n++) {
+    int32_t M = (N - 1) / 2;
+    for (int32_t n = 0; n < N; n++) {
         double w = 0.54 - 0.46 * cos(2.0 * M_PI * n / (N - 1));
         double sinc_val;
         if (n == M) {
@@ -88,8 +89,8 @@ static inline void p3i_fir_process(p3i_fir_state_t *fir, float in_i, float in_q,
     fir->delay_q[fir->pos] = in_q;
 
     float sum_i = 0, sum_q = 0;
-    int idx = fir->pos;
-    for (int k = 0; k < P3I_FIR_TAPS; k++) {
+    int32_t idx = fir->pos;
+    for (int32_t k = 0; k < P3I_FIR_TAPS; k++) {
         sum_i += p3i_fir_coeffs[k] * fir->delay_i[idx];
         sum_q += p3i_fir_coeffs[k] * fir->delay_q[idx];
         idx--;
@@ -110,11 +111,11 @@ static inline void p3i_fir_process(p3i_fir_state_t *fir, float in_i, float in_q,
 // Template: ±1 values at samples_per_bit resolution
 
 static float *p3i_sync_template = NULL;
-static int    p3i_sync_template_len = 0;
+static int32_t    p3i_sync_template_len = 0;
 static float  p3i_template_energy = 0;
-static int    p3i_samples_per_bit = 0;
+static int32_t    p3i_samples_per_bit = 0;
 static uint32_t p3i_actual_sample_rate = 0;
-static int    p3i_templates_initialized = 0;
+static int32_t    p3i_templates_initialized = 0;
 
 static void p3i_init_templates(uint32_t sample_rate)
 {
@@ -137,9 +138,9 @@ static void p3i_init_templates(uint32_t sample_rate)
     p3i_sync_template = malloc(p3i_sync_template_len * sizeof(float));
     if (!p3i_sync_template) return;
 
-    for (int bit = 0; bit < 16; bit++) {
+    for (int32_t bit = 0; bit < 16; bit++) {
         float val = ((pattern >> (15 - bit)) & 1) ? 1.0f : -1.0f;
-        for (int s = 0; s < p3i_samples_per_bit; s++)
+        for (int32_t s = 0; s < p3i_samples_per_bit; s++)
             p3i_sync_template[bit * p3i_samples_per_bit + s] = val;
     }
 
@@ -177,8 +178,8 @@ struct p3i_demod_state {
     uint32_t lockout_remaining;
 
     // Packet collection state
-    int      collecting;
-    int      polarity;
+    int32_t      collecting;
+    int32_t      polarity;
     uint32_t payload_start;
     uint32_t samples_needed;
 
@@ -189,10 +190,10 @@ struct p3i_demod_state {
 // ======================== NCC computation ========================
 
 static float p3i_compute_ncc_flat(const float *signal, const float *tmpl,
-                                   float tmpl_energy, int len)
+                                   float tmpl_energy, int32_t len)
 {
     float corr = 0, energy = 0, sig_sum = 0;
-    for (int i = 0; i < len; i++) {
+    for (int32_t i = 0; i < len; i++) {
         float v = signal[i];
         corr += v * tmpl[i];
         energy += v * v;
@@ -205,7 +206,7 @@ static float p3i_compute_ncc_flat(const float *signal, const float *tmpl,
 }
 
 static float p3i_compute_ncc_ring(const float *ring, uint32_t start,
-                                   const float *tmpl, float tmpl_energy, int tmpl_len)
+                                   const float *tmpl, float tmpl_energy, int32_t tmpl_len)
 {
     start &= P3I_FM_RING_MASK;
     if (start + tmpl_len <= P3I_FM_RING_SIZE) {
@@ -222,13 +223,13 @@ static float p3i_compute_ncc_ring(const float *ring, uint32_t start,
 }
 
 static uint32_t p3i_refine_sync(const float *ring, uint32_t initial_start,
-                                 const float *tmpl, float tmpl_energy, int tmpl_len,
+                                 const float *tmpl, float tmpl_energy, int32_t tmpl_len,
                                  float *best_ncc_out)
 {
     uint32_t best_pos = initial_start;
     float best_ncc = fabsf(p3i_compute_ncc_ring(ring, initial_start, tmpl, tmpl_energy, tmpl_len));
 
-    for (int offset = -P3I_SYNC_REFINE_RANGE; offset <= P3I_SYNC_REFINE_RANGE; offset++) {
+    for (int32_t offset = -P3I_SYNC_REFINE_RANGE; offset <= P3I_SYNC_REFINE_RANGE; offset++) {
         if (offset == 0) continue;
         uint32_t pos = (initial_start + offset) & P3I_FM_RING_MASK;
         float ncc = fabsf(p3i_compute_ncc_ring(ring, pos, tmpl, tmpl_energy, tmpl_len));
@@ -244,26 +245,26 @@ static uint32_t p3i_refine_sync(const float *ring, uint32_t initial_start,
 // ======================== Bit extraction (NRZ, no Manchester) ========================
 
 // Use float for precise bit timing (38400 bps at 2.4 MSPS = 62.5 samples/bit)
-static void p3i_extract_bits(const float *ring, uint32_t start, int polarity,
-                              int samples_per_bit_int __attribute__((unused)), int n_bits, uint8_t *bits)
+static void p3i_extract_bits(const float *ring, uint32_t start, int32_t polarity,
+                              int32_t samples_per_bit_int __attribute__((unused)), int32_t n_bits, uint8_t *bits)
 {
     // Precise samples per bit from the actual sample rate / bitrate
     float spb = (float)p3i_actual_sample_rate / (float)P3I_BITRATE;
 
     // DC estimate over payload region
-    int total_samples = (int)(n_bits * spb);
+    int32_t total_samples = (int32_t)(n_bits * spb);
     float dc_sum = 0;
-    for (int s = 0; s < total_samples; s++) {
+    for (int32_t s = 0; s < total_samples; s++) {
         dc_sum += ring[(start + s) & P3I_FM_RING_MASK];
     }
     float dc_offset = dc_sum / (float)total_samples;
 
-    for (int bit = 0; bit < n_bits; bit++) {
+    for (int32_t bit = 0; bit < n_bits; bit++) {
         // Use float position to avoid cumulative timing drift
         uint32_t bit_start = (start + (uint32_t)(bit * spb)) & P3I_FM_RING_MASK;
-        int isamp = (int)spb;  // integrate over integer samples
+        int32_t isamp = (int32_t)spb;  // integrate over integer samples
         float acc = 0;
-        for (int s = 0; s < isamp; s++) {
+        for (int32_t s = 0; s < isamp; s++) {
             acc += ring[(bit_start + s) & P3I_FM_RING_MASK];
         }
         acc -= dc_offset * isamp;
@@ -275,12 +276,12 @@ static void p3i_extract_bits(const float *ring, uint32_t start, int polarity,
 // Polynomial: x^9 + x^5 + 1, init = 0x1FF
 // Right-shifting LFSR, output = bit 0, MSB-first byte assembly
 
-static void p3i_pn9_dewhiten(uint8_t *data, int n_bytes)
+static void p3i_pn9_dewhiten(uint8_t *data, int32_t n_bytes)
 {
     uint16_t state = 0x1FF;
-    for (int i = 0; i < n_bytes; i++) {
+    for (int32_t i = 0; i < n_bytes; i++) {
         uint8_t mask = 0;
-        for (int bit = 0; bit < 8; bit++) {
+        for (int32_t bit = 0; bit < 8; bit++) {
             uint8_t out = state & 1;
             uint8_t fb = ((state) ^ (state >> 5)) & 1;
             state = (state >> 1) | (fb << 8);
@@ -291,30 +292,30 @@ static void p3i_pn9_dewhiten(uint8_t *data, int n_bytes)
 }
 
 // Convert bit array to bytes (MSB first)
-static void p3i_bits_to_bytes(const uint8_t *bits, int n_bits, uint8_t *bytes)
+static void p3i_bits_to_bytes(const uint8_t *bits, int32_t n_bits, uint8_t *bytes)
 {
-    int n_bytes = n_bits / 8;
+    int32_t n_bytes = n_bits / 8;
     memset(bytes, 0, n_bytes);
-    for (int i = 0; i < n_bits; i++) {
+    for (int32_t i = 0; i < n_bits; i++) {
         bytes[i / 8] |= (bits[i] << (7 - (i % 8)));
     }
 }
 
 // ======================== Try decode P3I frame ========================
 
-static bool p3i_try_decode(struct p3i_demod_state *state, uint32_t payload_start, int polarity __attribute__((unused)))
+static bool p3i_try_decode(struct p3i_demod_state *state, uint32_t payload_start, int32_t polarity __attribute__((unused)))
 {
-    int spb = p3i_samples_per_bit;
-    int total_bits = P3I_FRAME_TOTAL_BITS;
+    int32_t spb = p3i_samples_per_bit;
+    int32_t total_bits = P3I_FRAME_TOTAL_BITS;
     // Extract extra bits for possible sync byte + length header (2 extra bytes = 16 bits)
-    int extra_bits = 16;
-    int extract_bits = total_bits + extra_bits;
+    int32_t extra_bits = 16;
+    int32_t extract_bits = total_bits + extra_bits;
     uint8_t bits[280];
     uint8_t raw_bytes[35];
     uint8_t frame[P3I_FRAME_BYTES];
 
     // Try both polarities
-    for (int pol = -1; pol <= 1; pol += 2) {
+    for (int32_t pol = -1; pol <= 1; pol += 2) {
         p3i_extract_bits(state->fm_ring, payload_start, pol,
                          spb, extract_bits, bits);
         p3i_bits_to_bytes(bits, extract_bits, raw_bytes);
@@ -529,7 +530,7 @@ void p3i_demod_process(struct p3i_demod_state *state, const uint8_t *iq_data, ui
         state->stats.sync_detected++;
 
         // Polarity: positive NCC → normal, negative → inverted
-        int polarity = (ncc > 0) ? 1 : -1;
+        int32_t polarity = (ncc > 0) ? 1 : -1;
 
         // Payload starts right after syncword
         uint32_t payload_start = (refined_start + p3i_sync_template_len) & P3I_FM_RING_MASK;

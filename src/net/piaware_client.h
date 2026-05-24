@@ -35,17 +35,17 @@ extern "C" {
 #define PA_HEALTH_INTERVAL_MS   300000
 
 typedef struct {
-    int enabled;
-    int state;
+    int32_t enabled;
+    int32_t state;
 
     // Socket and TLS (void* to avoid OpenSSL includes in header)
-    int fd;
+    int32_t fd;
     void *ssl_ctx;
     void *ssl;
 
     // Config
     char host[256];
-    int  port;
+    int32_t  port;
     char feeder_id[128];
     char feeder_id_source[16];   // "cache" or "config"
     char mac[24];                // XX:XX:XX:XX:XX:XX
@@ -62,7 +62,7 @@ typedef struct {
 
     // Input buffer
     char inbuf[8192];
-    int  inbuf_len;
+    int32_t  inbuf_len;
 
     // Stats
     uint64_t msgs_sent;

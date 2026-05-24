@@ -19,24 +19,25 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "ais_charset.h"
 
-typedef int (*CommBDecoderFn)(struct modesMessage *,bool);
+typedef int32_t (*CommBDecoderFn)(struct modesMessage *,bool);
 
-static int decodeEmptyResponse(struct modesMessage *mm, bool store);
-static int decodeBDS10(struct modesMessage *mm, bool store);
-static int decodeBDS17(struct modesMessage *mm, bool store);
-static int decodeBDS20(struct modesMessage *mm, bool store);
-static int decodeBDS30(struct modesMessage *mm, bool store);
-static int decodeBDS40(struct modesMessage *mm, bool store);
-static int decodeBDS44(struct modesMessage *mm, bool store);
-static int decodeBDS45(struct modesMessage *mm, bool store);
-static int decodeBDS41(struct modesMessage *mm, bool store);
-static int decodeBDS42(struct modesMessage *mm, bool store);
-static int decodeBDS43(struct modesMessage *mm, bool store);
-static int decodeBDS50(struct modesMessage *mm, bool store);
-static int decodeBDS60(struct modesMessage *mm, bool store);
-static int decodeBDS05(struct modesMessage *mm, bool store);
+static int32_t decodeEmptyResponse(struct modesMessage *mm, bool store);
+static int32_t decodeBDS10(struct modesMessage *mm, bool store);
+static int32_t decodeBDS17(struct modesMessage *mm, bool store);
+static int32_t decodeBDS20(struct modesMessage *mm, bool store);
+static int32_t decodeBDS30(struct modesMessage *mm, bool store);
+static int32_t decodeBDS40(struct modesMessage *mm, bool store);
+static int32_t decodeBDS44(struct modesMessage *mm, bool store);
+static int32_t decodeBDS45(struct modesMessage *mm, bool store);
+static int32_t decodeBDS41(struct modesMessage *mm, bool store);
+static int32_t decodeBDS42(struct modesMessage *mm, bool store);
+static int32_t decodeBDS43(struct modesMessage *mm, bool store);
+static int32_t decodeBDS50(struct modesMessage *mm, bool store);
+static int32_t decodeBDS60(struct modesMessage *mm, bool store);
+static int32_t decodeBDS05(struct modesMessage *mm, bool store);
 
 static CommBDecoderFn comm_b_decoders[] = {
     &decodeEmptyResponse,
@@ -66,12 +67,12 @@ void decodeCommB(struct modesMessage *mm)
     }
 
     // This is a bit hairy as we don't know what the requested register was
-    int bestScore = 0;
+    int32_t bestScore = 0;
     CommBDecoderFn bestDecoder = NULL;
-    int ambiguous = 0;
+    int32_t ambiguous = 0;
 
     for (uint32_t i = 0; i < (sizeof(comm_b_decoders) / sizeof(comm_b_decoders[0])); ++i) {
-        int score = comm_b_decoders[i](mm, false);
+        int32_t score = comm_b_decoders[i](mm, false);
         if (score > bestScore) {
             bestScore = score;
             bestDecoder = comm_b_decoders[i];
@@ -93,7 +94,7 @@ void decodeCommB(struct modesMessage *mm)
     }
 }
 
-static int decodeEmptyResponse(struct modesMessage *mm, bool store)
+static int32_t decodeEmptyResponse(struct modesMessage *mm, bool store)
 {
     // 00000000000000 is a common response. Ignore it.
     //
@@ -134,7 +135,7 @@ static int decodeEmptyResponse(struct modesMessage *mm, bool store)
 }
 
 // BDS1,0 Datalink capabilities
-static int decodeBDS10(struct modesMessage *mm, bool store)
+static int32_t decodeBDS10(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -158,7 +159,7 @@ static int decodeBDS10(struct modesMessage *mm, bool store)
 }
 
 // BDS1,7 Common usage GICB capability report
-static int decodeBDS17(struct modesMessage *mm, bool store)
+static int32_t decodeBDS17(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -167,7 +168,7 @@ static int decodeBDS17(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    int score = 0;
+    int32_t score = 0;
     if (getbit(msg, 7)) {
         score += 1;  // 2,0 aircraft identification
     } else {
@@ -242,7 +243,7 @@ static int decodeBDS17(struct modesMessage *mm, bool store)
 }
 
 // BDS2,0 Aircraft identification
-static int decodeBDS20(struct modesMessage *mm, bool store)
+static int32_t decodeBDS20(struct modesMessage *mm, bool store)
 {
     char callsign[9];
     uint8_t *msg = mm->MB;
@@ -263,8 +264,8 @@ static int decodeBDS20(struct modesMessage *mm, bool store)
     callsign[8] = 0;
 
     // score based on number of valid characters
-    int score = 8;
-    int valid = 1;
+    int32_t score = 8;
+    int32_t valid = 1;
     for (uint32_t i = 0; i < 8; ++i) {
         if ((callsign[i] >= 'A' && callsign[i] <= 'Z') || (callsign[i] >= '0' && callsign[i] <= '9') || callsign[i] == ' ') {
             score += 6;
@@ -289,7 +290,7 @@ static int decodeBDS20(struct modesMessage *mm, bool store)
 }
 
 // BDS3,0 ACAS RA
-static int decodeBDS30(struct modesMessage *mm, bool store)
+static int32_t decodeBDS30(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -315,7 +316,7 @@ static int decodeBDS30(struct modesMessage *mm, bool store)
 }
 
 // BDS4,0 Selected vertical intention
-static int decodeBDS40(struct modesMessage *mm, bool store)
+static int32_t decodeBDS40(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -336,7 +337,7 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    int score = 0;
+    int32_t score = 0;
 
     uint32_t mcp_alt = 0;
     if (mcp_valid && mcp_raw != 0) {
@@ -481,7 +482,7 @@ static int decodeBDS40(struct modesMessage *mm, bool store)
 }
 
 // BDS5,0 Track and turn report
-static int decodeBDS50(struct modesMessage *mm, bool store)
+static int32_t decodeBDS50(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -507,7 +508,7 @@ static int decodeBDS50(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    int score = 0;
+    int32_t score = 0;
 
     float roll = 0;
     if (roll_valid) {
@@ -590,7 +591,7 @@ static int decodeBDS50(struct modesMessage *mm, bool store)
 
     // small penalty for inconsistent data
     if (gs_valid && tas_valid) {
-        int delta = abs((int)gs - (int)tas);
+        int32_t delta = abs((int32_t)gs - (int32_t)tas);
         if (delta > 150) {
             score -= 6;
         }
@@ -639,7 +640,7 @@ static int decodeBDS50(struct modesMessage *mm, bool store)
 }
 
 // BDS6,0 Heading and speed report
-static int decodeBDS60(struct modesMessage *mm, bool store)
+static int32_t decodeBDS60(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -665,7 +666,7 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    int score = 0;
+    int32_t score = 0;
 
     float heading = 0;
     if (heading_valid) {
@@ -708,7 +709,7 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    int baro_rate = 0;
+    int32_t baro_rate = 0;
     if (baro_rate_valid) {
         baro_rate = baro_rate_raw * 32;
         if (baro_rate_sign) {
@@ -726,7 +727,7 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    int inertial_rate = 0;
+    int32_t inertial_rate = 0;
     if (inertial_rate_valid) {
         inertial_rate = inertial_rate_raw * 32;
         if (inertial_rate_sign) {
@@ -749,7 +750,7 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
     // Should check IAS vs Mach at given altitude, but the maths is a little involved
 
     if (baro_rate_valid && inertial_rate_valid) {
-        int delta = abs(baro_rate - inertial_rate);
+        int32_t delta = abs(baro_rate - inertial_rate);
         if (delta > 2000) {
             score -= 12;
         }
@@ -791,7 +792,7 @@ static int decodeBDS60(struct modesMessage *mm, bool store)
 }
 
 // BDS4,4 Meterological routine air report
-static int decodeBDS44(struct modesMessage *mm, bool store)
+static int32_t decodeBDS44(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -842,7 +843,7 @@ static int decodeBDS44(struct modesMessage *mm, bool store)
     if (!humidity_valid && humidity_raw != 0)
         return 0; // humidity not valid, but non-zero values in the humidity field
 
-    int score = 0;
+    int32_t score = 0;
 
     float wind_speed = 0;
     float wind_dir = 0;
@@ -953,7 +954,7 @@ static int decodeBDS44(struct modesMessage *mm, bool store)
 }
 
 // BDS4,5 Meteorological hazard report
-static int decodeBDS45(struct modesMessage *mm, bool store)
+static int32_t decodeBDS45(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -1005,7 +1006,7 @@ static int decodeBDS45(struct modesMessage *mm, bool store)
     if (!asp_valid && asp_raw != 0) return 0;
     if (!rh_valid && rh_raw != 0) return 0;
 
-    int score = 0;
+    int32_t score = 0;
 
     float sat = sat_raw * 0.25;
     if (sat_sign)
@@ -1035,7 +1036,7 @@ static int decodeBDS45(struct modesMessage *mm, bool store)
     }
 
     // Count valid hazard fields
-    int hazard_count = 0;
+    int32_t hazard_count = 0;
     if (turbulence_valid) { hazard_count++; score += 3; }
     if (windshear_valid) { hazard_count++; score += 3; }
     if (microburst_valid) { hazard_count++; score += 3; }
@@ -1084,7 +1085,7 @@ static int decodeBDS45(struct modesMessage *mm, bool store)
 
 // BDS4,1 Next Waypoint Identifier
 // Format: Status(1) + 8 chars (48 bits) AIS encoding + reserved(7)
-static int decodeBDS41(struct modesMessage *mm, bool store)
+static int32_t decodeBDS41(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -1110,8 +1111,8 @@ static int decodeBDS41(struct modesMessage *mm, bool store)
     waypoint[8] = 0;
 
     // Validate: must have at least one non-space character, all chars valid
-    int non_space = 0;
-    for (int i = 0; i < 8; i++) {
+    int32_t non_space = 0;
+    for (int32_t i = 0; i < 8; i++) {
         if (!(waypoint[i] >= 'A' && waypoint[i] <= 'Z') &&
             !(waypoint[i] >= '0' && waypoint[i] <= '9') &&
             waypoint[i] != ' ')
@@ -1124,7 +1125,7 @@ static int decodeBDS41(struct modesMessage *mm, bool store)
 
     // Score high enough to distinguish from noise but not compete with BDS 2,0
     // (BDS 2,0 uses bits 1-8 differently - it includes the aircraft type)
-    int score = 36;
+    int32_t score = 36;
 
     if (store) {
         mm->commb_format = COMMB_WAYPOINT_ID;
@@ -1138,7 +1139,7 @@ static int decodeBDS41(struct modesMessage *mm, bool store)
 // BDS4,2 Next Waypoint Position
 // Format: LatStatus(1) Lat(11) LatSign(1) LonStatus(1) Lon(11) LonSign(1)
 //         AltStatus(1) Alt(16) Reserved(13)
-static int decodeBDS42(struct modesMessage *mm, bool store)
+static int32_t decodeBDS42(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -1171,9 +1172,9 @@ static int decodeBDS42(struct modesMessage *mm, bool store)
     if (lon < -180 || lon > 180)
         return 0;
 
-    int score = 24;
+    int32_t score = 24;
 
-    int alt = 0;
+    int32_t alt = 0;
     if (alt_valid) {
         uint32_t alt_raw = getbits(msg, 28, 43);
         alt = alt_raw * 10; // 10-foot resolution
@@ -1199,7 +1200,7 @@ static int decodeBDS42(struct modesMessage *mm, bool store)
 
 // BDS4,3 Next Waypoint Level/Speed/Time
 // Format: AltStatus(1) Alt(16) SpeedStatus(1) Speed(10) Reserved(28)
-static int decodeBDS43(struct modesMessage *mm, bool store)
+static int32_t decodeBDS43(struct modesMessage *mm, bool store)
 {
     uint8_t *msg = mm->MB;
 
@@ -1215,9 +1216,9 @@ static int decodeBDS43(struct modesMessage *mm, bool store)
     if (reserved != 0)
         return 0;
 
-    int score = 0;
+    int32_t score = 0;
 
-    int alt = 0;
+    int32_t alt = 0;
     if (alt_valid) {
         uint32_t alt_raw = getbits(msg, 2, 17);
         alt = alt_raw * 10; // 10-foot resolution
@@ -1255,7 +1256,7 @@ static int decodeBDS43(struct modesMessage *mm, bool store)
 // We don't try to _use_ this as a position, but we can
 // at least try to recognize it, to exclude other
 // comm-b types (in particular they can be mistaken for MRAR)
-static int decodeBDS05(struct modesMessage *mm, bool store)
+static int32_t decodeBDS05(struct modesMessage *mm, bool store)
 {
     // We recognize these by matching the position altitude against
     // the altitude in the surrounding message, so we need a

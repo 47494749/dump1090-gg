@@ -18,6 +18,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "sdr_receiver.h"
 
 // Stub SdrManager for view1090 (which links track.o but has no SDR)
@@ -71,23 +72,23 @@ void sdrUpdateCPUTime(struct timespec *addTo)
     MODES_NOTUSED(addTo);
 }
 
-int sdrGetGain()
+int32_t sdrGetGain()
 {
     return -1;
 }
 
-int sdrGetMaxGain()
+int32_t sdrGetMaxGain()
 {
     return -1;
 }
 
-double sdrGetGainDb(int step)
+double sdrGetGainDb(int32_t step)
 {
     MODES_NOTUSED(step);
     return 0.0;
 }
 
-int sdrSetGain(int step)
+int32_t sdrSetGain(int32_t step)
 {
     MODES_NOTUSED(step);
     return -1;

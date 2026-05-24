@@ -83,17 +83,17 @@ static const uint32_t LDPC_ParityCheck[48][7] = {
 
 // ======================== LDPC check ========================
 
-static int popcount_byte(uint8_t v)
+static int32_t popcount_byte(uint8_t v)
 {
     // Brian Kernighan's bit count
-    int count = 0;
+    int32_t count = 0;
     while (v) { count += v & 1; v >>= 1; }
     return count;
 }
 
-static int popcount32(uint32_t v)
+static int32_t popcount32(uint32_t v)
 {
-    int count = 0;
+    int32_t count = 0;
     while (v) {
         v &= v - 1;
         count++;
@@ -104,10 +104,10 @@ static int popcount32(uint32_t v)
 uint8_t ogntp_ldpc_check(const uint8_t *data)
 {
     uint8_t errors = 0;
-    for (int row = 0; row < 48; row++) {
+    for (int32_t row = 0; row < 48; row++) {
         const uint8_t *check = (const uint8_t *)LDPC_ParityCheck[row];
         uint8_t count = 0;
-        for (int i = 0; i < 26; i++) {
+        for (int32_t i = 0; i < 26; i++) {
             count += (uint8_t)popcount_byte(data[i] & check[i]);
         }
         if (count & 1) errors++;
@@ -140,7 +140,7 @@ static int32_t sign_extend_u32(uint32_t value, uint32_t bits)
 static uint8_t unsvr_decode_4(uint8_t code)
 {
     if (code <= 4) return code;
-    int exp = (code >> 2) - 1;
+    int32_t exp = (code >> 2) - 1;
     uint8_t mant = code & 0x03;
     return (uint8_t)((mant + 4) << exp);
 }
@@ -150,7 +150,7 @@ static uint8_t unsvr_decode_4(uint8_t code)
 static uint16_t unsvr_decode_12(uint16_t code)
 {
     if (code <= 64) return code;
-    int exp = (code >> 6) - 1;
+    int32_t exp = (code >> 6) - 1;
     uint16_t mant = code & 0x3F;
     return (uint16_t)((mant + 64) << exp);
 }
@@ -159,7 +159,7 @@ static uint16_t unsvr_decode_12(uint16_t code)
 static uint16_t unsvr_decode_8(uint16_t code)
 {
     if (code <= 16) return code;
-    int exp = (code >> 4) - 1;
+    int32_t exp = (code >> 4) - 1;
     uint16_t mant = code & 0x0F;
     return (uint16_t)((mant + 16) << exp);
 }
@@ -168,7 +168,7 @@ static uint16_t unsvr_decode_8(uint16_t code)
 static uint16_t ur2v6_decode(uint8_t code)
 {
     if (code <= 63) return code;
-    int exp = (code >> 6) - 1;
+    int32_t exp = (code >> 6) - 1;
     uint16_t mant = code & 0x3F;
     return (uint16_t)((mant + 64) << exp);
 }
@@ -177,7 +177,7 @@ static uint16_t ur2v6_decode(uint8_t code)
 static uint16_t ur2v5_decode(uint8_t code)
 {
     if (code <= 15) return code;
-    int exp = (code >> 5) - 1;
+    int32_t exp = (code >> 5) - 1;
     uint16_t mant = code & 0x1F;
     return (uint16_t)((mant + 32) << exp);
 }
@@ -205,7 +205,7 @@ static double ogntp_deg_from_units(int32_t units)
     return units * (0.0001 / 60.0);
 }
 
-static int ogntp_rx_rate_per_min(uint8_t code)
+static int32_t ogntp_rx_rate_per_min(uint8_t code)
 {
     if (code >= 31)
         return 0;
@@ -222,7 +222,7 @@ static void ogntp_init_message(ogntp_message_t *msg)
 
 static bool ogntp_position_sane(double lat_deg, double lon_deg,
                                 double ref_lat, double ref_lon,
-                                int alt_m, float speed_ms, int fix_quality)
+                                int32_t alt_m, float speed_ms, int32_t fix_quality)
 {
     if (fix_quality == 0)
         return false;
@@ -272,17 +272,17 @@ static bool ogntp_decode_ogn1_status(const uint8_t *data, ogntp_message_t *msg)
     msg->report_type = 0;
     msg->status_valid = 1;
     msg->valid = 1;
-    msg->altitude = (int)unsvr_decode_12((uint16_t)(d2 & 0x3FFF)) - 1024;
-    msg->fix_quality = (int)((d0 >> 30) & 0x03);
+    msg->altitude = (int32_t)unsvr_decode_12((uint16_t)(d2 & 0x3FFF)) - 1024;
+    msg->fix_quality = (int32_t)((d0 >> 30) & 0x03);
 
-    msg->status.time_seconds = (int)((d0 >> 24) & 0x3F);
+    msg->status.time_seconds = (int32_t)((d0 >> 24) & 0x3F);
     msg->status.fix_quality = msg->fix_quality;
-    msg->status.pulse_bpm = (int)(d0 & 0xFF);
-    msg->status.oxygen_percent = (int)((d0 >> 8) & 0x7F);
-    msg->status.sat_snr_db = (int)(((d0 >> 15) & 0x1F) + 8);
+    msg->status.pulse_bpm = (int32_t)(d0 & 0xFF);
+    msg->status.oxygen_percent = (int32_t)((d0 >> 8) & 0x7F);
+    msg->status.sat_snr_db = (int32_t)(((d0 >> 15) & 0x1F) + 8);
     msg->status.rx_rate_per_min = ogntp_rx_rate_per_min((uint8_t)((d0 >> 20) & 0x0F));
 
-    msg->status.audio_noise_db = (int)(d1 & 0xFF);
+    msg->status.audio_noise_db = (int32_t)(d1 & 0xFF);
     msg->status.radio_noise_dbm = -0.5f * (float)((d1 >> 8) & 0xFF);
 
     {
@@ -303,11 +303,11 @@ static bool ogntp_decode_ogn1_status(const uint8_t *data, ogntp_message_t *msg)
 
     msg->status.has_pressure = ((d2 >> 14) & 0x3FFF) != 0;
     msg->status.pressure_hpa = ((float)((d2 >> 14) & 0x3FFF)) * 0.08f;
-    msg->status.satellites = (int)((d2 >> 28) & 0x0F);
+    msg->status.satellites = (int32_t)((d2 >> 28) & 0x0F);
 
-    msg->status.firmware = (int)(d3 & 0xFF);
-    msg->status.hardware = (int)((d3 >> 8) & 0xFF);
-    msg->status.tx_power_dbm = (int)(((d3 >> 16) & 0x0F) + 4);
+    msg->status.firmware = (int32_t)(d3 & 0xFF);
+    msg->status.hardware = (int32_t)((d3 >> 8) & 0xFF);
+    msg->status.tx_power_dbm = (int32_t)(((d3 >> 16) & 0x0F) + 4);
     msg->status.voltage_v = ur2v6_decode((uint8_t)((d3 >> 24) & 0xFF)) / 64.0f;
 
     return true;
@@ -339,17 +339,17 @@ static bool ogntp_decode_ogn2_status(const uint8_t *data, ogntp_message_t *msg)
     msg->report_type = 0;
     msg->status_valid = 1;
     msg->valid = 1;
-    msg->altitude = (int)unsvr_decode_12((uint16_t)gray_decode_u32(d1 & 0x3FFF)) - 1024;
-    msg->fix_quality = (int)((d2 >> 30) & 0x03);
+    msg->altitude = (int32_t)unsvr_decode_12((uint16_t)gray_decode_u32(d1 & 0x3FFF)) - 1024;
+    msg->fix_quality = (int32_t)((d2 >> 30) & 0x03);
 
-    msg->status.time_seconds = (int)((d2 >> 24) & 0x3F);
+    msg->status.time_seconds = (int32_t)((d2 >> 24) & 0x3F);
     msg->status.fix_quality = msg->fix_quality;
-    msg->status.pulse_bpm = (int)(d2 & 0xFF);
-    msg->status.oxygen_percent = (int)((d2 >> 8) & 0x7F);
-    msg->status.sat_snr_db = (int)(((d2 >> 15) & 0x1F) + 8);
+    msg->status.pulse_bpm = (int32_t)(d2 & 0xFF);
+    msg->status.oxygen_percent = (int32_t)((d2 >> 8) & 0x7F);
+    msg->status.sat_snr_db = (int32_t)(((d2 >> 15) & 0x1F) + 8);
     msg->status.rx_rate_per_min = ogntp_rx_rate_per_min((uint8_t)((d2 >> 20) & 0x0F));
 
-    msg->status.audio_noise_db = (int)(d3 & 0xFF);
+    msg->status.audio_noise_db = (int32_t)(d3 & 0xFF);
     msg->status.radio_noise_dbm = -0.5f * (float)((d3 >> 8) & 0xFF);
 
     {
@@ -372,11 +372,11 @@ static bool ogntp_decode_ogn2_status(const uint8_t *data, ogntp_message_t *msg)
 
     msg->status.has_pressure = ((d1 >> 14) & 0x3FFF) != 0;
     msg->status.pressure_hpa = ((float)((d1 >> 14) & 0x3FFF)) * 0.08f;
-    msg->status.satellites = (int)((d1 >> 28) & 0x0F);
+    msg->status.satellites = (int32_t)((d1 >> 28) & 0x0F);
 
-    msg->status.tx_power_dbm = (int)(((d0 >> 4) & 0x0F) + 4);
-    msg->status.firmware = (int)((d0 >> 8) & 0xFF);
-    msg->status.hardware = (int)((d0 >> 16) & 0xFF);
+    msg->status.tx_power_dbm = (int32_t)(((d0 >> 4) & 0x0F) + 4);
+    msg->status.firmware = (int32_t)((d0 >> 8) & 0xFF);
+    msg->status.hardware = (int32_t)((d0 >> 16) & 0xFF);
     msg->status.voltage_v = (80 + ur2v6_decode((uint8_t)gray_decode_u32((uint8_t)((d0 >> 24) & 0xFF)))) / 64.0f;
 
     return true;
@@ -393,12 +393,12 @@ static bool ogntp_decode_ogn1_packet(const uint8_t *data, double ref_lat, double
                  | ((uint32_t)data[3] << 24);
 
     msg->addr = hdr & 0x00FFFFFF;
-    msg->addr_type = (int)((hdr >> 24) & 0x03);
+    msg->addr_type = (int32_t)((hdr >> 24) & 0x03);
     msg->version = 1;
-    msg->nonpos = (int)((hdr >> 26) & 0x01);
-    msg->relay = (int)((hdr >> 28) & 0x03);
-    msg->encrypted = (int)((hdr >> 30) & 0x01);
-    msg->emergency = (int)((hdr >> 31) & 0x01);
+    msg->nonpos = (int32_t)((hdr >> 26) & 0x01);
+    msg->relay = (int32_t)((hdr >> 28) & 0x03);
+    msg->encrypted = (int32_t)((hdr >> 30) & 0x01);
+    msg->emergency = (int32_t)((hdr >> 31) & 0x01);
     msg->other_system = 0;
 
     if (!ogntp_header_parity_ok(hdr))
@@ -434,13 +434,13 @@ static bool ogntp_decode_ogn1_packet(const uint8_t *data, double ref_lat, double
     int32_t lon_units = (lon24 << 4) + 8;
     double lat_deg = ogntp_deg_from_units(lat_units);
     double lon_deg = ogntp_deg_from_units(lon_units);
-    int fix_quality = (int)((d0 >> 30) & 0x03);
-    int alt_m = (int)unsvr_decode_12((uint16_t)(d2 & 0x3FFF)) - 1024;
+    int32_t fix_quality = (int32_t)((d0 >> 30) & 0x03);
+    int32_t alt_m = (int32_t)unsvr_decode_12((uint16_t)(d2 & 0x3FFF)) - 1024;
     float speed_ms = unsvr_decode_8((uint16_t)((d2 >> 14) & 0x03FF)) * 0.1f;
     float turn_dps = sr2v5_decode((int8_t)((d2 >> 24) & 0xFF)) * 0.1f;
     float heading_deg = ((float)(((d3 & 0x03FFu) * 3600u + 512u) >> 10)) * 0.1f;
     float vs_ms = sr2v6_decode((int8_t)((d3 >> 10) & 0xFF)) * 0.1f;
-    int stealth = (int)((d3 >> 19) & 0x01);
+    int32_t stealth = (int32_t)((d3 >> 19) & 0x01);
 
     if (stealth)
         return false;
@@ -449,7 +449,7 @@ static bool ogntp_decode_ogn1_packet(const uint8_t *data, double ref_lat, double
 
     msg->position_valid = 1;
     msg->valid = 1;
-    msg->aircraft_type = (int)((d3 >> 20) & 0x0F);
+    msg->aircraft_type = (int32_t)((d3 >> 20) & 0x0F);
     msg->stealth = 0;
     msg->latitude = lat_deg;
     msg->longitude = lon_deg;
@@ -474,13 +474,13 @@ static bool ogntp_decode_ogn2_packet(const uint8_t *data, double ref_lat, double
                  | ((uint32_t)data[3] << 24);
 
     msg->addr = hdr & 0x00FFFFFF;
-    msg->addr_type = (int)((hdr >> 24) & 0x03);
+    msg->addr_type = (int32_t)((hdr >> 24) & 0x03);
     msg->version = 2;
-    msg->relay = (int)((hdr >> 26) & 0x01);
-    msg->nonpos = (int)((hdr >> 28) & 0x01);
-    msg->other_system = (int)((hdr >> 29) & 0x01);
-    msg->encrypted = (int)((hdr >> 30) & 0x01);
-    msg->emergency = (int)((hdr >> 31) & 0x01);
+    msg->relay = (int32_t)((hdr >> 26) & 0x01);
+    msg->nonpos = (int32_t)((hdr >> 28) & 0x01);
+    msg->other_system = (int32_t)((hdr >> 29) & 0x01);
+    msg->encrypted = (int32_t)((hdr >> 30) & 0x01);
+    msg->emergency = (int32_t)((hdr >> 31) & 0x01);
 
     if (!ogntp_header_parity_ok(hdr))
         return false;
@@ -513,8 +513,8 @@ static bool ogntp_decode_ogn2_packet(const uint8_t *data, double ref_lat, double
     int32_t lon_units = (int32_t)(((int64_t)sign_extend_u32(gray_decode_u32(d3 & 0x01FFFFFF), 25) * 108000000 + (1 << 23)) >> 24);
     double lat_deg = ogntp_deg_from_units(lat_units);
     double lon_deg = ogntp_deg_from_units(lon_units);
-    int fix_quality = (int)((d2 >> 30) & 0x03);
-    int alt_m = (int)unsvr_decode_12((uint16_t)gray_decode_u32(d1 & 0x3FFF)) - 1024;
+    int32_t fix_quality = (int32_t)((d2 >> 30) & 0x03);
+    int32_t alt_m = (int32_t)unsvr_decode_12((uint16_t)gray_decode_u32(d1 & 0x3FFF)) - 1024;
     float speed_ms = unsvr_decode_8((uint16_t)gray_decode_u32((d1 >> 14) & 0x03FF)) * 0.1f;
     uint16_t heading_code = (uint16_t)gray_decode_u32((d0 >> 4) & 0x03FF);
     float heading_deg = ((float)((heading_code * 3600u + 512u) >> 10)) * 0.1f;
@@ -531,7 +531,7 @@ static bool ogntp_decode_ogn2_packet(const uint8_t *data, double ref_lat, double
 
     msg->position_valid = 1;
     msg->valid = 1;
-    msg->aircraft_type = (int)(d0 & 0x0F);
+    msg->aircraft_type = (int32_t)(d0 & 0x0F);
     msg->latitude = lat_deg;
     msg->longitude = lon_deg;
     msg->altitude = alt_m;
@@ -544,9 +544,9 @@ static bool ogntp_decode_ogn2_packet(const uint8_t *data, double ref_lat, double
     return true;
 }
 
-static int ogntp_candidate_score(const ogntp_message_t *msg, double ref_lat, double ref_lon)
+static int32_t ogntp_candidate_score(const ogntp_message_t *msg, double ref_lat, double ref_lon)
 {
-    int score = 0;
+    int32_t score = 0;
 
     if (msg->position_valid) {
         score += 20;

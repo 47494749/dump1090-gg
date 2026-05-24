@@ -49,7 +49,7 @@ typedef struct {
 
     double   latitude;          // degrees
     double   longitude;         // degrees
-    int      altitude;          // meters above MSL (geoid corrected)
+    int32_t      altitude;          // meters above MSL (geoid corrected)
     float    speed;             // m/s ground speed
     float    course;            // degrees (0-360) ground track
     float    vs;                // m/s vertical speed

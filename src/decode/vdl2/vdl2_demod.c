@@ -17,6 +17,7 @@
 // option) any later version.
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -49,13 +50,13 @@ static const uint8_t dpsk_gray[8] = { 0, 1, 3, 2, 6, 7, 5, 4 };
 // ======================== FCS (CRC-16 CCITT) ========================
 
 static uint16_t fcs_table[256];
-static int fcs_table_init = 0;
+static int32_t fcs_table_init = 0;
 
 static void init_fcs_table(void)
 {
-    for (int i = 0; i < 256; i++) {
+    for (int32_t i = 0; i < 256; i++) {
         uint16_t crc = (uint16_t)i;
-        for (int j = 0; j < 8; j++) {
+        for (int32_t j = 0; j < 8; j++) {
             if (crc & 1)
                 crc = (crc >> 1) ^ 0x8408; // Reversed polynomial
             else
@@ -74,16 +75,16 @@ static uint16_t fcs_update(uint16_t fcs, uint8_t byte)
 // ======================== Decimation lowpass filter ========================
 
 static float vdl2_lpf[VDL2_LPF_TAPS];
-static int vdl2_lpf_init = 0;
+static int32_t vdl2_lpf_init = 0;
 
 static void init_vdl2_lpf(void)
 {
     // Blackman-windowed sinc lowpass, cutoff at ~40 kHz
     // Filter applied at sample_rate (2 MHz), normalized to Nyquist = sample_rate/2
-    int M = VDL2_LPF_TAPS - 1;
+    int32_t M = VDL2_LPF_TAPS - 1;
     double fc = 40000.0 / ((double)VDL2_IF_RATE * VDL2_DECIM / 2.0);  // Normalized cutoff
     double sum = 0;
-    for (int i = 0; i < VDL2_LPF_TAPS; i++) {
+    for (int32_t i = 0; i < VDL2_LPF_TAPS; i++) {
         double n = i - M / 2.0;
         double h;
         if (fabs(n) < 1e-10)
@@ -96,7 +97,7 @@ static void init_vdl2_lpf(void)
         sum += vdl2_lpf[i];
     }
     // Normalize
-    for (int i = 0; i < VDL2_LPF_TAPS; i++)
+    for (int32_t i = 0; i < VDL2_LPF_TAPS; i++)
         vdl2_lpf[i] /= (float)sum;
 
     vdl2_lpf_init = 1;
@@ -114,13 +115,13 @@ struct vdl2_state {
 
     // Mixer LO for frequency shift
     float complex *mixer_lo;
-    int      mixer_len;
-    int      mixer_pos;
+    int32_t      mixer_len;
+    int32_t      mixer_pos;
 
     // Decimation filter state
     float complex decim_buf[VDL2_LPF_TAPS];
-    int      decim_idx;
-    int      decim_count;
+    int32_t      decim_idx;
+    int32_t      decim_count;
 
     // D8PSK demodulator
     float complex prev_symbol;   // Previous symbol for differential decode
@@ -129,14 +130,14 @@ struct vdl2_state {
 
     // Bit assembly
     uint8_t  shift_reg;          // 8-bit shift register for flag/data detection
-    int      bit_count;          // Bits in current byte
-    int      ones_count;         // Consecutive 1s for bit unstuffing
+    int32_t      bit_count;          // Bits in current byte
+    int32_t      ones_count;         // Consecutive 1s for bit unstuffing
 
     // AVLC frame assembly
     vdl2_rx_state_t rx_state;
     uint8_t  frame_buf[VDL2_MAX_FRAME_LEN];
-    int      frame_len;
-    int      frame_bit_idx;
+    int32_t      frame_len;
+    int32_t      frame_bit_idx;
 
     // Stats
     vdl2_stats_t stats;
@@ -161,7 +162,7 @@ struct vdl2_state *vdl2_create(const vdl2_config_t *config)
     s->mixer_lo = calloc((uint32_t)s->mixer_len, sizeof(float complex));
     if (!s->mixer_lo) { free(s); return NULL; }
 
-    for (int k = 0; k < s->mixer_len; k++) {
+    for (int32_t k = 0; k < s->mixer_len; k++) {
         double phase = -2.0 * M_PI * f_offset * k / config->sample_rate;
         s->mixer_lo[k] = (float complex)cexp(I * phase);
     }
@@ -195,12 +196,12 @@ void vdl2_get_stats(struct vdl2_state *state, vdl2_stats_t *stats)
     *stats = state->stats;
 }
 
-static void vdl2_set_hex_summary(vdl2_msg_t *msg, const uint8_t *info, int info_len)
+static void vdl2_set_hex_summary(vdl2_msg_t *msg, const uint8_t *info, int32_t info_len)
 {
-    int tlen = 0;
+    int32_t tlen = 0;
 
-    for (int i = 0; i < info_len && tlen < VDL2_MAX_MSG_LEN - 3; i++) {
-        int n = snprintf(msg->text + tlen, (uint32_t)(VDL2_MAX_MSG_LEN - tlen),
+    for (int32_t i = 0; i < info_len && tlen < VDL2_MAX_MSG_LEN - 3; i++) {
+        int32_t n = snprintf(msg->text + tlen, (uint32_t)(VDL2_MAX_MSG_LEN - tlen),
                          "%02X ", info[i]);
         if (n > 0)
             tlen += n;
@@ -211,30 +212,30 @@ static void vdl2_set_hex_summary(vdl2_msg_t *msg, const uint8_t *info, int info_
 }
 
 static void vdl2_format_hex_bytes(char *dst, size_t dst_size,
-                                  const uint8_t *src, int len)
+                                  const uint8_t *src, int32_t len)
 {
-    int pos = 0;
+    int32_t pos = 0;
 
     if (dst_size == 0)
         return;
 
     dst[0] = '\0';
-    for (int i = 0; i < len && pos < (int)dst_size - 1; i++) {
-        int n = snprintf(dst + pos, dst_size - (size_t)pos,
+    for (int32_t i = 0; i < len && pos < (int32_t)dst_size - 1; i++) {
+        int32_t n = snprintf(dst + pos, dst_size - (size_t)pos,
                          "%s%02X", i == 0 ? "" : ":", src[i]);
-        if (n <= 0 || pos + n >= (int)dst_size)
+        if (n <= 0 || pos + n >= (int32_t)dst_size)
             break;
         pos += n;
     }
 }
 
-static bool vdl2_describe_xid(vdl2_msg_t *msg, const uint8_t *info, int info_len)
+static bool vdl2_describe_xid(vdl2_msg_t *msg, const uint8_t *info, int32_t info_len)
 {
     uint16_t group_len;
-    int params_end;
-    int pos;
-    int count = 0;
-    int out = 0;
+    int32_t params_end;
+    int32_t pos;
+    int32_t count = 0;
+    int32_t out = 0;
 
     if (info_len < 4)
         return false;
@@ -249,14 +250,14 @@ static bool vdl2_describe_xid(vdl2_msg_t *msg, const uint8_t *info, int info_len
                    info[0], info[1], group_len);
     if (out < 0)
         out = 0;
-    if (out >= (int)sizeof(msg->text))
-        out = (int)sizeof(msg->text) - 1;
+    if (out >= (int32_t)sizeof(msg->text))
+        out = (int32_t)sizeof(msg->text) - 1;
 
     pos = 4;
-    while (pos + 2 <= params_end && out < (int)sizeof(msg->text) - 1) {
+    while (pos + 2 <= params_end && out < (int32_t)sizeof(msg->text) - 1) {
         uint8_t param_id = info[pos++];
         uint8_t param_len = info[pos++];
-        int n;
+        int32_t n;
 
         if (pos + param_len > params_end)
             break;
@@ -264,7 +265,7 @@ static bool vdl2_describe_xid(vdl2_msg_t *msg, const uint8_t *info, int info_len
         n = snprintf(msg->text + out, sizeof(msg->text) - (size_t)out,
                      "%s0x%02X(%u)", count == 0 ? " params=" : ",",
                      param_id, param_len);
-        if (n <= 0 || out + n >= (int)sizeof(msg->text))
+        if (n <= 0 || out + n >= (int32_t)sizeof(msg->text))
             break;
 
         out += n;
@@ -277,7 +278,7 @@ static bool vdl2_describe_xid(vdl2_msg_t *msg, const uint8_t *info, int info_len
     return true;
 }
 
-static bool vdl2_describe_clnp(vdl2_msg_t *msg, const uint8_t *info, int info_len)
+static bool vdl2_describe_clnp(vdl2_msg_t *msg, const uint8_t *info, int32_t info_len)
 {
     uint8_t header_len;
     uint8_t version;
@@ -287,10 +288,10 @@ static bool vdl2_describe_clnp(vdl2_msg_t *msg, const uint8_t *info, int info_le
     uint16_t checksum;
     uint8_t dst_len;
     uint8_t src_len;
-    int pos;
+    int32_t pos;
     char dst_nsap[64];
     char src_nsap[64];
-    int out;
+    int32_t out;
 
     if (info_len < 10 || info[0] != 0x81)
         return false;
@@ -326,8 +327,8 @@ static bool vdl2_describe_clnp(vdl2_msg_t *msg, const uint8_t *info, int info_le
                    pdu_len, checksum, dst_nsap, src_nsap);
     if (out < 0)
         out = 0;
-    if (out >= (int)sizeof(msg->text))
-        out = (int)sizeof(msg->text) - 1;
+    if (out >= (int32_t)sizeof(msg->text))
+        out = (int32_t)sizeof(msg->text) - 1;
     msg->text[out] = '\0';
     msg->text_len = out;
     return true;
@@ -335,7 +336,7 @@ static bool vdl2_describe_clnp(vdl2_msg_t *msg, const uint8_t *info, int info_le
 
 // ======================== ACARS extraction from AVLC ========================
 
-static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, int len)
+static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, int32_t len)
 {
     // AVLC frame structure:
     // Bytes 0-3: Address field (2 bytes src + 2 bytes dst)
@@ -343,14 +344,14 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
     // Bytes 5+: Information field (may contain ACARS)
     // Last 2 bytes: FCS (already verified)
 
-    if (len < 8) return;  // Too short for meaningful content
+    if (len < 8) return;  // Too int16_t for meaningful content
 
-    int info_start = 4;  // Skip address + control
+    int32_t info_start = 4;  // Skip address + control
     // Check for extended address
     if (!(frame[1] & 0x01)) info_start = 5;  // Extended address
     if (info_start >= len - 2) return;
 
-    int info_len = len - 2 - info_start;  // Subtract FCS
+    int32_t info_len = len - 2 - info_start;  // Subtract FCS
     if (info_len < 5) return;
 
     // Look for ACARS-like content in the information field
@@ -410,8 +411,8 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
 
     // Try to extract ACARS fields
     // Look for SOH (0x01) marker
-    int acars_start = -1;
-    for (int i = 0; i < info_len - 5; i++) {
+    int32_t acars_start = -1;
+    for (int32_t i = 0; i < info_len - 5; i++) {
         if (info[i] == 0x01) {  // SOH
             acars_start = i + 1;
             break;
@@ -423,13 +424,13 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
         msg.proto = VDL2_PROTO_ACARS;
         msg.proto_name = "ACARS";
         // Standard ACARS format after SOH
-        int p = acars_start;
+        int32_t p = acars_start;
 
         // Skip mode byte
         if (p < info_len) p++;
 
         // Registration (7 chars)
-        for (int i = 0; i < 7 && p < info_len; i++)
+        for (int32_t i = 0; i < 7 && p < info_len; i++)
             msg.reg[i] = info[p++] & 0x7F;
 
         // Skip ACK
@@ -446,7 +447,7 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
         if (p < info_len) p++;  // STX
 
         // Text
-        int tlen = 0;
+        int32_t tlen = 0;
         while (p < info_len && tlen < VDL2_MAX_MSG_LEN) {
             uint8_t c = info[p++];
             if (c == 0x03 || c == 0x83 || c == 0x17 || c == 0x97)
@@ -459,7 +460,7 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
         // Label semantic lookup for VDL2-extracted ACARS
         const acars_label_info_t *linfo = acars_label_lookup(msg.label);
         msg.label_description = linfo->description;
-        msg.label_category = (int)linfo->category;
+        msg.label_category = (int32_t)linfo->category;
     } else {
         // No ACARS structure found — identify upper-layer protocol
         msg.has_acars = false;
@@ -518,14 +519,14 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
 
 static void vdl2_process_frame(struct vdl2_state *state)
 {
-    int len = state->frame_len;
+    int32_t len = state->frame_len;
     if (len < 6) return;  // Min: 4 addr + 2 FCS
 
     state->stats.frames_detected++;
 
     // Verify FCS
     uint16_t fcs = FCS_INIT;
-    for (int i = 0; i < len; i++)
+    for (int32_t i = 0; i < len; i++)
         fcs = fcs_update(fcs, state->frame_buf[i]);
 
     if (fcs != FCS_GOOD) {
@@ -538,7 +539,7 @@ static void vdl2_process_frame(struct vdl2_state *state)
 
 // ======================== Bit Processing (AVLC deframing) ========================
 
-static void vdl2_process_bit(struct vdl2_state *state, int bit)
+static void vdl2_process_bit(struct vdl2_state *state, int32_t bit)
 {
     state->shift_reg = (uint8_t)((state->shift_reg >> 1) | (bit ? 0x80 : 0));
 
@@ -611,7 +612,7 @@ static void vdl2_process_symbol(struct vdl2_state *state, float complex sym)
     if (phase < 0) phase += 2.0f * (float)M_PI;
 
     // Quantize to nearest octant (0..7)
-    int octant = (int)(phase / ((float)M_PI / 4.0f) + 0.5f) % 8;
+    int32_t octant = (int32_t)(phase / ((float)M_PI / 4.0f) + 0.5f) % 8;
 
     // Gray decode to 3 bits
     uint8_t bits3 = dpsk_gray[octant];
@@ -650,7 +651,7 @@ void vdl2_process(struct vdl2_state *state, const uint8_t *iq_data, uint32_t len
 
             // Apply lowpass filter
             float complex filtered = 0;
-            for (int k = 0; k < VDL2_LPF_TAPS; k++) {
+            for (int32_t k = 0; k < VDL2_LPF_TAPS; k++) {
                 filtered += state->decim_buf[(state->decim_idx + k) % VDL2_LPF_TAPS]
                             * vdl2_lpf[k];
             }

@@ -48,6 +48,7 @@
 //   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "dump1090.h"
+#include <stdint.h>
 #include "cpu.h"
 #include "opensky_client.h"
 #include "pocsag_demod.h"
@@ -69,11 +70,11 @@ struct _Modes Modes;
 
 // POCSAG CLI config (used to build rx_config_t for SdrManager)
 static struct {
-    int    enabled;
+    int32_t    enabled;
     char   device_serial[64];
-    int    freq;           // center frequency in Hz
+    int32_t    freq;           // center frequency in Hz
     float  gain;           // gain in dB
-    int    ppm_error;
+    int32_t    ppm_error;
     char   ifile_path[512]; // Path to raw IQ file (uint8 I/Q pairs, 2.4 MSPS)
 } PocsagConfig;
 
@@ -81,8 +82,8 @@ static struct {
 static struct {
     struct pocsag_state *demod;
     pthread_t thread;
-    int       thread_running;
-    volatile int stop_flag;
+    int32_t       thread_running;
+    volatile int32_t stop_flag;
 } PocsagIfile;
 
 // ======================== POCSAG ifile reader ========================
@@ -152,7 +153,7 @@ static void *pocsag_ifile_reader_thread(void *arg)
         if (sleep_us > 0) {
             struct timespec ts;
             ts.tv_sec = (time_t)(sleep_us / 1e6);
-            ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+            ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
             nanosleep(&ts, NULL);
         }
     }
@@ -181,14 +182,14 @@ static void *pocsag_ifile_reader_thread(void *arg)
 
 static struct {
     char   ifile_path[512];
-    int    freq;           // center frequency in Hz (default 403000000)
+    int32_t    freq;           // center frequency in Hz (default 403000000)
 } SondeIfileConfig;
 
 static struct {
     struct sonde_state *demod;
     pthread_t thread;
-    int       thread_running;
-    volatile int stop_flag;
+    int32_t       thread_running;
+    volatile int32_t stop_flag;
 } SondeIfile;
 
 static void sonde_ifile_msg_handler(const sonde_msg_t *msg, void *ctx)
@@ -245,7 +246,7 @@ static void *sonde_ifile_reader_thread(void *arg)
         if (sleep_us > 0) {
             struct timespec ts;
             ts.tv_sec = (time_t)(sleep_us / 1e6);
-            ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+            ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
             nanosleep(&ts, NULL);
         }
     }
@@ -272,14 +273,14 @@ static void *sonde_ifile_reader_thread(void *arg)
 
 static struct {
     char   ifile_path[512];
-    int    freq;           // center frequency in Hz (default 131550000)
+    int32_t    freq;           // center frequency in Hz (default 131550000)
 } AcarsIfileConfig;
 
 static struct {
     struct acars_state *demod;
     pthread_t thread;
-    int       thread_running;
-    volatile int stop_flag;
+    int32_t       thread_running;
+    volatile int32_t stop_flag;
 } AcarsIfile;
 
 #define ACARS_IFILE_SAMPLE_RATE 2400000
@@ -332,7 +333,7 @@ static void *acars_ifile_reader_thread(void *arg)
         if (sleep_us > 0) {
             struct timespec ts;
             ts.tv_sec = (time_t)(sleep_us / 1e6);
-            ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+            ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
             nanosleep(&ts, NULL);
         }
     }
@@ -355,20 +356,20 @@ static void *acars_ifile_reader_thread(void *arg)
 
 static struct {
     char   ifile_path[512];
-    int    freq;           // ARFCN frequency in Hz (default 939200000 = ARFCN 16, Vodafone DE)
+    int32_t    freq;           // ARFCN frequency in Hz (default 939200000 = ARFCN 16, Vodafone DE)
 } GsmIfileConfig;
 
 static struct {
     struct gsm_state *demod;
     pthread_t thread;
-    int       thread_running;
-    volatile int stop_flag;
+    int32_t       thread_running;
+    volatile int32_t stop_flag;
 } GsmIfile;
 
 #define GSM_IFILE_SAMPLE_RATE 1000000
 
 static void gsm_ifile_msg_handler(const gsm_cell_info_t *cell, const char *msg_type,
-                                   const uint8_t *l3_data, int l3_len, void *ctx)
+                                   const uint8_t *l3_data, int32_t l3_len, void *ctx)
 {
     (void)l3_data; (void)l3_len; (void)ctx;
     fprintf(stderr, "[GSM-ifile] %s MCC=%03u MNC=%02u LAC=%u CellID=%u BSIC=%u ARFCN=%u\n",
@@ -428,7 +429,7 @@ static void *gsm_ifile_reader_thread(void *arg)
         if (sleep_us > 0) {
             struct timespec ts;
             ts.tv_sec = (time_t)(sleep_us / 1e6);
-            ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+            ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
             nanosleep(&ts, NULL);
         }
     }
@@ -456,14 +457,14 @@ static void *gsm_ifile_reader_thread(void *arg)
 
 static struct {
     char   ifile_path[512];
-    int    freq;           // center frequency in Hz (default 806000000, Band 20)
+    int32_t    freq;           // center frequency in Hz (default 806000000, Band 20)
 } LteIfileConfig;
 
 static struct {
     struct lte_state *demod;
     pthread_t thread;
-    int       thread_running;
-    volatile int stop_flag;
+    int32_t       thread_running;
+    volatile int32_t stop_flag;
 } LteIfile;
 
 #define LTE_IFILE_SAMPLE_RATE 1920000
@@ -532,7 +533,7 @@ static void *lte_ifile_reader_thread(void *arg)
         if (sleep_us > 0) {
             struct timespec ts;
             ts.tv_sec = (time_t)(sleep_us / 1e6);
-            ts.tv_nsec = (long)(fmod(sleep_us, 1e6) * 1000);
+            ts.tv_nsec = (int64_t)(fmod(sleep_us, 1e6) * 1000);
             nanosleep(&ts, NULL);
         }
     }
@@ -583,7 +584,7 @@ static void log_with_timestamp(const char *format, ...)
     }
 }
 
-static void sigintHandler(int dummy) {
+static void sigintHandler(int32_t dummy) {
     MODES_NOTUSED(dummy);
     signal(SIGINT, SIG_DFL);  // reset signal handler - bit extra safety
     Modes.exit = 1;           // Signal to threads that we are done
@@ -591,7 +592,7 @@ static void sigintHandler(int dummy) {
     (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
 }
 
-static void sigtermHandler(int dummy) {
+static void sigtermHandler(int32_t dummy) {
     MODES_NOTUSED(dummy);
     signal(SIGTERM, SIG_DFL); // reset signal handler - bit extra safety
     Modes.exit = 1;           // Signal to threads that we are done
@@ -672,7 +673,7 @@ static void modesInitConfig(void) {
 //=========================================================================
 //
 static void modesInit(void) {
-    int i;
+    int32_t i;
 
     Modes.sample_rate = 2400000.0;
 
@@ -760,8 +761,8 @@ static void modesInit(void) {
 // Get raw IQ samples and filter everything is < than the specified level
 // for more than 256 samples in order to reduce example file size
 //
-static void snipMode(int level) {
-    int i, q;
+static void snipMode(int32_t level) {
+    int32_t i, q;
     uint64_t c = 0;
 
     while ((i = getchar()) != EOF && (q = getchar()) != EOF) {
@@ -1146,7 +1147,7 @@ static void backgroundTasks(void) {
 
     // 1-minute stats update
     if (now >= next_stats_update) {
-        int i;
+        int32_t i;
 
         if (next_stats_update == 0) {
             next_stats_update = now + 60000;
@@ -1207,7 +1208,7 @@ static void backgroundTasks(void) {
     }
 
     if (now >= next_history) {
-        int rewrite_receiver_json = (Modes.json_dir && Modes.json_aircraft_history[HISTORY_SIZE-1].content == NULL);
+        int32_t rewrite_receiver_json = (Modes.json_dir && Modes.json_aircraft_history[HISTORY_SIZE-1].content == NULL);
 
         free(Modes.json_aircraft_history[Modes.json_aircraft_history_next].content); // might be NULL, that's OK.
         Modes.json_aircraft_history[Modes.json_aircraft_history_next].content =
@@ -1252,9 +1253,9 @@ static void applyNetDefaults()
 // Add or find a beast feed entry by name, returning its index.
 // If the feed already exists (by name), returns its index.
 // If new, initializes with given defaults.
-static int addBeastFeed(const char *name, const char *default_host, int default_port) {
+static int32_t addBeastFeed(const char *name, const char *default_host, int32_t default_port) {
     // Check if already exists
-    for (int i = 0; i < Modes.beast_feed_count; i++) {
+    for (int32_t i = 0; i < Modes.beast_feed_count; i++) {
         if (!strcmp(Modes.beast_feeds[i].name, name))
             return i;
     }
@@ -1262,7 +1263,7 @@ static int addBeastFeed(const char *name, const char *default_host, int default_
         fprintf(stderr, "Too many beast feeds (max %d)\n", MAX_BEAST_FEEDS);
         exit(1);
     }
-    int idx = Modes.beast_feed_count++;
+    int32_t idx = Modes.beast_feed_count++;
     snprintf(Modes.beast_feeds[idx].name, sizeof(Modes.beast_feeds[idx].name), "%s", name);
     Modes.beast_feeds[idx].host = strdup(default_host);
     Modes.beast_feeds[idx].port = default_port;
@@ -1340,7 +1341,7 @@ static void stopStandaloneIfileReaders(void)
 }
 
 int main(int argc, char **argv) {
-    int j;
+    int32_t j;
     bool load_saved_config = true;
 
     for (j = 1; j < argc; j++) {
@@ -1382,10 +1383,10 @@ int main(int argc, char **argv) {
 
     // Parse the command line options
     for (j = 1; j < argc; j++) {
-        int more = j+1 < argc; // There are more arguments
+        int32_t more = j+1 < argc; // There are more arguments
 
         if (!strcmp(argv[j],"--freq") && more) {
-            Modes.freq = (int) strtoll(argv[++j],NULL,10);
+            Modes.freq = (int32_t) strtoll(argv[++j],NULL,10);
         } else if ( (!strcmp(argv[j], "--device") || !strcmp(argv[j], "--device-index")) && more) {
             Modes.dev_name = strdup(argv[++j]);
         } else if (!strcmp(argv[j],"--gain") && more) {
@@ -1486,12 +1487,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbx-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("ADSBx", "feed.adsbexchange.com", 30005);
+            int32_t idx = addBeastFeed("ADSBx", "feed.adsbexchange.com", 30005);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbx-port") && more) {
-            int idx = addBeastFeed("ADSBx", "feed.adsbexchange.com", 30005);
+            int32_t idx = addBeastFeed("ADSBx", "feed.adsbexchange.com", 30005);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--opensky")) {
@@ -1522,12 +1523,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbfi-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("adsb.fi", "feed.adsb.fi", 30004);
+            int32_t idx = addBeastFeed("adsb.fi", "feed.adsb.fi", 30004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbfi-port") && more) {
-            int idx = addBeastFeed("adsb.fi", "feed.adsb.fi", 30004);
+            int32_t idx = addBeastFeed("adsb.fi", "feed.adsb.fi", 30004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--flyitalyadsb")) {
@@ -1536,12 +1537,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--flyitalyadsb-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("FlyItaly", "dati.flyitalyadsb.com", 4905);
+            int32_t idx = addBeastFeed("FlyItaly", "dati.flyitalyadsb.com", 4905);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--flyitalyadsb-port") && more) {
-            int idx = addBeastFeed("FlyItaly", "dati.flyitalyadsb.com", 4905);
+            int32_t idx = addBeastFeed("FlyItaly", "dati.flyitalyadsb.com", 4905);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--planewatch")) {
@@ -1550,12 +1551,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--planewatch-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("PlaneWatch", "atc.plane.watch", 30004);
+            int32_t idx = addBeastFeed("PlaneWatch", "atc.plane.watch", 30004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--planewatch-port") && more) {
-            int idx = addBeastFeed("PlaneWatch", "atc.plane.watch", 30004);
+            int32_t idx = addBeastFeed("PlaneWatch", "atc.plane.watch", 30004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--adsbone")) {
@@ -1564,12 +1565,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbone-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("adsb.one", "feed.adsb.one", 64004);
+            int32_t idx = addBeastFeed("adsb.one", "feed.adsb.one", 64004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbone-port") && more) {
-            int idx = addBeastFeed("adsb.one", "feed.adsb.one", 64004);
+            int32_t idx = addBeastFeed("adsb.one", "feed.adsb.one", 64004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--adsblol")) {
@@ -1578,12 +1579,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsblol-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("adsb.lol", "feed.adsb.lol", 30004);
+            int32_t idx = addBeastFeed("adsb.lol", "feed.adsb.lol", 30004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsblol-port") && more) {
-            int idx = addBeastFeed("adsb.lol", "feed.adsb.lol", 30004);
+            int32_t idx = addBeastFeed("adsb.lol", "feed.adsb.lol", 30004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--airplaneslive")) {
@@ -1592,12 +1593,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--airplaneslive-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("airplanes.live", "feed.airplanes.live", 30004);
+            int32_t idx = addBeastFeed("airplanes.live", "feed.airplanes.live", 30004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--airplaneslive-port") && more) {
-            int idx = addBeastFeed("airplanes.live", "feed.airplanes.live", 30004);
+            int32_t idx = addBeastFeed("airplanes.live", "feed.airplanes.live", 30004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--planespotters")) {
@@ -1606,12 +1607,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--planespotters-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("Planespotters", "feed.planespotters.net", 30004);
+            int32_t idx = addBeastFeed("Planespotters", "feed.planespotters.net", 30004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--planespotters-port") && more) {
-            int idx = addBeastFeed("Planespotters", "feed.planespotters.net", 30004);
+            int32_t idx = addBeastFeed("Planespotters", "feed.planespotters.net", 30004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--theairtraffic")) {
@@ -1620,12 +1621,12 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--theairtraffic-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("TheAirTraffic", "feed.theairtraffic.com", 30004);
+            int32_t idx = addBeastFeed("TheAirTraffic", "feed.theairtraffic.com", 30004);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--theairtraffic-port") && more) {
-            int idx = addBeastFeed("TheAirTraffic", "feed.theairtraffic.com", 30004);
+            int32_t idx = addBeastFeed("TheAirTraffic", "feed.theairtraffic.com", 30004);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--avdelphi")) {
@@ -1634,28 +1635,28 @@ int main(int argc, char **argv) {
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--avdelphi-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("AVDelphi", "data.avdelphi.com", 24999);
+            int32_t idx = addBeastFeed("AVDelphi", "data.avdelphi.com", 24999);
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--avdelphi-port") && more) {
-            int idx = addBeastFeed("AVDelphi", "data.avdelphi.com", 24999);
+            int32_t idx = addBeastFeed("AVDelphi", "data.avdelphi.com", 24999);
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
 
         } else if (!strcmp(argv[j],"--adsbhub")) {
             Modes.net = 1;
-            int idx = addBeastFeed("ADSBHub", "data.adsbhub.org", 5001);
+            int32_t idx = addBeastFeed("ADSBHub", "data.adsbhub.org", 5001);
             Modes.beast_feeds[idx].format = FEED_FORMAT_RAW;
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbhub-host") && more) {
             Modes.net = 1;
-            int idx = addBeastFeed("ADSBHub", "data.adsbhub.org", 5001);
+            int32_t idx = addBeastFeed("ADSBHub", "data.adsbhub.org", 5001);
             Modes.beast_feeds[idx].format = FEED_FORMAT_RAW;
             free(Modes.beast_feeds[idx].host);
             Modes.beast_feeds[idx].host = strdup(argv[++j]);
             applyNetDefaults();
         } else if (!strcmp(argv[j],"--adsbhub-port") && more) {
-            int idx = addBeastFeed("ADSBHub", "data.adsbhub.org", 5001);
+            int32_t idx = addBeastFeed("ADSBHub", "data.adsbhub.org", 5001);
             Modes.beast_feeds[idx].format = FEED_FORMAT_RAW;
             Modes.beast_feeds[idx].port = atoi(argv[++j]);
         } else if (!strcmp(argv[j],"--adsbhub-ckey") && more) {
@@ -1665,7 +1666,7 @@ int main(int argc, char **argv) {
             if (!f) { fprintf(stderr, "Cannot open ckey file: %s\n", argv[j]); exit(1); }
             char ckbuf[256];
             if (fgets(ckbuf, sizeof(ckbuf), f)) {
-                int len = strlen(ckbuf);
+                int32_t len = strlen(ckbuf);
                 while (len > 0 && (ckbuf[len-1] == '\n' || ckbuf[len-1] == '\r' || ckbuf[len-1] == ' '))
                     ckbuf[--len] = '\0';
                 Modes.adsbhub_ckey = strdup(ckbuf);
@@ -1972,7 +1973,7 @@ int main(int argc, char **argv) {
     // ========== Load saved receivers, then apply CLI overrides ==========
 
     // Step 1: Load all receivers from receivers.json (baseline config)
-    int loaded = 0;
+    int32_t loaded = 0;
     if (load_saved_config) {
         loaded = sdrManagerLoad();
         if (loaded > 0) {
@@ -1993,13 +1994,13 @@ int main(int argc, char **argv) {
         if (Modes.dev_name) {
             snprintf(adsb_cfg.serial, sizeof(adsb_cfg.serial), "%.63s", Modes.dev_name);
         }
-        int existing = sdrManagerFindBySerial(adsb_cfg.serial);
+        int32_t existing = sdrManagerFindBySerial(adsb_cfg.serial);
         if (existing >= 0) {
             sdrManagerUpdateConfig(existing, &adsb_cfg);
             log_with_timestamp("ADS-B receiver %s: CLI override (--device-type rtlsdr --gain %.1f)",
                                adsb_cfg.serial[0] ? adsb_cfg.serial : "auto", adsb_cfg.gain);
         } else {
-            int idx = sdrManagerAddReceiver(&adsb_cfg);
+            int32_t idx = sdrManagerAddReceiver(&adsb_cfg);
             if (idx >= 0) {
                 log_with_timestamp("ADS-B receiver added (serial=%s)",
                                    adsb_cfg.serial[0] ? adsb_cfg.serial : "auto");
@@ -2018,13 +2019,13 @@ int main(int argc, char **argv) {
         flarm_cfg.gain = FlarmConfig.gain / 10.0;  // FlarmConfig stores tenths of dB
         flarm_cfg.ppm_error = FlarmConfig.ppm_error;
         snprintf(flarm_cfg.serial, sizeof(flarm_cfg.serial), "%.63s", FlarmConfig.device_serial);
-        int existing = sdrManagerFindBySerial(flarm_cfg.serial);
+        int32_t existing = sdrManagerFindBySerial(flarm_cfg.serial);
         if (existing >= 0) {
             sdrManagerUpdateConfig(existing, &flarm_cfg);
             log_with_timestamp("FLARM receiver %s: CLI override (--flarm --flarm-gain %.1f --flarm-ppm %d)",
                                FlarmConfig.device_serial, flarm_cfg.gain, flarm_cfg.ppm_error);
         } else {
-            int idx = sdrManagerAddReceiver(&flarm_cfg);
+            int32_t idx = sdrManagerAddReceiver(&flarm_cfg);
             if (idx >= 0) {
                 log_with_timestamp("FLARM receiver added (serial=%s)", FlarmConfig.device_serial);
             }
@@ -2051,7 +2052,7 @@ int main(int argc, char **argv) {
             PocsagConfig.enabled = 0;
         } else {
             fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
+            int64_t file_size = ftell(fp);
             fclose(fp);
             double duration = (file_size / 2.0) / POCSAG_SAMPLE_RATE;
             fprintf(stderr, "pocsag-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
@@ -2089,7 +2090,7 @@ int main(int argc, char **argv) {
                     SondeIfileConfig.ifile_path, strerror(errno));
         } else {
             fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
+            int64_t file_size = ftell(fp);
             fclose(fp);
             double duration = (file_size / 2.0) / SONDE_IFILE_SAMPLE_RATE;
             fprintf(stderr, "sonde-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
@@ -2122,7 +2123,7 @@ int main(int argc, char **argv) {
                     AcarsIfileConfig.ifile_path, strerror(errno));
         } else {
             fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
+            int64_t file_size = ftell(fp);
             fclose(fp);
             double duration = (file_size / 2.0) / ACARS_IFILE_SAMPLE_RATE;
             fprintf(stderr, "acars-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
@@ -2161,7 +2162,7 @@ int main(int argc, char **argv) {
                     GsmIfileConfig.ifile_path, strerror(errno));
         } else {
             fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
+            int64_t file_size = ftell(fp);
             fclose(fp);
             double duration = (file_size / 2.0) / GSM_IFILE_SAMPLE_RATE;
             fprintf(stderr, "gsm-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
@@ -2169,7 +2170,7 @@ int main(int argc, char **argv) {
 
             gsm_config_t cfg;
             memset(&cfg, 0, sizeof(cfg));
-            int arfcn_freq = GsmIfileConfig.freq ? GsmIfileConfig.freq : 939200000;
+            int32_t arfcn_freq = GsmIfileConfig.freq ? GsmIfileConfig.freq : 939200000;
             cfg.arfcn_freq = arfcn_freq;
             cfg.center_freq = arfcn_freq - GSM_IF_OFFSET;
             cfg.sample_rate = GSM_IFILE_SAMPLE_RATE;
@@ -2198,7 +2199,7 @@ int main(int argc, char **argv) {
                     LteIfileConfig.ifile_path, strerror(errno));
         } else {
             fseek(fp, 0, SEEK_END);
-            long file_size = ftell(fp);
+            int64_t file_size = ftell(fp);
             fclose(fp);
             double duration = (file_size / 2.0) / LTE_IFILE_SAMPLE_RATE;
             fprintf(stderr, "lte-ifile: file '%s' (%ld bytes, %.1f seconds at %.1f MSPS)\n",
@@ -2233,13 +2234,13 @@ int main(int argc, char **argv) {
         pocsag_cfg.gain = PocsagConfig.gain;
         pocsag_cfg.ppm_error = PocsagConfig.ppm_error;
         snprintf(pocsag_cfg.serial, sizeof(pocsag_cfg.serial), "%.63s", PocsagConfig.device_serial);
-        int existing = sdrManagerFindBySerial(pocsag_cfg.serial);
+        int32_t existing = sdrManagerFindBySerial(pocsag_cfg.serial);
         if (existing >= 0) {
             sdrManagerUpdateConfig(existing, &pocsag_cfg);
             log_with_timestamp("POCSAG receiver %s: CLI override (--pocsag --pocsag-freq %d)",
                                PocsagConfig.device_serial, PocsagConfig.freq);
         } else {
-            int idx = sdrManagerAddReceiver(&pocsag_cfg);
+            int32_t idx = sdrManagerAddReceiver(&pocsag_cfg);
             if (idx >= 0) {
                 log_with_timestamp("POCSAG receiver added (serial=%s, freq=%d)",
                                    PocsagConfig.device_serial, PocsagConfig.freq);
@@ -2254,7 +2255,7 @@ int main(int argc, char **argv) {
 
     // Open all SdrManager receivers
     if (SdrManager.count > 0) {
-        int opened = sdrManagerOpenAll();
+        int32_t opened = sdrManagerOpenAll();
         log_with_timestamp("SdrManager: %d/%d receivers opened", opened, SdrManager.count);
         if (opened > 0) {
             Modes.net = 1;
@@ -2329,7 +2330,7 @@ int main(int argc, char **argv) {
 
     // Start all SdrManager receiver threads
     if (SdrManager.count > 0) {
-        int started = sdrManagerStartAll();
+        int32_t started = sdrManagerStartAll();
         log_with_timestamp("SdrManager: %d receiver threads started", started);
     }
 
@@ -2354,7 +2355,7 @@ int main(int argc, char **argv) {
         }
     } else {
         // SdrManager main loop: drain all receivers
-        int watchdogCounter = 3000; // 3000 * 10ms = ~30 seconds
+        int32_t watchdogCounter = 3000; // 3000 * 10ms = ~30 seconds
 
         while (!Modes.exit) {
             struct timespec start_time;
@@ -2370,7 +2371,7 @@ int main(int argc, char **argv) {
                 struct timespec slp = { 0, 10 * 1000 * 1000 }; // 10ms
                 nanosleep(&slp, NULL);
                 if (--watchdogCounter <= 0) {
-                    log_with_timestamp("No samples received from any SDR for a long time. Giving up.");
+                    log_with_timestamp("No samples received from any SDR for a int64_t time. Giving up.");
                     Modes.exit = 2;
                 }
             }
