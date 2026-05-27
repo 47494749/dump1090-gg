@@ -20,10 +20,6 @@
 #ifndef DUMP1090_CRC_H
 #define DUMP1090_CRC_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 // Global max for fixable bit erros
@@ -39,9 +35,5 @@ void modesChecksumInit(int32_t fixBits);
 uint32_t modesChecksum(const uint8_t *msg, int32_t bitlen);
 struct errorinfo *modesChecksumDiagnose(uint32_t syndrome, int32_t bitlen);
 void modesChecksumFix(uint8_t *msg, struct errorinfo *info);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

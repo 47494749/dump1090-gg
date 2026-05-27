@@ -10,12 +10,8 @@
 #ifndef FLARM_DEMOD_H
 #define FLARM_DEMOD_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 #include "flarm_decode.h"
 #include "ogntp_decode.h"
 #include "p3i_decode.h"
@@ -94,9 +90,5 @@ typedef struct {
 } flarm_demod_stats_t;
 
 void flarm_demod_get_stats(struct flarm_state *state, flarm_demod_stats_t *stats);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // FLARM_DEMOD_H

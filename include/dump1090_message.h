@@ -240,7 +240,7 @@ struct modesMessage {
     hazard_t mhar_wake;
     float mhar_sat;    // degrees C
     float mhar_asp;    // hPa
-    float mhar_rh;     // 0-100 %
+    float mhar_rh;     // radio height, ft (LSB 16 ft)
 
     // BDS 3,0 ACAS RA (decoded fields)
     uint32_t acas_ra_valid : 1;

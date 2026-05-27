@@ -8,12 +8,9 @@
 #ifndef PIAWARE_CLIENT_H
 #define PIAWARE_CLIENT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 #include <sys/types.h>
+#include <string>
 
 // Connection states
 #define PA_DISCONNECTED    0
@@ -44,13 +41,13 @@ typedef struct {
     void *ssl;
 
     // Config
-    char host[256];
+    std::string host;
     int32_t  port;
-    char feeder_id[128];
-    char feeder_id_source[16];   // "cache" or "config"
-    char mac[24];                // XX:XX:XX:XX:XX:XX
-    char ca_dir[256];
-    char feeder_id_file[256];
+    std::string feeder_id;
+    std::string feeder_id_source;
+    std::string mac;
+    std::string ca_dir;
+    std::string feeder_id_file;
 
     // Timers
     uint64_t next_reconnect;
@@ -73,9 +70,5 @@ extern piaware_client_t PiawareClient;
 void piawareClientInit(void);
 void piawareClientPeriodicWork(void);
 void piawareClientCleanup(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

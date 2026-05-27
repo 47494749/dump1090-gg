@@ -20,11 +20,7 @@
 #ifndef FIFO_H
 #define FIFO_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include <stdbool.h>
 #include <stdint.h>
 
 // Values for mag_buf.flags
@@ -65,7 +61,7 @@ struct mag_buf {
     uint64_t        sampleTimestamp; // Clock timestamp of the start of this block, 12MHz clock
     uint64_t        sysTimestamp;    // Estimated system time at start of block
 
-    mag_buf_flags   flags;           // bitwise flags for this buffer
+    unsigned        flags;           // bitwise flags for this buffer (mag_buf_flags values)
     double          mean_level;      // Mean of normalized (0..1) signal level
     double          mean_power;      // Mean of normalized (0..1) power level
     uint32_t        dropped;         // (approx) number of dropped samples, if flag MAGBUF_DISCONTINUOUS is set; zero if not discontinuous
@@ -119,9 +115,5 @@ struct mag_buf *fifo_dequeue(uint32_t timeout_ms);
 
 // Release a buffer previously returned by fifo_acquire() or fifo_pop() back to the freelist.
 void fifo_release(struct mag_buf *buf);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

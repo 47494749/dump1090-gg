@@ -20,19 +20,11 @@
 #ifndef SDR_LIMESDR_H
 #define SDR_LIMESDR_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 void limesdrInitConfig();
 void limesdrShowHelp();
 bool limesdrOpen();
 void limesdrRun();
 void limesdrClose();
 bool limesdrHandleOption(int argc, char **argv, int *jptr);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

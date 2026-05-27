@@ -1,16 +1,15 @@
 // msg_queue.h: Generic thread-safe message queue with C-callable interface.
 // Replaces all SPSC lock-free ring buffers with a mutex-protected queue.
 // C++ implementation, C-compatible header.
+//
+// Part of dump1090-gg-light.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #ifndef MSG_QUEUE_H
 #define MSG_QUEUE_H
 
 #include <stddef.h>
 #include <stdint.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // Opaque handle to a message queue
 typedef void* msg_queue_t;
@@ -30,9 +29,5 @@ int32_t msg_queue_pop(msg_queue_t q, void *item);
 
 // Clear all items from the queue.
 void msg_queue_clear(msg_queue_t q);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // MSG_QUEUE_H

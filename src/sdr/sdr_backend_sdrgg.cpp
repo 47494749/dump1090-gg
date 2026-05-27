@@ -17,11 +17,11 @@
 #include <new>
 #include <pthread.h>
 
-extern "C" {
 #include "sdr_backend.h"
-}
 
 #include "sdrgg.h"
+#include "gg_format.h"
+#include <string>
 
 // ======================== Global sdrgg context ========================
 
@@ -207,14 +207,14 @@ static int32_t gg_set_frequency(sdr_device_t *dev, uint32_t freq_hz)
 {
     uint32_t actual = 0;
     int32_t rc = sdr::set_frequency(static_cast<sdrgg_dev_t *>(dev->handle), freq_hz, &actual);
-    fprintf(stderr, "sdrgg: set_frequency(%u) rc=%d actual=%u\n", freq_hz, rc, actual);
+    gg::eprint("sdrgg: set_frequency(%u) rc=%d actual=%u\n", freq_hz, rc, actual);
     if (rc == SDRGG_OK) {
         dev->current_freq = actual;
         // Check PLL lock for R820T
         if (dev->tuner_type == SDR_TUNER_R820T || dev->tuner_type == SDR_TUNER_R820T2) {
             bool locked = false;
             r820t::pll_locked(static_cast<sdrgg_dev_t *>(dev->handle), &locked);
-            fprintf(stderr, "sdrgg: r820t pll_locked=%d\n", locked);
+            gg::eprint("sdrgg: r820t pll_locked=%d\n", locked);
         }
     }
     return rc;
@@ -229,7 +229,7 @@ static int32_t gg_set_sample_rate(sdr_device_t *dev, uint32_t rate_hz)
 {
     uint32_t actual = 0;
     int32_t rc = sdr::set_sample_rate(static_cast<sdrgg_dev_t *>(dev->handle), rate_hz, &actual);
-    fprintf(stderr, "sdrgg: set_sample_rate(%u) rc=%d actual=%u\n", rate_hz, rc, actual);
+    gg::eprint("sdrgg: set_sample_rate(%u) rc=%d actual=%u\n", rate_hz, rc, actual);
     fflush(stderr);
     if (rc == SDRGG_OK) {
         dev->current_rate = actual;
@@ -361,7 +361,7 @@ static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     adapter->ring = ring;
     dev->ctx = adapter;
 
-    fprintf(stderr, "sdrgg-diag: adapter[%d] created ring=%p\n", adapter->adapter_id, (void*)ring);
+    gg::eprint("sdrgg-diag: adapter[%d] created ring=%p\n", adapter->adapter_id, (void*)ring);
 
     sdrgg_stream_cfg_t cfg = {};
     cfg.buf_count = buf_count ? buf_count : 4;
@@ -372,14 +372,14 @@ static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
                                    &cfg, sdrgg_stream_callback, adapter);
     pthread_mutex_unlock(&g_stream_mutex);
     if (rc != SDRGG_OK) {
-        fprintf(stderr, "sdrgg-diag: adapter[%d] start_stream FAILED rc=%d\n", adapter->adapter_id, rc);
+        gg::eprint("sdrgg-diag: adapter[%d] start_stream FAILED rc=%d\n", adapter->adapter_id, rc);
         dev->ctx = nullptr;
         delete ring;
         delete adapter;
         return rc;
     }
     dev->async_running = 1;
-    fprintf(stderr, "sdrgg-diag: adapter[%d] streaming started, entering consumer loop\n", adapter->adapter_id);
+    gg::eprint("sdrgg-diag: adapter[%d] streaming started, entering consumer loop\n", adapter->adapter_id);
 
     // Consume ring buffer data (reader thread context)
     // This replaces the old spin-wait: instead of sleeping, we poll the ring.

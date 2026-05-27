@@ -17,12 +17,8 @@
 #ifndef FANET_DECODE_H
 #define FANET_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Constants ========================
 
@@ -327,9 +323,5 @@ static inline uint32_t fanet_addr24(uint8_t mfr, uint16_t id)
 
 // Manufacturer name lookup
 const char *fanet_manufacturer_name(uint8_t mfr_id);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // FANET_DECODE_H

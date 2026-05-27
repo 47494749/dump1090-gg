@@ -32,25 +32,32 @@
 #include "decoder_config.h"
 #include "airframes_feed.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
-#include <errno.h>
-#include <stdarg.h>
-#include <time.h>
+#include <cerrno>
+#include <cstdarg>
+#include <ctime>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <limits.h>
+#include <climits>
 #include <dirent.h>
 
 #include <string>
 #include <string_view>
-#include <cstdio>
+
+#if MODES_ENABLE_DIAGNOSTICS
+#define PANEL_DIAG(...) gg::eprint(__VA_ARGS__)
+#define PANEL_DIAG_STDERR(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define PANEL_DIAG(...) do {} while (0)
+#define PANEL_DIAG_STDERR(...) do {} while (0)
+#endif
 
 // Helper: format into std::string (like sprintf but returns std::string)
 static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
@@ -192,7 +199,7 @@ static void statsHistorySaveLocked(void)
     int32_t start = (count < max_e) ? 0 : StatsHistory.head;
 
     struct stats_file_header hdr;
-    memset(&hdr, 0, sizeof(hdr));
+    hdr = {};
     hdr.magic = STATS_HISTORY_MAGIC;
     hdr.version = STATS_HISTORY_VERSION;
     hdr.interval_s = StatsHistory.interval_s;
@@ -279,8 +286,8 @@ static void statsHistoryLoad(void)
     pthread_mutex_unlock(&StatsHistory.mutex);
     free(tmp);
 
-    fprintf(stderr, "Panel: Loaded %d stats snapshots from disk (retained %d within %d hours)\n",
-            actually_read, StatsHistory.count, StatsHistory.retention_hours);
+    PANEL_DIAG_STDERR("Panel: Loaded %d stats snapshots from disk (retained %d within %d hours)\n",
+                      actually_read, StatsHistory.count, StatsHistory.retention_hours);
 }
 
 static void statsHistoryTakeSnapshot(void)
@@ -296,7 +303,7 @@ static void statsHistoryTakeSnapshot(void)
         return;
 
     struct stats_snapshot snap;
-    memset(&snap, 0, sizeof(snap));
+    snap = {};
     snap.ts = now_ms;
 
     // --- System CPU from /proc/self/stat ---
@@ -873,7 +880,7 @@ static void api_post_diagnostics_start(int32_t fd)
 
 void panelInitConfig(void)
 {
-    memset(&PanelState, 0, sizeof(PanelState));
+    PanelState = {};
     PanelState.port = PANEL_DEFAULT_PORT;
     PanelState.listen_fd = -1;
     snprintf(PanelState.html_dir, sizeof(PanelState.html_dir), "%s", PANEL_HTML_DIR);
@@ -1038,7 +1045,8 @@ static void ws_handle_read(int fd) {
 // ============================= Waterfall Spectrum =========================
 
 #include <openssl/sha.h>
-#include <math.h>
+#include <cmath>
+#include "gg_format.h"
 
 // Base64 encode (for WebSocket handshake)
 static int32_t base64_encode(const uint8_t *in, int32_t inlen, char *out, int32_t outlen) {
@@ -1831,8 +1839,7 @@ static void panelApplyConfig(const char *body)
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
                     panelLog("Panel: station name set to '%s'", MlatConfig.user);
                     // Sync OGN station name from station.name
-                    strncpy(FlarmConfig.ogn_station, MlatConfig.user, sizeof(FlarmConfig.ogn_station) - 1);
-                    FlarmConfig.ogn_station[sizeof(FlarmConfig.ogn_station) - 1] = '\0';
+                    FlarmConfig.ogn_station = MlatConfig.user;
                 }
             }
         }
@@ -1870,9 +1877,8 @@ static void panelApplyConfig(const char *body)
             if (*v == '"') {
                 v++;
                 const char *e = strchr(v, '"');
-                if (e && (e - v) < (int32_t)sizeof(FlarmConfig.ogn_server) - 1) {
-                    memcpy(FlarmConfig.ogn_server, v, e - v);
-                    FlarmConfig.ogn_server[e - v] = '\0';
+                if (e && (e - v) > 0) {
+                    FlarmConfig.ogn_server.assign(v, e - v);
                 }
             }
         }
@@ -1936,13 +1942,12 @@ static void panelApplyConfig(const char *body)
     }
     // Callsign always synced from station.name
     if (MlatConfig.user && MlatConfig.user[0]) {
-        strncpy(SondehubConfig.callsign, MlatConfig.user, sizeof(SondehubConfig.callsign) - 1);
-        SondehubConfig.callsign[sizeof(SondehubConfig.callsign) - 1] = '\0';
+        SondehubConfig.callsign = MlatConfig.user;
     }
     if (shub) {
         panelLog("Panel: SondeHub %s (callsign: %s)",
                  SondehubConfig.enabled ? "enabled" : "disabled",
-                 SondehubConfig.callsign);
+                 SondehubConfig.callsign.c_str());
     }
 
     // radiosondy.info
@@ -2136,10 +2141,10 @@ void panelLoadBeastFeedState(void)
         const char *en_false = strstr(pos, "\"enabled\":false");
         if (en_false && (!next_obj || en_false < next_obj)) {
             Modes.beast_feeds[i].enabled = 0;
-            fprintf(stderr, "Panel: %s disabled by saved config\n", Modes.beast_feeds[i].name);
+            PANEL_DIAG("Panel: %s disabled by saved config\n", Modes.beast_feeds[i].name);
         } else if (en_true && (!next_obj || en_true < next_obj)) {
             Modes.beast_feeds[i].enabled = 1;
-            fprintf(stderr, "Panel: %s enabled by saved config\n", Modes.beast_feeds[i].name);
+            PANEL_DIAG("Panel: %s enabled by saved config\n", Modes.beast_feeds[i].name);
         }
     }
 
@@ -2163,8 +2168,7 @@ void panelLoadBeastFeedState(void)
                     int32_t nlen = (int32_t)(e - v);
                     MlatConfig.user = (char*)malloc(nlen + 1);
                     if (MlatConfig.user) { memcpy(MlatConfig.user, v, nlen); MlatConfig.user[nlen] = '\0'; }
-                    strncpy(FlarmConfig.ogn_station, MlatConfig.user, sizeof(FlarmConfig.ogn_station) - 1);
-                    FlarmConfig.ogn_station[sizeof(FlarmConfig.ogn_station) - 1] = '\0';
+                    FlarmConfig.ogn_station = MlatConfig.user;
                 }
             }
         }
@@ -2185,9 +2189,8 @@ void panelLoadBeastFeedState(void)
             if (*v == '"') {
                 v++;
                 const char *e = strchr(v, '"');
-                if (e && (e - v) > 0 && (e - v) < (int32_t)sizeof(FlarmConfig.ogn_server) - 1) {
-                    memcpy(FlarmConfig.ogn_server, v, e - v);
-                    FlarmConfig.ogn_server[e - v] = '\0';
+                if (e && (e - v) > 0) {
+                    FlarmConfig.ogn_server.assign(v, e - v);
                 }
             }
         }
@@ -2202,13 +2205,12 @@ void panelLoadBeastFeedState(void)
     }
     // Callsign always synced from station.name
     if (MlatConfig.user && MlatConfig.user[0]) {
-        strncpy(SondehubConfig.callsign, MlatConfig.user, sizeof(SondehubConfig.callsign) - 1);
-        SondehubConfig.callsign[sizeof(SondehubConfig.callsign) - 1] = '\0';
+        SondehubConfig.callsign = MlatConfig.user;
     }
     if (shub) {
-        fprintf(stderr, "Panel: SondeHub %s (callsign: %s)\n",
-                SondehubConfig.enabled ? "enabled" : "disabled",
-                SondehubConfig.callsign);
+        PANEL_DIAG_STDERR("Panel: SondeHub %s (callsign: %s)\n",
+                  SondehubConfig.enabled ? "enabled" : "disabled",
+                  SondehubConfig.callsign.c_str());
     }
 
     // Restore radiosondy / wettersonde enabled state
@@ -2235,14 +2237,14 @@ void panelLoadBeastFeedState(void)
         const char *af_acars = json_find_obj(airframes, "acars");
         if (af_acars) {
             Modes.airframes_acars_feed.enabled = json_get_bool(af_acars, "enabled", false) ? 1 : 0;
-            fprintf(stderr, "Panel: Airframes ACARS %s by saved config\n",
-                    Modes.airframes_acars_feed.enabled ? "enabled" : "disabled");
+            PANEL_DIAG_STDERR("Panel: Airframes ACARS %s by saved config\n",
+                              Modes.airframes_acars_feed.enabled ? "enabled" : "disabled");
         }
         const char *af_vdl2 = json_find_obj(airframes, "vdl2");
         if (af_vdl2) {
             Modes.airframes_vdl2_feed.enabled = json_get_bool(af_vdl2, "enabled", false) ? 1 : 0;
-            fprintf(stderr, "Panel: Airframes VDL2 %s by saved config\n",
-                    Modes.airframes_vdl2_feed.enabled ? "enabled" : "disabled");
+            PANEL_DIAG_STDERR("Panel: Airframes VDL2 %s by saved config\n",
+                              Modes.airframes_vdl2_feed.enabled ? "enabled" : "disabled");
         }
     }
 
@@ -2261,8 +2263,8 @@ void panelLoadBeastFeedState(void)
         if (StatsHistory.enabled) {
             statsHistoryReconfigure();
             statsHistoryLoad();
-            fprintf(stderr, "Panel: Stats history enabled (retention: %d hours, interval: %ds, loaded: %d snapshots)\n",
-                    StatsHistory.retention_hours, StatsHistory.interval_s, StatsHistory.count);
+            PANEL_DIAG_STDERR("Panel: Stats history enabled (retention: %d hours, interval: %ds, loaded: %d snapshots)\n",
+                              StatsHistory.retention_hours, StatsHistory.interval_s, StatsHistory.count);
         }
     }
 
@@ -2308,9 +2310,9 @@ static void api_get_config(int32_t fd)
         "\"opensky\":{\"enabled\":%s,\"username\":\"%s\","
         "\"serial\":%d,\"host\":\"%s\",\"port\":%d},\n",
         OpenSkyConfig.enabled ? "true" : "false",
-        json_escape(esc, sizeof(esc), OpenSkyConfig.username),
+        json_escape(esc, sizeof(esc), OpenSkyConfig.username.c_str()),
         OpenSkyConfig.serial,
-        json_escape(esc, sizeof(esc), OpenSkyConfig.host),
+        json_escape(esc, sizeof(esc), OpenSkyConfig.host.c_str()),
         OpenSkyConfig.port);
 
     // PiAware
@@ -2318,7 +2320,7 @@ static void api_get_config(int32_t fd)
         "\"piaware\":{\"enabled\":%s,\"feeder_id\":\"%s\","
         "\"state\":%d,\"msgs_sent\":%" PRIu64 "},\n",
         PiawareClient.enabled ? "true" : "false",
-        json_escape(esc, sizeof(esc), PiawareClient.feeder_id),
+        json_escape(esc, sizeof(esc), PiawareClient.feeder_id.c_str()),
         PiawareClient.state,
         (uint64_t)PiawareClient.msgs_sent);
 
@@ -2451,7 +2453,7 @@ static void api_get_config(int32_t fd)
     buf += sfmt(
         "\"sondehub\":{\"enabled\":%s,\"callsign\":\"%s\"},\n",
         SondehubConfig.enabled ? "true" : "false",
-        json_escape(esc, sizeof(esc), SondehubConfig.callsign));
+        json_escape(esc, sizeof(esc), SondehubConfig.callsign.c_str()));
     buf += sfmt(
         "\"radiosondy\":{\"enabled\":%s},\n",
         RadiosondyEnabled ? "true" : "false");
@@ -2480,7 +2482,7 @@ static void api_get_config(int32_t fd)
     // OGN
     buf += sfmt(
         "\"ogn\":{\"server\":\"%s\",\"port\":%d},\n",
-        json_escape(esc, sizeof(esc), FlarmConfig.ogn_server),
+        json_escape(esc, sizeof(esc), FlarmConfig.ogn_server.c_str()),
         FlarmConfig.ogn_port);
 
     // ADSBHub
@@ -2579,8 +2581,8 @@ static void api_get_status(int32_t fd)
             "\"link\":\"https://opensky-network.org/my-opensky/sensors/view-sensors\"}",
             need_comma ? "," : "",
             OpenSkyConfig.enabled ? "true" : "false",
-            json_escape(esc, sizeof(esc), OpenSkyConfig.host), OpenSkyConfig.port,
-            json_escape(esc2, sizeof(esc2), OpenSkyConfig.username));
+            json_escape(esc, sizeof(esc), OpenSkyConfig.host.c_str()), OpenSkyConfig.port,
+            json_escape(esc2, sizeof(esc2), OpenSkyConfig.username.c_str()));
         need_comma = 1;
     }
 
@@ -2595,7 +2597,7 @@ static void api_get_status(int32_t fd)
             "\"link\":\"https://flightaware.com/adsb/stats\"}",
             need_comma ? "," : "",
             PiawareClient.enabled ? "true" : "false",
-            pa_states[si], json_escape(esc, sizeof(esc), PiawareClient.feeder_id),
+            pa_states[si], json_escape(esc, sizeof(esc), PiawareClient.feeder_id.c_str()),
             (uint64_t)PiawareClient.msgs_sent);
         need_comma = 1;
     }
@@ -2636,8 +2638,8 @@ static void api_get_status(int32_t fd)
             "\"link\":\"http://live.glidernet.org\"}",
             need_comma ? "," : "",
             flarm_running ? "true" : "false",
-            json_escape(esc, sizeof(esc), FlarmConfig.ogn_station),
-            json_escape(esc2, sizeof(esc2), FlarmConfig.ogn_server));
+            json_escape(esc, sizeof(esc), FlarmConfig.ogn_station.c_str()),
+            json_escape(esc2, sizeof(esc2), FlarmConfig.ogn_server.c_str()));
         need_comma = 1;
     }
 
@@ -3209,7 +3211,7 @@ static void api_post_config(int32_t fd, const char *body)
         http_send_json(fd, err, (int32_t)strlen(err));
         return;
     }
-    fprintf(f, "%s", body);
+    gg::fprint(f, "%s", body);
     fclose(f);
 
     // Apply config at runtime without restart
@@ -3364,8 +3366,8 @@ void panelProbeAllTuners(void)
 
         int32_t t = sdr_get_tuner_type(dev);
         tuner_cache_store(devs[i].serial, t);
-        fprintf(stderr, "Panel: device #%d SN=%s tuner=%s (%d) via %s\n",
-                i, devs[i].serial, tuner_name_sdr((sdr_tuner_type_t)t), t, ops->name);
+        PANEL_DIAG_STDERR("Panel: device #%d SN=%s tuner=%s (%d) via %s\n",
+                  i, devs[i].serial, tuner_name_sdr((sdr_tuner_type_t)t), t, ops->name);
 
         ops->close(dev);
     }
@@ -6215,7 +6217,7 @@ void panelStart(void)
         PanelState.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     }
     if (PanelState.listen_fd < 0) {
-        fprintf(stderr, "Panel: cannot create socket: %s\n", strerror(errno));
+        gg::eprint("Panel: cannot create socket: %s\n", strerror(errno));
         return;
     }
 
@@ -6227,7 +6229,7 @@ void panelStart(void)
     setsockopt(PanelState.listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 
     struct sockaddr_in6 addr;
-    memset(&addr, 0, sizeof(addr));
+    addr = {};
     addr.sin6_family = AF_INET6;
     addr.sin6_port = htons((uint16_t)PanelState.port);
     addr.sin6_addr = in6addr_any;
@@ -6239,7 +6241,7 @@ void panelStart(void)
         setsockopt(PanelState.listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
         struct sockaddr_in addr4;
-        memset(&addr4, 0, sizeof(addr4));
+        addr4 = {};
         addr4.sin_family = AF_INET;
         addr4.sin_port = htons((uint16_t)PanelState.port);
         addr4.sin_addr.s_addr = INADDR_ANY;
@@ -6254,7 +6256,7 @@ void panelStart(void)
     }
 
     if (listen(PanelState.listen_fd, 128) < 0) {
-        fprintf(stderr, "Panel: listen failed: %s\n", strerror(errno));
+        gg::eprint("Panel: listen failed: %s\n", strerror(errno));
         close(PanelState.listen_fd);
         PanelState.listen_fd = -1;
         return;
@@ -6262,7 +6264,7 @@ void panelStart(void)
 
     PanelState.running = 1;
     if (pthread_create(&PanelState.thread, NULL, panel_thread_entry, NULL) != 0) {
-        fprintf(stderr, "Panel: cannot create thread: %s\n", strerror(errno));
+        gg::eprint("Panel: cannot create thread: %s\n", strerror(errno));
         PanelState.running = 0;
         close(PanelState.listen_fd);
         PanelState.listen_fd = -1;
@@ -6277,7 +6279,7 @@ void panelStop(void)
     // Save stats history to disk before shutting down
     if (StatsHistory.enabled && StatsHistory.count > 0) {
         statsHistorySave();
-        fprintf(stderr, "Panel: Stats history saved (%d snapshots)\n", StatsHistory.count);
+        gg::eprint("Panel: Stats history saved (%d snapshots)\n", StatsHistory.count);
     }
 
     if (!PanelState.running) return;

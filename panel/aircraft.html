@@ -266,7 +266,7 @@ function hasMeteo(a){
     return a.temperature!=null||a.pressure!=null||a.humidity!=null||a.turbulence!=null||
         a.wind_speed!=null||a.mhar_turbulence!=null||a.mhar_windshear!=null||
         a.mhar_microburst!=null||a.mhar_icing!=null||a.mhar_wake!=null||
-        a.mhar_temperature!=null||a.mhar_pressure!=null||a.mhar_humidity!=null||
+        a.mhar_temperature!=null||a.mhar_pressure!=null||a.mhar_radio_height!=null||
         a.oat!=null||a.tat!=null||a.wd_speed!=null;
 }
 function getMeteoIcon(a){
@@ -290,7 +290,7 @@ function getMeteoIcon(a){
             rows.push(`<span class="ml">Nav source</span><span class="mv">${escapeHtml(a.mrar_source.toUpperCase())}</span>`);
     }
     // BDS 4,5 — MHAR
-    const hasMHAR=a.mhar_turbulence!=null||a.mhar_windshear!=null||a.mhar_microburst!=null||a.mhar_icing!=null||a.mhar_wake!=null||a.mhar_temperature!=null||a.mhar_pressure!=null||a.mhar_humidity!=null;
+    const hasMHAR=a.mhar_turbulence!=null||a.mhar_windshear!=null||a.mhar_microburst!=null||a.mhar_icing!=null||a.mhar_wake!=null||a.mhar_temperature!=null||a.mhar_pressure!=null||a.mhar_radio_height!=null;
     if(hasMHAR){
         rows.push('<span class="mh">MHAR (BDS 4,5)</span>');
         if(a.mhar_turbulence!=null)
@@ -307,8 +307,8 @@ function getMeteoIcon(a){
             rows.push(`<span class="ml">SAT</span><span class="mv">${a.mhar_temperature.toFixed(1)} °C</span>`);
         if(a.mhar_pressure!=null)
             rows.push(`<span class="ml">Avg pressure</span><span class="mv">${Math.round(a.mhar_pressure)} hPa</span>`);
-        if(a.mhar_humidity!=null)
-            rows.push(`<span class="ml">Rel. humidity</span><span class="mv">${a.mhar_humidity.toFixed(1)} %</span>`);
+        if(a.mhar_radio_height!=null)
+            rows.push(`<span class="ml">Radio height</span><span class="mv">${a.mhar_radio_height} ft</span>`);
     }
     // Derived wind & temps
     const hasDerived=a.oat!=null||a.tat!=null||a.wd_speed!=null;

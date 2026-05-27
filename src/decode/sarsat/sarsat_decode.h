@@ -20,12 +20,8 @@
 #ifndef SARSAT_DECODE_H
 #define SARSAT_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Constants ========================
 
@@ -158,9 +154,5 @@ void sarsat_get_stats(struct sarsat_state *state, sarsat_stats_t *stats);
 const char *sarsat_beacon_type_name(sarsat_beacon_type_t type);
 const char *sarsat_protocol_name(sarsat_protocol_t proto);
 const char *sarsat_country_name(int32_t mid);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // SARSAT_DECODE_H

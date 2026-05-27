@@ -20,10 +20,6 @@
 #ifndef DUMP1090_NETIO_H
 #define DUMP1090_NETIO_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 // Describes a networking service (group of connections)
@@ -104,9 +100,5 @@ char *generateStatsJson(const char *url_path, int32_t *len);
 char *generateReceiverJson(const char *url_path, int32_t *len);
 char *generateHistoryJson(const char *url_path, int32_t *len);
 void writeJsonToFile(const char *file, char * (*generator) (const char *,int32_t*));
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

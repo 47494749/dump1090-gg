@@ -20,8 +20,8 @@
 #include "opensky_client.h"
 #include "sondehub_client.h"
 
-#include <math.h>
-#include <time.h>
+#include <cmath>
+#include <ctime>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <fcntl.h>
@@ -30,6 +30,7 @@
 #include <openssl/md5.h>
 #include <string>
 #include <string_view>
+#include "gg_format.h"
 
 static adsb_queue_handle_t feeder_adsb_queue = NULL;
 
@@ -429,7 +430,7 @@ static std::string https_get(const char *host, const char *path) {
     hints.ai_family = AF_INET; // Force IPv4 — ADSBHub server doesn't handle IPv6 ckey updates correctly
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, "443", &hints, &res) != 0) {
-        fprintf(stderr, "ADSBHub https_get: DNS failed for %s\n", host);
+        gg::eprint("ADSBHub https_get: DNS failed for %s\n", host);
         return {};
     }
 
@@ -441,7 +442,7 @@ static std::string https_get(const char *host, const char *path) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        fprintf(stderr, "ADSBHub https_get: connect failed for %s: %s\n", host, strerror(errno));
+        gg::eprint("ADSBHub https_get: connect failed for %s: %s\n", host, strerror(errno));
         freeaddrinfo(res); close(fd); return {};
     }
     freeaddrinfo(res);
@@ -536,23 +537,23 @@ static int32_t adsbhub_update_ckey(const char *ckey) {
     // Step 1: get my IPv4
     std::string myip = https_get("ip4.adsbhub.org", "/getmyip.php");
     if (myip.size() < 7) {
-        fprintf(stderr, "ADSBHub ckey: failed to get public IP\n");
+        gg::eprint("ADSBHub ckey: failed to get public IP\n");
         return -1;
     }
     while (!myip.empty() && (myip.back() == '\n' || myip.back() == '\r' || myip.back() == ' '))
         myip.pop_back();
-    fprintf(stderr, "ADSBHub ckey: my IP = %s\n", myip.c_str());
+    gg::eprint("ADSBHub ckey: my IP = %s\n", myip.c_str());
 
     // Step 2: get server key
     std::string skey = https_get("www.adsbhub.org", "/key.php");
-    fprintf(stderr, "ADSBHub ckey: skey len=%zu\n", skey.size());
+    gg::eprint("ADSBHub ckey: skey len=%zu\n", skey.size());
     if (skey.size() < 33) {
-        fprintf(stderr, "ADSBHub ckey: failed to get server key (len=%zu)\n", skey.size());
+        gg::eprint("ADSBHub ckey: failed to get server key (len=%zu)\n", skey.size());
         return -1;
     }
     while (!skey.empty() && (skey.back() == '\n' || skey.back() == '\r' || skey.back() == ' '))
         skey.pop_back();
-    fprintf(stderr, "ADSBHub ckey: skey=%s (len=%zu)\n", skey.c_str(), skey.size());
+    gg::eprint("ADSBHub ckey: skey=%s (len=%zu)\n", skey.c_str(), skey.size());
 
     // Step 3: compute sessid = md5(ckey + skey[:-1]) + skey[-1]
     char ss = skey.back();
@@ -569,7 +570,7 @@ static int32_t adsbhub_update_ckey(const char *ckey) {
         sessid += hexchars[md5_raw[i] & 0x0f];
     }
     sessid += ss;
-    fprintf(stderr, "ADSBHub ckey: sessid=%s\n", sessid.c_str());
+    gg::eprint("ADSBHub ckey: sessid=%s\n", sessid.c_str());
 
     // Step 3b: get my IPv6 (best-effort, fall back to ::)
     std::string myip6 = https_get("ip6.adsbhub.org", "/getmyip.php");
@@ -585,17 +586,17 @@ static int32_t adsbhub_update_ckey(const char *ckey) {
                        "&myip=" + url_encode(myip) + "&myip6=" + url_encode(myip6);
 
     std::string result = https_get("www.adsbhub.org", path.c_str());
-    fprintf(stderr, "ADSBHub ckey: updateip response len=%zu\n", result.size());
+    gg::eprint("ADSBHub ckey: updateip response len=%zu\n", result.size());
     if (!result.empty()) {
         while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
             result.pop_back();
         if (result == sessid) {
-            fprintf(stderr, "ADSBHub ckey: IP update OK (ip=%s, ip6=%s)\n", myip.c_str(), myip6.c_str());
+            gg::eprint("ADSBHub ckey: IP update OK (ip=%s, ip6=%s)\n", myip.c_str(), myip6.c_str());
             return 0;
         }
-        fprintf(stderr, "ADSBHub ckey: server returned '%s', expected '%s'\n", result.c_str(), sessid.c_str());
+        gg::eprint("ADSBHub ckey: server returned '%s', expected '%s'\n", result.c_str(), sessid.c_str());
     } else {
-        fprintf(stderr, "ADSBHub ckey: updateip request failed\n");
+        gg::eprint("ADSBHub ckey: updateip request failed\n");
     }
     return -1;
 }
@@ -619,13 +620,13 @@ static void *beast_feed_thread_entry(void *arg) {
     uint64_t ckey_next_update = 0;
     #define CKEY_UPDATE_INTERVAL_MS (300000ULL) // 5 minutes
     if (Modes.adsbhub_ckey) {
-        fprintf(stderr, "ADSBHub: updating dynamic IP via ckey...\n");
+        gg::eprint("ADSBHub: updating dynamic IP via ckey...\n");
         int32_t rc = adsbhub_update_ckey(Modes.adsbhub_ckey);
         if (rc == 0) {
-            fprintf(stderr, "ADSBHub: ckey IP update OK\n");
+            gg::eprint("ADSBHub: ckey IP update OK\n");
             if (PanelState.enabled) panelLog("ADSBHub: dynamic IP updated OK");
         } else {
-            fprintf(stderr, "ADSBHub: ckey IP update FAILED\n");
+            gg::eprint("ADSBHub: ckey IP update FAILED\n");
             if (PanelState.enabled) panelLog("ADSBHub: dynamic IP update FAILED");
         }
         ckey_next_update = mstime() + CKEY_UPDATE_INTERVAL_MS;
@@ -638,9 +639,9 @@ static void *beast_feed_thread_entry(void *arg) {
         if (Modes.adsbhub_ckey && now >= ckey_next_update) {
             int32_t rc = adsbhub_update_ckey(Modes.adsbhub_ckey);
             if (rc == 0) {
-                fprintf(stderr, "ADSBHub: ckey IP update OK\n");
+                gg::eprint("ADSBHub: ckey IP update OK\n");
             } else {
-                fprintf(stderr, "ADSBHub: ckey IP update FAILED\n");
+                gg::eprint("ADSBHub: ckey IP update FAILED\n");
                 if (PanelState.enabled) panelLog("ADSBHub: periodic IP update failed");
             }
             ckey_next_update = now + CKEY_UPDATE_INTERVAL_MS;
@@ -653,10 +654,10 @@ static void *beast_feed_thread_entry(void *arg) {
             int32_t is_online = check_internet();
             atomic_store(&net_available, is_online);
             if (was_online && !is_online) {
-                fprintf(stderr, "NET: internet offline — pausing all feeders\n");
+                gg::eprint("NET: internet offline — pausing all feeders\n");
                 if (PanelState.enabled) panelLog("NET: internet OFFLINE — feeders paused");
             } else if (!was_online && is_online) {
-                fprintf(stderr, "NET: internet back online — resuming feeders\n");
+                gg::eprint("NET: internet back online — resuming feeders\n");
                 if (PanelState.enabled) panelLog("NET: internet ONLINE — feeders resumed");
                 ckey_next_update = now; // force ckey update on reconnect
             }
@@ -750,14 +751,14 @@ static void *beast_feed_thread_entry(void *arg) {
                     uint64_t retry_delay;
                     char retry_delay_buf[32];
 
-                    fprintf(stderr, "%s: write error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
+                    gg::eprint("%s: write error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
                     if (PanelState.enabled && conns[i].reconnect_count == 0)
                         panelLog("%s: disconnected (write: %s)", Modes.beast_feeds[i].name, strerror(errno));
                     close(conns[i].fd); conns[i].fd = -1;
                     retry_delay = beast_feed_schedule_reconnect(&conns[i], i, mstime());
                     if (retry_delay > 0) {
                         beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
-                        fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                        gg::eprint("%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
                     }
                 }
             }
@@ -777,14 +778,14 @@ static void *beast_feed_thread_entry(void *arg) {
                         uint64_t retry_delay;
                         char retry_delay_buf[32];
 
-                        fprintf(stderr, "%s: heartbeat error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
+                        gg::eprint("%s: heartbeat error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
                         if (PanelState.enabled && conns[i].reconnect_count == 0)
                             panelLog("%s: disconnected (heartbeat: %s)", Modes.beast_feeds[i].name, strerror(errno));
                         close(conns[i].fd); conns[i].fd = -1;
                         retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
                         if (retry_delay > 0) {
                             beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
-                            fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                            gg::eprint("%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
                         }
                         continue;
                     }
@@ -799,27 +800,27 @@ static void *beast_feed_thread_entry(void *arg) {
                 uint64_t retry_delay;
                 char retry_delay_buf[32];
 
-                fprintf(stderr, "%s: connection closed by server\n", Modes.beast_feeds[i].name);
+                gg::eprint("%s: connection closed by server\n", Modes.beast_feeds[i].name);
                 if (PanelState.enabled && conns[i].reconnect_count == 0)
                     panelLog("%s: disconnected (server closed)", Modes.beast_feeds[i].name);
                 close(conns[i].fd); conns[i].fd = -1;
                 retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
                 if (retry_delay > 0) {
                     beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
-                    fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                    gg::eprint("%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
                 }
             } else if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
                 uint64_t retry_delay;
                 char retry_delay_buf[32];
 
-                fprintf(stderr, "%s: read error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
+                gg::eprint("%s: read error: %s\n", Modes.beast_feeds[i].name, strerror(errno));
                 if (PanelState.enabled && conns[i].reconnect_count == 0)
                     panelLog("%s: disconnected (%s)", Modes.beast_feeds[i].name, strerror(errno));
                 close(conns[i].fd); conns[i].fd = -1;
                 retry_delay = beast_feed_schedule_reconnect(&conns[i], i, now);
                 if (retry_delay > 0) {
                     beast_feed_format_delay(retry_delay, retry_delay_buf, sizeof(retry_delay_buf));
-                    fprintf(stderr, "%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
+                    gg::eprint("%s: reconnect scheduled in %s\n", Modes.beast_feeds[i].name, retry_delay_buf);
                 }
             } else if (r > 0) {
                 beast_feed_reset_backoff(&conns[i], now);
@@ -960,36 +961,36 @@ void feederThreadsStart(void) {
     // MLAT thread: start if we have servers or PiAware (FA may add server dynamically)
     if (MlatConfig.server_count > 0 || PiawareClient.enabled) {
         if (pthread_create(&mlat_thread, NULL, mlat_thread_entry, NULL) != 0) {
-            fprintf(stderr, "feeder: failed to create MLAT thread: %s\n", strerror(errno));
+            gg::eprint("feeder: failed to create MLAT thread: %s\n", strerror(errno));
         } else {
-            fprintf(stderr, "feeder: MLAT thread started\n");
+            gg::eprint("feeder: MLAT thread started\n");
         }
     }
 
     if (PiawareClient.enabled) {
         if (pthread_create(&piaware_thread, NULL, piaware_thread_entry, NULL) != 0) {
-            fprintf(stderr, "feeder: failed to create PiAware thread: %s\n", strerror(errno));
+            gg::eprint("feeder: failed to create PiAware thread: %s\n", strerror(errno));
         } else {
-            fprintf(stderr, "feeder: PiAware thread started\n");
+            gg::eprint("feeder: PiAware thread started\n");
         }
     }
 
-    if (FlarmConfig.enabled && FlarmConfig.ogn_station[0] != '\0') {
+    if (FlarmConfig.enabled && !FlarmConfig.ogn_station.empty()) {
         if (pthread_create(&ogn_thread, NULL, ogn_thread_entry, NULL) != 0) {
-            fprintf(stderr, "feeder: failed to create OGN thread: %s\n", strerror(errno));
+            gg::eprint("feeder: failed to create OGN thread: %s\n", strerror(errno));
         } else {
-            fprintf(stderr, "feeder: OGN thread started\n");
+            gg::eprint("feeder: OGN thread started\n");
         }
     }
 
     if (Modes.beast_feed_count > 0) {
         if (pthread_create(&beast_feed_thread, NULL, beast_feed_thread_entry, NULL) != 0) {
-            fprintf(stderr, "feeder: failed to create beast feed thread: %s\n", strerror(errno));
+            gg::eprint("feeder: failed to create beast feed thread: %s\n", strerror(errno));
         } else {
             for (int32_t i = 0; i < Modes.beast_feed_count; i++)
                 fprintf(stderr, "feeder: beast feed enabled: %s -> %s:%d\n",
                         Modes.beast_feeds[i].name, Modes.beast_feeds[i].host, Modes.beast_feeds[i].port);
-            fprintf(stderr, "feeder: beast feed thread started (%d feeds)\n", Modes.beast_feed_count);
+            gg::eprint("feeder: beast feed thread started (%d feeds)\n", Modes.beast_feed_count);
         }
     }
 
@@ -998,19 +999,19 @@ void feederThreadsStart(void) {
     if (OpenSkyConfig.enabled) {
         msg_queue_clear(opensky_queue);
         if (pthread_create(&opensky_thread, NULL, opensky_thread_entry, NULL) != 0) {
-            fprintf(stderr, "feeder: failed to create OpenSky thread: %s\n", strerror(errno));
+            gg::eprint("feeder: failed to create OpenSky thread: %s\n", strerror(errno));
         } else {
             fprintf(stderr, "feeder: OpenSky thread started (user=%s, host=%s:%d)\n",
-                    OpenSkyConfig.username, OpenSkyConfig.host, OpenSkyConfig.port);
+                    OpenSkyConfig.username.c_str(), OpenSkyConfig.host.c_str(), OpenSkyConfig.port);
         }
     }
 
     if (SondehubConfig.enabled) {
         if (pthread_create(&sondehub_thread, NULL, sondehub_thread_entry, NULL) != 0) {
-            fprintf(stderr, "feeder: failed to create SondeHub thread: %s\n", strerror(errno));
+            gg::eprint("feeder: failed to create SondeHub thread: %s\n", strerror(errno));
         } else {
             fprintf(stderr, "feeder: SondeHub thread started (callsign=%s)\n",
-                    SondehubConfig.callsign);
+                    SondehubConfig.callsign.c_str());
         }
     }
 }
@@ -1034,37 +1035,37 @@ void feederDispatchMessage(struct modesMessage *mm) {
 void feederThreadsStop(void) {
     atomic_store(&feeders_running, 0);
 
-    fprintf(stderr, "feeder: waiting for feeder threads to stop...\n");
+    gg::eprint("feeder: waiting for feeder threads to stop...\n");
 
     if (MlatConfig.server_count > 0 || PiawareClient.enabled) {
         join_thread(mlat_thread, NULL, 5000);
-        fprintf(stderr, "feeder: MLAT thread stopped\n");
+        gg::eprint("feeder: MLAT thread stopped\n");
     }
 
     if (PiawareClient.enabled) {
         join_thread(piaware_thread, NULL, 5000);
-        fprintf(stderr, "feeder: PiAware thread stopped\n");
+        gg::eprint("feeder: PiAware thread stopped\n");
     }
 
-    if (FlarmConfig.enabled && FlarmConfig.ogn_station[0] != '\0') {
+    if (FlarmConfig.enabled && !FlarmConfig.ogn_station.empty()) {
         join_thread(ogn_thread, NULL, 5000);
-        fprintf(stderr, "feeder: OGN thread stopped\n");
+        gg::eprint("feeder: OGN thread stopped\n");
     }
 
     if (Modes.beast_feed_count > 0) {
         join_thread(beast_feed_thread, NULL, 5000);
-        fprintf(stderr, "feeder: beast feed thread stopped\n");
+        gg::eprint("feeder: beast feed thread stopped\n");
     }
 
     // PlaneFinder, FR24, RadarBox feeders removed in light version
 
     if (OpenSkyConfig.enabled) {
         join_thread(opensky_thread, NULL, 15000);
-        fprintf(stderr, "feeder: OpenSky thread stopped\n");
+        gg::eprint("feeder: OpenSky thread stopped\n");
     }
 
     if (SondehubConfig.enabled) {
         join_thread(sondehub_thread, NULL, 15000);
-        fprintf(stderr, "feeder: SondeHub thread stopped\n");
+        gg::eprint("feeder: SondeHub thread stopped\n");
     }
 }

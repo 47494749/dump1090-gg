@@ -55,10 +55,6 @@
 #define ANET_H
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #define ANET_OK 0
 #define ANET_ERR -1
 #define ANET_ERR_LEN 256
@@ -77,9 +73,5 @@ int32_t anetNonBlock(char *err, int32_t fd);
 int32_t anetTcpNoDelay(char *err, int32_t fd);
 int32_t anetTcpKeepAlive(char *err, int32_t fd);
 int32_t anetSetSendBuffer(char *err, int32_t fd, int32_t buffsize);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

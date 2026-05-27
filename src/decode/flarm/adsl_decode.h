@@ -20,12 +20,8 @@
 #ifndef ADSL_DECODE_H
 #define ADSL_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Protocol constants ========================
 
@@ -72,9 +68,5 @@ bool adsl_decode_packet(const uint8_t *data24,
                         double ref_lat, double ref_lon,
                         float ref_alt_geoid,
                         adsl_message_t *msg);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // ADSL_DECODE_H

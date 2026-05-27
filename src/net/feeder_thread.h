@@ -12,20 +12,12 @@
 #ifndef FEEDER_THREAD_H
 #define FEEDER_THREAD_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 #include <pthread.h>
-#ifdef __cplusplus
 #include <atomic>
 using std::atomic_int;
 using std::atomic_uint;
-#else
-#include <stdatomic.h>
-#endif
 
 #include "msg_queue.h"
 
@@ -54,9 +46,5 @@ extern atomic_int net_available;
 void feederThreadsStart(void);
 void feederDispatchMessage(struct modesMessage *mm);
 void feederThreadsStop(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // FEEDER_THREAD_H

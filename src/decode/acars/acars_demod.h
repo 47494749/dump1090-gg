@@ -8,12 +8,12 @@
 #ifndef ACARS_DEMOD_H
 #define ACARS_DEMOD_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include <stdint.h>
-#include <stdbool.h>
 
 #define ACARS_INTRATE     12500     // Internal sample rate per channel (Hz)
 #define ACARS_MAX_CHANNELS 8       // Max simultaneous ACARS channels

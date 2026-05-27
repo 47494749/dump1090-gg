@@ -3,6 +3,82 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+Historical entries keep the module and directory names that were current when
+they were written. Internal test harnesses mentioned in those notes were used
+during development and are only part of the public tree when the files are
+actually present here.
+
+---
+
+### v1.0.6 (2026-05-27)
+
+**BDS 4,4 / 4,5 meteorological decoders (new):**
+- Decode Comm-B BDS 4,4 (Meteorological Routine Air Report — MRAR):
+  wind speed/direction, static air temperature, pressure, humidity, turbulence
+- Decode Comm-B BDS 4,5 (Meteorological Hazard Report — MHAR):
+  turbulence, windshear, microburst, icing, wake vortex, temperature, pressure,
+  humidity severity levels
+- New fields tracked per aircraft and exposed in `/api/aircraft` JSON
+- Aircraft panel page: hover tooltip showing real-time MRAR/MHAR weather data
+  with severity colour coding
+
+**Waterfall spectrum analyzer (new):**
+- Real-time FFT spectrum display and scrolling waterfall via WebSocket
+  (`panel/waterfall.html`, `/ws/waterfall` endpoint)
+- Per-device SDR selection: tap any connected dongle for live spectrum view
+- Adjustable gain slider and sample rate (1.0 / 1.6 / 2.0 / 2.4 Msps)
+- "Take Ownership" mode: pause decoder, retune frequency, release and restore
+- IQ ring-buffer tap in `sdr_receiver.cpp`, 256-point Hann-windowed FFT in
+  `config_panel.cpp`
+
+**Statistics dashboard (new):**
+- New `panel/stats.html` page with Chart.js time-series graphs for message
+  rates, signal levels, and per-decoder counters
+- Stats history engine: periodic snapshots saved to disk, survives restarts
+- New API endpoints: `/api/system-stats`, `/api/decoder-stats`,
+  `/api/stats-history`
+
+**System warnings (new):**
+- Warning popup system (`panel/warnings.js`) loaded on all panel pages
+- `/api/warnings` endpoint returns active warnings as JSON
+- DVB kernel module conflict detection: warns when `dvb_usb_rtl28xxu` is
+  loaded and provides the fix command
+
+**Diagnostics page (new):**
+- Runtime diagnostics panel page (`/diagnostics.html`) with per-dongle signal
+  metrics and frequency sweep, served inline by `config_panel.cpp`
+- `/api/diagnostics` and `/api/diagnostics/start` endpoints
+
+**BeastReduce rate limiting (new):**
+- Per-aircraft rate limiting for bandwidth-efficient beast feeding
+  (default 250 ms interval, configurable via `--beast-reduce-interval`)
+- All default beast feed networks now use BeastReduce format
+- Non-state messages (DF11, DF17 identity, etc.) always forwarded immediately
+
+**CPDLC decoder improvements:**
+- Expanded UPER decoding coverage for additional CPDLC message types
+- Improved altitude, speed, and position element parsing
+
+**C/C++ migration:**
+- Renamed all `.c` source files to `.cpp` (C++17 compilation throughout)
+- Replaced `printf`/`fprintf` with `gg::print`/`gg::eprint` wrappers
+- Migrated `int`/`unsigned` to explicit `int32_t`/`uint32_t` types
+- Added `gg_format.h` utility header for type-safe formatted output
+
+**Build system:**
+- `DUMP1090_DIAGNOSTICS=yes` build flag: opt-in verbose decoder trace output
+  (ACARS, VDL2, FANET, GSM calibration, adaptive-gain, panel, decoder-config)
+- Fix static linking of `libsdrgg.a` when `SDRGG_PREFIX` is set
+
+**Cleanup:**
+- Add SPDX GPL-3.0-or-later headers to `src/dispatch/` and `src/main/app_config.h`
+- Add GPL-2.0-or-later headers to `src/decode/iot/iot_tracker.cpp/.h`
+- Remove stale `src/panel/panel_index.html`
+- Fix ACARS typo in README feature overview
+- Align IoT license text with actual per-file GPL-2.0-or-later notices
+- Document LTE, IoT, waterfall, diagnostics, stats, and warnings features in
+  README
+
 ---
 
 ### v1.0.5 (2026-05-14)

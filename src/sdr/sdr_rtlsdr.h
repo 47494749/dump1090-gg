@@ -22,10 +22,6 @@
 #define SDR_RTLSDR_H
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 void rtlsdrInitConfig();
 void rtlsdrShowHelp();
 bool rtlsdrOpen();
@@ -38,9 +34,5 @@ int32_t rtlsdrGetMaxGain();
 int32_t rtlsdrGetTunerType();
 double rtlsdrGetGainDb(int32_t step);
 int32_t rtlsdrSetGain(int32_t step);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

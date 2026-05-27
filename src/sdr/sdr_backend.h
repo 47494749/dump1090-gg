@@ -15,12 +15,8 @@
 #ifndef SDR_BACKEND_H
 #define SDR_BACKEND_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Backend selection ========================
 
@@ -246,9 +242,5 @@ static inline int32_t sdr_read_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t
 
 static inline int32_t sdr_write_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t val)
 { return dev->ops->write_tuner_reg ? dev->ops->write_tuner_reg(dev, reg, val) : -1; }
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // SDR_BACKEND_H

@@ -1,15 +1,18 @@
 // dispatcher.cpp: Central message dispatcher implementation.
 // Polls all registered decoder queues and routes data to the appropriate sinks.
+//
+// Part of dump1090-gg-light.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "dispatcher.h"
 #include <cstdint>
 
 // We cannot include dump1090.h directly (C11 stdatomic.h conflicts with C++).
 // Instead, forward-declare only what we need from the C side.
-extern "C" {
 #include "dump1090_defs.h"
 #include "dump1090_types.h"
 #include "dump1090_message.h"
+#include <string>
 
 // From mode_s.h
 void useModesMessage(struct modesMessage *mm);
@@ -19,7 +22,6 @@ struct aircraft *trackUpdateFromDecoder(const aircraft_update_t *upd);
 
 // From dump1090_state.h / globals
 extern pthread_rwlock_t aircraft_lock;
-}
 
 // Global dispatcher instance
 Dispatcher g_dispatcher;
@@ -82,8 +84,6 @@ void Dispatcher::poll() {
 }
 
 // ======================== C interface ========================
-
-extern "C" {
 
 int32_t dispatcher_push_aircraft(aircraft_queue_handle_t q, const aircraft_update_t* upd) {
     auto* queue = static_cast<DecoderQueue<aircraft_update_t>*>(q);
@@ -152,5 +152,3 @@ aircraft_queue_handle_t dispatcher_register_aircraft_queue(const char *name) {
 adsb_queue_handle_t dispatcher_register_adsb_queue(const char *name) {
     return static_cast<adsb_queue_handle_t>(g_dispatcher.registerAdsbQueue(name));
 }
-
-} // extern "C"

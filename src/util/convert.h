@@ -20,10 +20,6 @@
 #ifndef DUMP1090_CONVERT_H
 #define DUMP1090_CONVERT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 struct converter_state;
@@ -42,9 +38,5 @@ iq_convert_fn init_converter(input_format_t format,
                              struct converter_state **out_state);
 
 void cleanup_converter(struct converter_state *state);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

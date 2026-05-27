@@ -15,12 +15,9 @@
 #ifndef MLAT_CLIENT_H
 #define MLAT_CLIENT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+#include <string>
+
 
 // Forward declaration (full definition in dump1090.h)
 struct modesMessage;
@@ -126,8 +123,8 @@ struct mlat_config {
 
     // Feeder identity
     char    *user;                   // feeder name (e.g. "blau1")
-    char    *uuid;                   // feeder UUID (read from uuid_file)
-    char    *uuid_file;              // path to UUID file
+    std::string  uuid;              // feeder UUID (read from uuid_file)
+    std::string  uuid_file;         // path to UUID file
 
     // Receiver position
     double   lat;
@@ -166,9 +163,5 @@ void mlatClientDisconnectAll(const char *reason);
 
 // Add an MLAT server from CLI (returns 0 on success, -1 if full)
 int32_t mlatClientAddServer(const char *hostport);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // MLAT_CLIENT_H

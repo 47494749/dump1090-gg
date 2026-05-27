@@ -17,12 +17,8 @@
 #ifndef IOT_DECODE_H
 #define IOT_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Constants ========================
 
@@ -131,9 +127,5 @@ const char *iotProtocolName(iot_protocol_t proto);
 
 // Get modulation name string
 const char *iotModulationName(iot_modulation_t mod);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // IOT_DECODE_H

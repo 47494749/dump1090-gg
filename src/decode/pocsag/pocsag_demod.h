@@ -13,12 +13,8 @@
 #ifndef POCSAG_DEMOD_H
 #define POCSAG_DEMOD_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Constants ========================
 
@@ -96,9 +92,5 @@ void pocsag_process(struct pocsag_state *st, const uint8_t *iq_data, uint32_t le
 
 // Get decoder statistics.
 void pocsag_get_stats(const struct pocsag_state *st, pocsag_stats_t *out);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // POCSAG_DEMOD_H

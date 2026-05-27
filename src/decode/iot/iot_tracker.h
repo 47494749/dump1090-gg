@@ -5,15 +5,16 @@
 // Maintains a list of discovered IoT devices, updated from decoder callbacks,
 // and provides JSON serialization for the /api/iot868 endpoint.
 
+// This file is free software: you may copy, redistribute and/or modify it
+// under the terms of the GNU General Public License as published by the
+// Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version.
+
 #ifndef IOT_TRACKER_H
 #define IOT_TRACKER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 #include "iot_decode.h"
 
 #define IOT_TRACKER_MAX_DEVICES  128
@@ -67,11 +68,8 @@ int32_t iotTrackerActiveCount(void);
 // Clean up
 void iotTrackerDestroy(void);
 
-#ifdef __cplusplus
-}
-// C++ only: returns std::string
+// Returns std::string
 #include <string>
 std::string iotTrackerToJSON(void);
-#endif
 
 #endif // IOT_TRACKER_H

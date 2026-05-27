@@ -9,11 +9,7 @@
 #ifndef DECODER_CONFIG_H
 #define DECODER_CONFIG_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include <stdbool.h>
 #include <stdint.h>
 
 // ======================== Decoder Types ========================
@@ -230,9 +226,5 @@ bool decoderConfigSaveFlarmKeys(const char *path);
 bool decoderConfigParseJson(const char *json);
 
 #define DECODER_CONFIG_PATH "/etc/dump1090-gg/decoders.json"
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // DECODER_CONFIG_H

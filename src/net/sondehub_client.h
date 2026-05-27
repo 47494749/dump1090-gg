@@ -11,16 +11,13 @@
 #ifndef SONDEHUB_CLIENT_H
 #define SONDEHUB_CLIENT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include <stdbool.h>
+#include <string>
 #include "sonde_demod.h"
 
 typedef struct {
     bool  enabled;
-    char  callsign[64];       // uploader_callsign (required)
+    std::string  callsign;    // uploader_callsign (required)
 } sondehub_config_t;
 
 extern sondehub_config_t SondehubConfig;
@@ -29,9 +26,5 @@ void sondehubClientInit(void);
 void sondehubClientSubmit(const sonde_msg_t *msg);
 void sondehubClientPeriodicWork(void);
 void sondehubClientCleanup(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // SONDEHUB_CLIENT_H

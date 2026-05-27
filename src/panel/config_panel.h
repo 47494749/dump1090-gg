@@ -10,11 +10,7 @@
 #ifndef CONFIG_PANEL_H
 #define CONFIG_PANEL_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include <stdbool.h>
 #include <stdint.h>
 #include <pthread.h>
 
@@ -84,9 +80,5 @@ void panelLoadBeastFeedState(void);
 
 // Probe and cache tuner types for all RTL-SDR devices (call before any device is opened)
 void panelProbeAllTuners(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // CONFIG_PANEL_H

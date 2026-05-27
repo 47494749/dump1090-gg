@@ -14,12 +14,8 @@
 #ifndef FLARM_DECODE_H
 #define FLARM_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // FLARM radio parameters
 #define FLARM_FREQ_EU_1         868200000   // 868.2 MHz
@@ -136,9 +132,5 @@ uint32_t flarm_get_key2(void);
 uint32_t flarm_get_key3(void);
 uint32_t flarm_get_key4(void);
 void flarm_get_key5(uint32_t out[4]);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // FLARM_DECODE_H

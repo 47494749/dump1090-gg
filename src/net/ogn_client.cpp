@@ -13,16 +13,16 @@
 // Free Software Foundation, either version 3 of the License, or (at your
 // option) any later version.
 
-#include <stdio.h>
+#include <cstdio>
 #include <cstdint>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <unistd.h>
-#include <errno.h>
-#include <time.h>
-#include <math.h>
+#include <cerrno>
+#include <ctime>
+#include <cmath>
 #include <ctype.h>
 #include <sys/socket.h>
 #include <sys/sysinfo.h>
@@ -30,6 +30,7 @@
 #include <fcntl.h>
 
 #include "dump1090.h"
+#include "gg_format.h"
 
 // ======================== State ========================
 
@@ -78,7 +79,7 @@ void ognClientInit(void)
 
 void ognClientSubmit(const flarm_message_t *msg)
 {
-    if (!FlarmConfig.enabled || FlarmConfig.ogn_station[0] == '\0') return;
+    if (!FlarmConfig.enabled || FlarmConfig.ogn_station.empty()) return;
 
     uint32_t next = (OgnClient.queue_head + 1) % OGN_QUEUE_SIZE;
     if (next == OgnClient.queue_tail) return;  // full
@@ -112,10 +113,10 @@ static int ogn_connect(void)
 
     std::string port_str = std::to_string(FlarmConfig.ogn_port);
 
-    int err = getaddrinfo(FlarmConfig.ogn_server, port_str.c_str(), &hints, &res);
+    int err = getaddrinfo(FlarmConfig.ogn_server.c_str(), port_str.c_str(), &hints, &res);
     if (err != 0) {
         fprintf(stderr, "ogn: DNS resolution failed for %s: %s\n",
-                FlarmConfig.ogn_server, gai_strerror(err));
+                FlarmConfig.ogn_server.c_str(), gai_strerror(err));
         return -1;
     }
 
@@ -155,7 +156,7 @@ static int ogn_connect(void)
 
     if (fd < 0) {
         fprintf(stderr, "ogn: failed to connect to %s:%d\n",
-                FlarmConfig.ogn_server, FlarmConfig.ogn_port);
+                FlarmConfig.ogn_server.c_str(), FlarmConfig.ogn_port);
         return -1;
     }
 
@@ -189,12 +190,12 @@ static int32_t aprs_passcode(const char *callsign)
 
 static bool ogn_login(int32_t fd)
 {
-    int32_t passcode = aprs_passcode(FlarmConfig.ogn_station);
+    int32_t passcode = aprs_passcode(FlarmConfig.ogn_station.c_str());
     char tmp[256];
     snprintf(tmp, sizeof(tmp),
              "user %s pass %d vers dump1090-gg " MODES_DUMP1090_VERSION
              " filter r/%.4f/%.4f/100\r\n",
-             FlarmConfig.ogn_station,
+             FlarmConfig.ogn_station.c_str(),
                      passcode,
                      Modes.fUserLat, Modes.fUserLon);
     std::string login(tmp);
@@ -211,7 +212,7 @@ static bool ogn_login(int32_t fd)
     }
 
     fprintf(stderr, "ogn: logged in as %s to %s:%d\n",
-            FlarmConfig.ogn_station, FlarmConfig.ogn_server, FlarmConfig.ogn_port);
+            FlarmConfig.ogn_station.c_str(), FlarmConfig.ogn_server.c_str(), FlarmConfig.ogn_port);
     return true;
 }
 
@@ -407,7 +408,7 @@ static void ogn_send_station_beacon(void)
     char bcn_tmp[512];
     snprintf(bcn_tmp, sizeof(bcn_tmp),
                      "%s>OGNSDR,TCPIP*:/%02d%02d%02dh%02d%05.2f%cI%03d%05.2f%c&/A=%06d\r\n",
-                     FlarmConfig.ogn_station,
+                     FlarmConfig.ogn_station.c_str(),
                      utc->tm_hour, utc->tm_min, utc->tm_sec,
                      lat_deg, lat_min, lat_ns,
                      lon_deg, lon_min, lon_ew,
@@ -417,14 +418,14 @@ static void ogn_send_station_beacon(void)
     {
         int w = write(OgnClient.fd, beacon.data(), beacon.size());
         if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            fprintf(stderr, "ogn: beacon write error: %s\n", strerror(errno));
+            gg::eprint("ogn: beacon write error: %s\n", strerror(errno));
             close(OgnClient.fd);
             OgnClient.fd = -1;
             OgnClient.connected = 0;
             return;
         }
         if (w > 0)
-            fprintf(stderr, "ogn: sent station beacon for %s\n", FlarmConfig.ogn_station);
+            gg::eprint("ogn: sent station beacon for %s\n", FlarmConfig.ogn_station.c_str());
     }
 
     // Gather system stats
@@ -456,7 +457,7 @@ static void ogn_send_station_beacon(void)
     // Build OGN standard status beacon using std::string
     char st_tmp[128];
     snprintf(st_tmp, sizeof(st_tmp), "%s>OGNSDR,TCPIP*:>%02d%02d%02dh",
-             FlarmConfig.ogn_station, utc->tm_hour, utc->tm_min, utc->tm_sec);
+             FlarmConfig.ogn_station.c_str(), utc->tm_hour, utc->tm_min, utc->tm_sec);
     std::string status(st_tmp);
 
     // Software version
@@ -536,7 +537,7 @@ static void ogn_send_queued(void)
                 return;
             }
             // Connection lost
-            fprintf(stderr, "ogn: write error: %s\n", strerror(errno));
+            gg::eprint("ogn: write error: %s\n", strerror(errno));
             close(OgnClient.fd);
             OgnClient.fd = -1;
             OgnClient.connected = 0;
@@ -552,7 +553,7 @@ static void ogn_send_queued(void)
 
 void ognClientPeriodicWork(void)
 {
-    if (!FlarmConfig.enabled || FlarmConfig.ogn_station[0] == '\0') return;
+    if (!FlarmConfig.enabled || FlarmConfig.ogn_station.empty()) return;
 
     uint64_t now = mstime();
 
@@ -583,7 +584,7 @@ void ognClientPeriodicWork(void)
         }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != 0) {
             // Connection lost
-            fprintf(stderr, "ogn: connection lost: %s\n", strerror(errno));
+            gg::eprint("ogn: connection lost: %s\n", strerror(errno));
             close(OgnClient.fd);
             OgnClient.fd = -1;
             OgnClient.connected = 0;
@@ -605,7 +606,7 @@ void ognClientPeriodicWork(void)
         const char *ka = "# keepalive\r\n";
         int w = write(OgnClient.fd, ka, strlen(ka));
         if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            fprintf(stderr, "ogn: keepalive failed\n");
+            gg::eprint("ogn: keepalive failed\n");
             close(OgnClient.fd);
             OgnClient.fd = -1;
             OgnClient.connected = 0;

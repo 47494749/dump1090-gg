@@ -19,11 +19,19 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <string.h>
 #include <math.h>
 #include <complex.h>
+#include "dump1090_defs.h"
 #include "vdl2_demod.h"
 #include "../acars/acars_label.h"
+
+#if MODES_ENABLE_DIAGNOSTICS
+#define VDL2_DIAG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define VDL2_DIAG(...) do {} while (0)
+#endif
 
 // ======================== Constants ========================
 
@@ -147,7 +155,7 @@ struct vdl2_state {
 
 struct vdl2_state *vdl2_create(const vdl2_config_t *config)
 {
-    struct vdl2_state *s = calloc(1, sizeof(struct vdl2_state));
+    struct vdl2_state *s = (struct vdl2_state*)calloc(1, sizeof(struct vdl2_state));
     if (!s) return NULL;
 
     s->config = *config;
@@ -159,7 +167,7 @@ struct vdl2_state *vdl2_create(const vdl2_config_t *config)
     // For simplicity, use a block of VDL2_DECIM samples and repeat
     double f_offset = (config->channel_freqs[0] - config->center_freq);
     s->mixer_len = VDL2_DECIM;
-    s->mixer_lo = calloc((uint32_t)s->mixer_len, sizeof(float complex));
+    s->mixer_lo = (float complex*)calloc((uint32_t)s->mixer_len, sizeof(float complex));
     if (!s->mixer_lo) { free(s); return NULL; }
 
     for (int32_t k = 0; k < s->mixer_len; k++) {
@@ -177,9 +185,9 @@ struct vdl2_state *vdl2_create(const vdl2_config_t *config)
     s->ones_count = 0;
     s->frame_len = 0;
 
-    fprintf(stderr, "VDL2: freq=%.3f MHz, sr=%.0f, decim=%d, IF=%d, sps=%.2f\n",
-            config->channel_freqs[0] / 1e6, config->sample_rate,
-            VDL2_DECIM, VDL2_IF_RATE, (double)s->sym_rate);
+    VDL2_DIAG("VDL2: freq=%.3f MHz, sr=%.0f, decim=%d, IF=%d, sps=%.2f\n",
+              config->channel_freqs[0] / 1e6, config->sample_rate,
+              VDL2_DECIM, VDL2_IF_RATE, (double)s->sym_rate);
 
     return s;
 }

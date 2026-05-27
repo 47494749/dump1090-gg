@@ -1,5 +1,8 @@
 // decoder_queue.h: Thread-safe queue for inter-thread communication.
 // Uses std::queue + std::mutex. Simple, correct, no custom ring buffers.
+//
+// Part of dump1090-gg-light.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #ifndef DECODER_QUEUE_H
 #define DECODER_QUEUE_H

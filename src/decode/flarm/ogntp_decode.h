@@ -18,12 +18,8 @@
 #ifndef OGNTP_DECODE_H
 #define OGNTP_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Protocol constants ========================
 
@@ -98,9 +94,5 @@ uint8_t ogntp_ldpc_check(const uint8_t *data26);
 bool ogntp_decode_packet(const uint8_t *data26,
                          double ref_lat, double ref_lon,
                          ogntp_message_t *msg);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // OGNTP_DECODE_H

@@ -10,32 +10,29 @@
 #ifndef FLARM_READER_H
 #define FLARM_READER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include <stdbool.h>
 #include <stdint.h>
+#include <string>
 #include "flarm_demod.h"
 
 // FLARM reader configuration (set before calling flarmReaderInit)
 typedef struct {
     int32_t    enabled;              // FLARM reception enabled
-    char   device_serial[64];   // RTL-SDR device serial number for 868 MHz dongle
+    std::string device_serial;      // RTL-SDR device serial number for 868 MHz dongle
     int32_t    gain;                // Gain in tenths of dB (0 = auto)
     int32_t    ppm_error;           // Frequency correction in PPM
 
     // Keys file
-    char   keys_file[256];     // Path to FLARM decryption keys file
+    std::string keys_file;         // Path to FLARM decryption keys file
     int32_t    flarm_ogn_only;     // If set, FLARM data goes to OGN only (not other feeders)
 
     // OGN station info
-    char   ogn_station[32];    // OGN station name (e.g. "MYSTATION")
-    char   ogn_server[128];    // OGN APRS-IS server (default: aprs.glidernet.org)
+    std::string ogn_station;       // OGN station name (e.g. "MYSTATION")
+    std::string ogn_server;        // OGN APRS-IS server (default: aprs.glidernet.org)
     int32_t    ogn_port;           // OGN APRS-IS port (default: 14580)
 
     // Virtual IQ file input (--flarm-ifile)
-    char   ifile_path[512];    // Path to raw IQ file (uint8 I/Q pairs, 1.6 MSPS)
+    std::string ifile_path;        // Path to raw IQ file (uint8 I/Q pairs, 1.6 MSPS)
     uint32_t ifile_time;       // Unix timestamp of file (mtime), used for XXTEA decrypt
     int32_t    ifile_once;         // If set, stop after a single file replay pass
 
@@ -83,9 +80,5 @@ void flarmDecoderProcess(struct sdr_receiver *rx, const uint8_t *iq, uint32_t le
 bool flarmDecoderDrain(struct sdr_receiver *rx);
 void flarmDecoderStop(struct sdr_receiver *rx);
 bool flarmDecoderGetStats(struct sdr_receiver *rx, flarm_demod_stats_t *stats);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // FLARM_READER_H

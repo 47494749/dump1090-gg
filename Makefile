@@ -1,6 +1,7 @@
 PROGNAME=dump1090
 
-DUMP1090_VERSION ?= 1.0.5
+DUMP1090_VERSION ?= 1.0.6
+DUMP1090_DIAGNOSTICS ?= no
 
 # ======================== Directory layout ========================
 
@@ -34,13 +35,20 @@ VPATH := $(SRCDIR_MAIN):$(SRCDIR_ADSB):$(SRCDIR_UTIL):$(SRCDIR_NET):$(SRCDIR_SDR
 CFLAGS ?= -O3 -g
 DUMP1090_CFLAGS := -std=c11 -fno-common -Wall -Wmissing-declarations -Werror -Wformat-signedness -W
 
+# C++ flags for all source files (entire project is now C++)
+CXXFLAGS_ALL = -std=c++17 -O3 -g -Wall -Werror -Wno-write-strings
+
 # Include paths: all source directories + include/ so #include "foo.h" works from anywhere
 INCLUDE_DIRS := -I. -I$(INCLUDEDIR) -I$(SRCDIR_MAIN) -I$(SRCDIR_ADSB) -I$(SRCDIR_UTIL) -I$(SRCDIR_NET) -I$(SRCDIR_SDR) -I$(SRCDIR_PANEL) -I$(SRCDIR_STUBS) -I$(SRCDIR_FLARM) -I$(SRCDIR_ACARS) -I$(SRCDIR_VDL2) -I$(SRCDIR_SONDE) -I$(SRCDIR_POCSAG) -I$(SRCDIR_GSM) -I$(SRCDIR_LTE) -I$(SRCDIR_IOT) -I$(SRCDIR_FANET) -I$(SRCDIR_SARSAT) -I$(SRCDIR_DISPATCH)
 
 DUMP1090_CPPFLAGS := $(INCLUDE_DIRS) -D_POSIX_C_SOURCE=200112L -DMODES_DUMP1090_VERSION=\"$(DUMP1090_VERSION)\" -DMODES_DUMP1090_VARIANT=\"dump1090-gg-light\"
 
+ifeq ($(DUMP1090_DIAGNOSTICS),yes)
+  DUMP1090_CPPFLAGS += -DMODES_ENABLE_DIAGNOSTICS=1
+endif
+
 CXX ?= g++
-CXXFLAGS_DISPATCH = -std=c++17 -O3 -g -Wall -Werror $(DUMP1090_CPPFLAGS)
+CXXFLAGS_DISPATCH = -std=c++17 -O3 -g -Wall -Werror -Wno-write-strings $(DUMP1090_CPPFLAGS)
 
 LIBS = -lpthread -lm
 SDR_OBJ = $(OBJDIR)/cpu.o $(OBJDIR)/sdr.o $(OBJDIR)/fifo.o $(OBJDIR)/sdr_ifile.o $(OBJDIR)/sdr_backend.o dsp/helpers/tables.o
@@ -158,7 +166,7 @@ ifeq ($(RTLSDR), yes)
     RTLSDR_CFLAGS := $(shell pkg-config --cflags librtlsdr)
     RTLSDR_CFLAGS := $(filter-out -std=%,$(RTLSDR_CFLAGS))
     RTLSDR_CFLAGS := $(filter-out -I/,$(RTLSDR_CFLAGS))
-    DUMP1090_CFLAGS += $(RTLSDR_CFLAGS)
+    DUMP1090_CPPFLAGS += $(RTLSDR_CFLAGS)
 
     RTLSDR_LFLAGS := $(shell pkg-config --libs-only-L librtlsdr)
     ifeq ($(RTLSDR_LFLAGS),-L)
@@ -178,8 +186,21 @@ ifeq ($(SDRGG), yes)
   CXXFLAGS = -std=c++2a -O3 -Wall $(DUMP1090_CPPFLAGS)
 
   ifdef SDRGG_PREFIX
-    DUMP1090_CPPFLAGS += -I$(SDRGG_PREFIX)
-		LIBS_SDR += $(SDRGG_PREFIX)/libsdrgg.a -lstdc++
+    ifneq ($(wildcard $(SDRGG_PREFIX)/sdrgg.h),)
+      DUMP1090_CPPFLAGS += -I$(SDRGG_PREFIX)
+      SDRGG_LIBDIR := $(SDRGG_PREFIX)
+    else
+      DUMP1090_CPPFLAGS += -I$(SDRGG_PREFIX)/include
+      SDRGG_LIBDIR := $(SDRGG_PREFIX)/lib
+    endif
+    LIBS_SDR += -L$(SDRGG_LIBDIR) -Wl,-rpath,$(SDRGG_LIBDIR) -lsdrgg -lstdc++
+  else ifeq ($(PKGCONFIG), yes)
+    ifeq ($(shell pkg-config --exists libsdrgg && echo "yes" || echo "no"), yes)
+      DUMP1090_CPPFLAGS += $(shell pkg-config --cflags libsdrgg)
+      LIBS_SDR += $(shell pkg-config --libs libsdrgg) -lstdc++
+    else
+      LIBS_SDR += -lsdrgg -lstdc++
+    endif
   else
     LIBS_SDR += -lsdrgg -lstdc++
   endif
@@ -188,28 +209,28 @@ endif
 ifeq ($(BLADERF), yes)
   SDR_OBJ += $(OBJDIR)/sdr_bladerf.o
   DUMP1090_CPPFLAGS += -DENABLE_BLADERF
-  DUMP1090_CFLAGS += $(shell pkg-config --cflags libbladeRF)
+  DUMP1090_CPPFLAGS += $(shell pkg-config --cflags libbladeRF)
   LIBS_SDR += $(shell pkg-config --libs libbladeRF)
 endif
 
 ifeq ($(HACKRF), yes)
   SDR_OBJ += $(OBJDIR)/sdr_hackrf.o
   DUMP1090_CPPFLAGS += -DENABLE_HACKRF
-  DUMP1090_CFLAGS += $(shell pkg-config --cflags libhackrf)
+  DUMP1090_CPPFLAGS += $(shell pkg-config --cflags libhackrf)
   LIBS_SDR += $(shell pkg-config --libs libhackrf)
 endif
 
 ifeq ($(LIMESDR), yes)
   SDR_OBJ += $(OBJDIR)/sdr_limesdr.o
   DUMP1090_CPPFLAGS += -DENABLE_LIMESDR
-  DUMP1090_CFLAGS += $(shell pkg-config --cflags LimeSuite)
+  DUMP1090_CPPFLAGS += $(shell pkg-config --cflags LimeSuite)
   LIBS_SDR += $(shell pkg-config --libs LimeSuite)
 endif
 
 ifeq ($(SOAPYSDR), yes)
   SDR_OBJ += $(OBJDIR)/sdr_soapy.o
   DUMP1090_CPPFLAGS += -DENABLE_SOAPYSDR
-  DUMP1090_CFLAGS += $(shell pkg-config --cflags SoapySDR)
+  DUMP1090_CPPFLAGS += $(shell pkg-config --cflags SoapySDR)
   LIBS_SDR += $(shell pkg-config --libs SoapySDR)
 endif
 
@@ -248,6 +269,7 @@ endif
 all: showconfig dump1090 view1090 starch-benchmark
 
 ALL_CCFLAGS := $(CPPFLAGS) $(DUMP1090_CPPFLAGS) $(CFLAGS) $(DUMP1090_CFLAGS)
+ALL_CXXFLAGS := $(DUMP1090_CPPFLAGS) $(CXXFLAGS_ALL)
 
 STARCH_COMPILE := $(CC) $(ALL_CCFLAGS) -c
 include dsp/generated/makefile.$(STARCH_MIX)
@@ -263,75 +285,34 @@ showconfig:
 	@echo "  LimeSDR support:  $(LIMESDR)" >&2
 	@echo "  SoapySDR support: $(SOAPYSDR)" >&2
 	@echo "  libsdrgg support: $(SDRGG)" >&2
+  @echo "  Diagnostics:      $(DUMP1090_DIAGNOSTICS)" >&2
 
 # Create obj directory
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
-# Pattern rule: compile .c from VPATH into obj/
+# Pattern rule: compile .cpp from VPATH into obj/
+$(OBJDIR)/%.o: %.cpp | $(OBJDIR)
+	$(CXX) $(ALL_CXXFLAGS) -c $< -o $@
+
+# Pattern rule: compile .c from VPATH into obj/ (for C99-only files)
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
 
-# DSP helpers (compiled in-place, not in OBJDIR)
+# DSP helpers (still C, compiled in-place)
 dsp/helpers/tables.o: dsp/helpers/tables.c
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
 
-# In-place pattern rule for subsystems that compile in their own directories
-# (cpu_features, compat) - these override ALL_CCFLAGS via Makefile.cpufeatures
+# cpu_features (still C)
 cpu_features/src/%.o: cpu_features/src/%.c
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
 
+# compat (still C)
 compat/clock_gettime/%.o: compat/clock_gettime/%.c
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
 
 compat/clock_nanosleep/%.o: compat/clock_nanosleep/%.c
 	$(CC) $(ALL_CCFLAGS) -c $< -o $@
-
-# C++ rule for sdrgg backend
-ifeq ($(SDRGG), yes)
-$(OBJDIR)/sdr_backend_sdrgg.o: $(SRCDIR_SDR)/sdr_backend_sdrgg.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-endif
-
-# C++ rule for dispatcher
-$(OBJDIR)/dispatcher.o: $(SRCDIR_DISPATCH)/dispatcher.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-# C++ rule for msg_queue
-$(OBJDIR)/msg_queue.o: $(SRCDIR_DISPATCH)/msg_queue.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-# C++ rules for converted modules
-$(OBJDIR)/config_panel.o: $(SRCDIR_PANEL)/config_panel.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/net_io.o: $(SRCDIR_NET)/net_io.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/mlat_client.o: $(SRCDIR_NET)/mlat_client.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/ogn_client.o: $(SRCDIR_NET)/ogn_client.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/feeder_thread.o: $(SRCDIR_NET)/feeder_thread.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/piaware_client.o: $(SRCDIR_NET)/piaware_client.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-# C++ rules for tracker/decoder modules
-$(OBJDIR)/gsm_tracker.o: $(SRCDIR_GSM)/gsm_tracker.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/iot_tracker.o: $(SRCDIR_IOT)/iot_tracker.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/lte_tracker.o: $(SRCDIR_LTE)/lte_tracker.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
-
-$(OBJDIR)/sondehub_client.o: $(SRCDIR_NET)/sondehub_client.cpp | $(OBJDIR)
-	$(CXX) $(CXXFLAGS_DISPATCH) -c $< -o $@
 
 # ======================== Object lists ========================
 

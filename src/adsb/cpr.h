@@ -21,10 +21,6 @@
 #define DUMP1090_CPR_H
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 int32_t decodeCPRairborne(int32_t even_cprlat, int32_t even_cprlon,
                       int32_t odd_cprlat, int32_t odd_cprlon,
                       int32_t fflag,
@@ -40,9 +36,5 @@ int32_t decodeCPRrelative(double reflat, double reflon,
                       int32_t cprlat, int32_t cprlon,
                       int32_t fflag, int32_t surface,
                       double *out_lat, double *out_lon);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

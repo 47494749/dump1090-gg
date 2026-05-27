@@ -19,7 +19,7 @@
 #include "piaware_client.h"
 #include "fa_mlat.h"
 
-#include <stdarg.h>
+#include <cstdarg>
 #include <string>
 #include <sys/utsname.h>
 #include <openssl/ssl.h>
@@ -31,6 +31,7 @@
 #include <netdb.h>
 #include <dirent.h>
 #include <string_view>
+#include "gg_format.h"
 
 piaware_client_t PiawareClient;
 
@@ -128,7 +129,7 @@ static const char *pa_source_char(datasource_t s) {
 static void paDetectMAC(void) {
     DIR *d = opendir("/sys/class/net");
     if (!d) {
-        strcpy(PiawareClient.mac, "00:00:00:00:00:00");
+        PiawareClient.mac = "00:00:00:00:00:00";
         return;
     }
 
@@ -140,29 +141,30 @@ static void paDetectMAC(void) {
         std::string path = std::string("/sys/class/net/") + ent->d_name + "/address";
         FILE *f = fopen(path.c_str(), "r");
         if (f) {
-            if (fgets(PiawareClient.mac, sizeof(PiawareClient.mac), f)) {
-                // strip newline
-                char *nl = strchr(PiawareClient.mac, '\n');
+            char mac_buf[32] = {};
+            if (fgets(mac_buf, sizeof(mac_buf), f)) {
+                char *nl = strchr(mac_buf, '\n');
                 if (nl) *nl = 0;
+                PiawareClient.mac = mac_buf;
             }
             fclose(f);
-            if (strlen(PiawareClient.mac) >= 17) {
+            if (PiawareClient.mac.size() >= 17) {
                 closedir(d);
                 return;
             }
         }
     }
     closedir(d);
-    if (strlen(PiawareClient.mac) < 17)
-        strcpy(PiawareClient.mac, "00:00:00:00:00:00");
+    if (PiawareClient.mac.size() < 17)
+        PiawareClient.mac = "00:00:00:00:00:00";
 }
 
 // Read feeder ID from file
 static void paReadFeederID(void) {
-    PiawareClient.feeder_id[0] = 0;
-    strcpy(PiawareClient.feeder_id_source, "none");
+    PiawareClient.feeder_id.clear();
+    PiawareClient.feeder_id_source = "none";
 
-    FILE *f = fopen(PiawareClient.feeder_id_file, "r");
+    FILE *f = fopen(PiawareClient.feeder_id_file.c_str(), "r");
     if (!f) return;
 
     char buf[128];
@@ -172,9 +174,8 @@ static void paReadFeederID(void) {
         char *cr = strchr(buf, '\r');
         if (cr) *cr = 0;
         if (strlen(buf) > 0) {
-            strncpy(PiawareClient.feeder_id, buf, sizeof(PiawareClient.feeder_id) - 1);
-            PiawareClient.feeder_id[sizeof(PiawareClient.feeder_id) - 1] = '\0';
-            strcpy(PiawareClient.feeder_id_source, "cache");
+            PiawareClient.feeder_id = buf;
+            PiawareClient.feeder_id_source = "cache";
         }
     }
     fclose(f);
@@ -266,7 +267,7 @@ static int32_t paInitSSL(void) {
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) {
-        fprintf(stderr, "PiAware: SSL_CTX_new failed\n");
+        gg::eprint("PiAware: SSL_CTX_new failed\n");
         return -1;
     }
 
@@ -274,8 +275,8 @@ static int32_t paInitSSL(void) {
     SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
 
     // Load FlightAware CA certificates
-    if (SSL_CTX_load_verify_locations(ctx, NULL, PiawareClient.ca_dir) != 1) {
-        fprintf(stderr, "PiAware: failed to load CA certificates from %s\n", PiawareClient.ca_dir);
+    if (SSL_CTX_load_verify_locations(ctx, NULL, PiawareClient.ca_dir.c_str()) != 1) {
+        gg::eprint("PiAware: failed to load CA certificates from %s\n", PiawareClient.ca_dir.c_str());
         SSL_CTX_free(ctx);
         return -1;
     }
@@ -296,12 +297,12 @@ static void paConnect(void) {
 
     std::string portstr = std::to_string(PiawareClient.port);
 
-    fprintf(stderr, "PiAware: connecting to %s:%d\n", PiawareClient.host, PiawareClient.port);
+    gg::eprint("PiAware: connecting to %s:%d\n", PiawareClient.host.c_str(), PiawareClient.port);
 
-    int err = getaddrinfo(PiawareClient.host, portstr.c_str(), &hints, &res);
+    int err = getaddrinfo(PiawareClient.host.c_str(), portstr.c_str(), &hints, &res);
     if (err != 0) {
         fprintf(stderr, "PiAware: DNS resolution failed for %s: %s\n",
-                PiawareClient.host, gai_strerror(err));
+                PiawareClient.host.c_str(), gai_strerror(err));
         PiawareClient.next_reconnect = mstime() + PiawareClient.reconnect_interval;
         return;
     }
@@ -330,7 +331,7 @@ static void paConnect(void) {
 
     if (fd < 0) {
         fprintf(stderr, "PiAware: connection to %s:%d failed\n",
-                PiawareClient.host, PiawareClient.port);
+                PiawareClient.host.c_str(), PiawareClient.port);
         PiawareClient.next_reconnect = mstime() + PiawareClient.reconnect_interval;
         return;
     }
@@ -361,7 +362,7 @@ static void paCheckConnect(void) {
     if (ret <= 0)
         return;  // not yet
 
-    fprintf(stderr, "PiAware: TCP connected to %s:%d\n", PiawareClient.host, PiawareClient.port);
+    gg::eprint("PiAware: TCP connected to %s:%d\n", PiawareClient.host.c_str(), PiawareClient.port);
 
     // Start TLS handshake
     SSL *ssl = SSL_new((SSL_CTX *)PiawareClient.ssl_ctx);
@@ -371,9 +372,9 @@ static void paCheckConnect(void) {
     }
 
     SSL_set_fd(ssl, PiawareClient.fd);
-    SSL_set_tlsext_host_name(ssl, PiawareClient.host);
+    SSL_set_tlsext_host_name(ssl, PiawareClient.host.c_str());
     // Enable hostname verification (CA chain already verified via SSL_VERIFY_PEER)
-    SSL_set1_host(ssl, PiawareClient.host);
+    SSL_set1_host(ssl, PiawareClient.host.c_str());
     PiawareClient.ssl = ssl;
     PiawareClient.state = PA_TLS_HANDSHAKE;
 }
@@ -382,7 +383,7 @@ static void paTLSHandshake(void) {
     int ret = SSL_connect((SSL *)PiawareClient.ssl);
     if (ret == 1) {
         // Handshake complete
-        fprintf(stderr, "PiAware: TLS handshake complete\n");
+        gg::eprint("PiAware: TLS handshake complete\n");
 
         // Verify certificate
         X509 *cert = SSL_get_peer_certificate((SSL *)PiawareClient.ssl);
@@ -400,7 +401,7 @@ static void paTLSHandshake(void) {
             return;
         }
 
-        fprintf(stderr, "PiAware: server certificate validated\n");
+        gg::eprint("PiAware: server certificate validated\n");
 
         // Configure socket for line-buffered I/O
         PiawareClient.state = PA_AWAITING_LOGIN;
@@ -420,7 +421,7 @@ static void paTLSHandshake(void) {
     uint64_t e = ERR_get_error();
     char errbuf[256];
     ERR_error_string_n(e, errbuf, sizeof(errbuf));
-    fprintf(stderr, "PiAware: TLS handshake failed: %s\n", errbuf);
+    gg::eprint("PiAware: TLS handshake failed: %s\n", errbuf);
     paDisconnect("TLS handshake failed");
 }
 
@@ -428,7 +429,7 @@ static void paDisconnect(const char *reason) {
     if (PiawareClient.state == PA_DISCONNECTED)
         return;
 
-    fprintf(stderr, "PiAware: disconnected (%s)\n", reason ? reason : "unknown");
+    gg::eprint("PiAware: disconnected (%s)\n", reason ? reason : "unknown");
 
     // Stop FA MLAT thread
     faMlatDisable();
@@ -510,13 +511,13 @@ static void paSendLog(const char *fmt, ...) {
     tsv_init(&tsv);
     tsv_field(&tsv, "type", "log");
     tsv_field(&tsv, "message", "%s", message);
-    tsv_field(&tsv, "mac", "%s", PiawareClient.mac);
+    tsv_field(&tsv, "mac", "%s", PiawareClient.mac.c_str());
     tsv_field(&tsv, "clock", "%" PRIu64, (uint64_t)time(NULL));
     tsv_finish(&tsv);
     paSend(tsv.buf, tsv.pos);
 
     // Also log locally
-    fprintf(stderr, "PiAware: LOG_SENT: %s\n", message);
+    gg::eprint("PiAware: LOG_SENT: %s\n", message);
 }
 
 static void paSendLogin(void) {
@@ -524,17 +525,17 @@ static void paSendLogin(void) {
     tsv_init(&tsv);
 
     tsv_field(&tsv, "type", "login");
-    tsv_field(&tsv, "mac", "%s", PiawareClient.mac);
+    tsv_field(&tsv, "mac", "%s", PiawareClient.mac.c_str());
 
-    if (PiawareClient.feeder_id[0]) {
+    if (!PiawareClient.feeder_id.empty()) {
         tsv_field(&tsv, "feeder_id", "%s %s",
-                  PiawareClient.feeder_id_source, PiawareClient.feeder_id);
+                  PiawareClient.feeder_id_source.c_str(), PiawareClient.feeder_id.c_str());
     }
 
     tsv_field(&tsv, "piaware_version", "8.2");
     tsv_field(&tsv, "piaware_version_full", "8.2~bpo10+1");
     tsv_field(&tsv, "image_type", "piaware_package");
-    tsv_field(&tsv, "connected_host", "%s", PiawareClient.host);
+    tsv_field(&tsv, "connected_host", "%s", PiawareClient.host.c_str());
 
     if (Modes.fUserLat != 0 || Modes.fUserLon != 0) {
         tsv_field(&tsv, "receiverlat", "%.5f", Modes.fUserLat);
@@ -561,7 +562,7 @@ static void paSendLogin(void) {
     tsv_finish(&tsv);
 
     fprintf(stderr, "PiAware: sending login (mac=%s, feeder_id=%s)\n",
-            PiawareClient.mac, PiawareClient.feeder_id);
+            PiawareClient.mac.c_str(), PiawareClient.feeder_id.c_str());
 
     paSend(tsv.buf, tsv.pos);
 }
@@ -590,12 +591,12 @@ static void paHandleLoginResponse(const char *line) {
     PiawareClient.msgs_sent = 0;
 
     pa_tsv_get(line, "user", user, sizeof(user));
-    fprintf(stderr, "PiAware: logged in as %s\n", user[0] ? user : "unknown");
+    gg::eprint("PiAware: logged in as %s\n", user[0] ? user : "unknown");
 
     if (pa_tsv_get(line, "feeder_id", feeder_id, sizeof(feeder_id)))
-        fprintf(stderr, "PiAware: feeder ID %s\n", feeder_id);
+        gg::eprint("PiAware: feeder ID %s\n", feeder_id);
     if (pa_tsv_get(line, "site_url", site_url, sizeof(site_url)))
-        fprintf(stderr, "PiAware: site URL %s\n", site_url);
+        gg::eprint("PiAware: site URL %s\n", site_url);
 
     // Send log messages like real piaware does after login
     paSendLog("logged in to FlightAware as user %s", user[0] ? user : "unknown");
@@ -632,7 +633,7 @@ static void paHandleMlatEnable(const char *line) {
     char transport[256];
 
     if (!pa_tsv_get(line, "udp_transport", transport, sizeof(transport))) {
-        fprintf(stderr, "PiAware: mlat_enable without udp_transport, ignoring\n");
+        gg::eprint("PiAware: mlat_enable without udp_transport, ignoring\n");
         return;
     }
 
@@ -641,14 +642,14 @@ static void paHandleMlatEnable(const char *line) {
     keystr[0] = 0;
     int32_t fields = sscanf(transport, "%127s %15s %63s", host, portstr, keystr);
     if (fields < 2) {
-        fprintf(stderr, "PiAware: mlat_enable: invalid udp_transport format: %s\n", transport);
+        gg::eprint("PiAware: mlat_enable: invalid udp_transport format: %s\n", transport);
         return;
     }
 
     int32_t port = atoi(portstr);
     uint32_t key = keystr[0] ? (uint32_t)strtoul(keystr, NULL, 10) : 0;
 
-    fprintf(stderr, "PiAware: MLAT enabled (udp %s:%d key=%u)\n", host, port, key);
+    gg::eprint("PiAware: MLAT enabled (udp %s:%d key=%u)\n", host, port, key);
 
     // Start the built-in FA MLAT thread
     faMlatEnable(host, port, key);
@@ -665,7 +666,7 @@ static void paHandleLine(const char *line) {
     // Log ALL incoming server messages (truncate long lines)
     if (type_sv != "alive") {
         // Log everything except alive (too frequent)
-        fprintf(stderr, "PiAware: SERVER_CMD type=%s | %.512s\n", type, line);
+        gg::eprint("PiAware: SERVER_CMD type=%s | %.512s\n", type, line);
         if (PanelState.enabled)
             panelLog("PiAware: %s", type);
     }
@@ -677,19 +678,19 @@ static void paHandleLine(const char *line) {
     } else if (type_sv == "notice") {
         char msg[512];
         if (pa_tsv_get(line, "message", msg, sizeof(msg))) {
-            fprintf(stderr, "PiAware: NOTICE: %s\n", msg);
+            gg::eprint("PiAware: NOTICE: %s\n", msg);
             if (PanelState.enabled)
                 panelLog("PiAware NOTICE: %s", msg);
         }
     } else if (type_sv == "shutdown") {
-        fprintf(stderr, "PiAware: server shutting down\n");
+        gg::eprint("PiAware: server shutting down\n");
         if (PanelState.enabled)
             panelLog("PiAware: server shutting down!");
         paDisconnect("server shutdown");
     } else if (type_sv == "mlat_enable") {
         paHandleMlatEnable(line);
     } else if (type_sv == "mlat_disable") {
-        fprintf(stderr, "PiAware: MLAT disabled by server\n");
+        gg::eprint("PiAware: MLAT disabled by server\n");
         faMlatDisable();
     } else if (type_sv == "mlat_wanted") {
         paHandleMlatWanted(line);
@@ -701,7 +702,7 @@ static void paHandleLine(const char *line) {
         char action[256];
         if (pa_tsv_get(line, "action", action, sizeof(action))) {
             std::string_view action_sv(action);
-            fprintf(stderr, "PiAware: REQUEST_MANUAL_UPDATE action=%s\n", action);
+            gg::eprint("PiAware: REQUEST_MANUAL_UPDATE action=%s\n", action);
             if (PanelState.enabled)
                 panelLog("PiAware: REMOTE CMD action=%s", action);
             paSendLog("manual update (user-initiated via their flightaware control page) requested by adept server");
@@ -713,10 +714,10 @@ static void paHandleLine(const char *line) {
                 paSendLog("restart requested, but dump1090-gg manages itself - ignoring restart action");
             } else if (action_sv.find("reboot") != std::string_view::npos) {
                 paSendLog("reboot requested via manual update");
-                fprintf(stderr, "PiAware: REBOOT requested by FlightAware server!\n");
+                gg::eprint("PiAware: REBOOT requested by FlightAware server!\n");
             } else if (action_sv.find("halt") != std::string_view::npos) {
                 paSendLog("halt requested via manual update");
-                fprintf(stderr, "PiAware: HALT requested by FlightAware server!\n");
+                gg::eprint("PiAware: HALT requested by FlightAware server!\n");
             } else if (action_sv.find("piaware") != std::string_view::npos ||
                        action_sv.find("dump1090") != std::string_view::npos ||
                        action_sv.find("packages") != std::string_view::npos ||
@@ -726,19 +727,19 @@ static void paHandleLine(const char *line) {
                 paSendLog("unknown manual update action: %s", action);
             }
         } else {
-            fprintf(stderr, "PiAware: REQUEST_MANUAL_UPDATE (no action field)\n");
+            gg::eprint("PiAware: REQUEST_MANUAL_UPDATE (no action field)\n");
         }
     } else if (type_sv == "request_auto_update") {
         char action[256];
         if (pa_tsv_get(line, "action", action, sizeof(action))) {
-            fprintf(stderr, "PiAware: REQUEST_AUTO_UPDATE action=%s\n", action);
+            gg::eprint("PiAware: REQUEST_AUTO_UPDATE action=%s\n", action);
             paSendLog("auto update requested by adept server, action: %s", action);
             paSendLog("auto update action '%s' received but dump1090-gg does not support remote upgrades", action);
         } else {
-            fprintf(stderr, "PiAware: REQUEST_AUTO_UPDATE (no action field)\n");
+            gg::eprint("PiAware: REQUEST_AUTO_UPDATE (no action field)\n");
         }
     } else {
-        fprintf(stderr, "PiAware: UNKNOWN_CMD type=%s | %.512s\n", type, line);
+        gg::eprint("PiAware: UNKNOWN_CMD type=%s | %.512s\n", type, line);
     }
 }
 
@@ -1160,14 +1161,14 @@ void piawareClientInit(void) {
         return;
 
     // Set defaults
-    if (!PiawareClient.host[0])
-        strncpy(PiawareClient.host, PA_DEFAULT_HOST, sizeof(PiawareClient.host) - 1);
+    if (PiawareClient.host.empty())
+        PiawareClient.host = PA_DEFAULT_HOST;
     if (!PiawareClient.port)
         PiawareClient.port = PA_DEFAULT_PORT;
-    if (!PiawareClient.ca_dir[0])
-        strncpy(PiawareClient.ca_dir, PA_DEFAULT_CA_DIR, sizeof(PiawareClient.ca_dir) - 1);
-    if (!PiawareClient.feeder_id_file[0])
-        strncpy(PiawareClient.feeder_id_file, PA_DEFAULT_FEEDER_FILE, sizeof(PiawareClient.feeder_id_file) - 1);
+    if (PiawareClient.ca_dir.empty())
+        PiawareClient.ca_dir = PA_DEFAULT_CA_DIR;
+    if (PiawareClient.feeder_id_file.empty())
+        PiawareClient.feeder_id_file = PA_DEFAULT_FEEDER_FILE;
 
     PiawareClient.fd = -1;
     PiawareClient.state = PA_DISCONNECTED;
@@ -1175,28 +1176,28 @@ void piawareClientInit(void) {
 
     // Auto-detect MAC address
     paDetectMAC();
-    fprintf(stderr, "PiAware: MAC address: %s\n", PiawareClient.mac);
+    gg::eprint("PiAware: MAC address: %s\n", PiawareClient.mac.c_str());
 
     // Read feeder ID (skip if already set via --piaware-feeder-id)
-    if (PiawareClient.feeder_id[0]) {
-        fprintf(stderr, "PiAware: feeder ID (from config): %s\n", PiawareClient.feeder_id);
+    if (!PiawareClient.feeder_id.empty()) {
+        gg::eprint("PiAware: feeder ID (from config): %s\n", PiawareClient.feeder_id.c_str());
     } else {
         paReadFeederID();
-        if (PiawareClient.feeder_id[0])
-            fprintf(stderr, "PiAware: feeder ID (from file): %s\n", PiawareClient.feeder_id);
+        if (!PiawareClient.feeder_id.empty())
+            gg::eprint("PiAware: feeder ID (from file): %s\n", PiawareClient.feeder_id.c_str());
         else
-            fprintf(stderr, "PiAware: WARNING: no feeder ID found at %s\n", PiawareClient.feeder_id_file);
+            gg::eprint("PiAware: WARNING: no feeder ID found at %s\n", PiawareClient.feeder_id_file.c_str());
     }
 
     // Initialize OpenSSL
     if (paInitSSL() < 0) {
-        fprintf(stderr, "PiAware: SSL initialization failed, disabling\n");
+        gg::eprint("PiAware: SSL initialization failed, disabling\n");
         PiawareClient.enabled = 0;
         return;
     }
 
     fprintf(stderr, "PiAware: client initialized, connecting to %s:%d\n",
-            PiawareClient.host, PiawareClient.port);
+            PiawareClient.host.c_str(), PiawareClient.port);
 
     // Initialize FA MLAT subsystem
     faMlatInit();

@@ -13,10 +13,10 @@
 #include "lte_tracker.h"
 #include <cstdint>
 #include <inttypes.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <pthread.h>
 
 #include <string>

@@ -22,10 +22,6 @@
 #define SDR_H
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 // Common interface to different SDR inputs.
 
 void sdrInitConfig();
@@ -46,9 +42,5 @@ int32_t sdrSetGain(int32_t step);      // set gain step; return actual gain step
 void sdrMonitor();
 // Retrieve CPU stats and add new CPU time to *addTo
 void sdrUpdateCPUTime(struct timespec *addTo);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

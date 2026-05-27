@@ -12,11 +12,8 @@
 #ifndef FA_MLAT_H
 #define FA_MLAT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
+#include <string>
 #include <pthread.h>
 
 // Forward declaration
@@ -97,7 +94,7 @@ struct fa_mlat_state {
     int32_t      stop_requested;         // signal thread to stop
 
     // UDP transport config
-    char     udp_host[256];
+    std::string  udp_host;
     int32_t      udp_port;
     uint32_t udp_key;
 
@@ -156,9 +153,5 @@ void faMlatInjectResult(uint32_t addr, double lat, double lon, double alt,
 
 // Cleanup
 void faMlatCleanup(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // FA_MLAT_H

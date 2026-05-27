@@ -21,16 +21,17 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <fcntl.h>
-#include <errno.h>
+#include <cerrno>
 #include <unistd.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <string_view>
-#include <stdarg.h>
-#include <math.h>
-#include <time.h>
+#include <cstdarg>
+#include <cmath>
+#include <ctime>
+#include "gg_format.h"
 
 // ============================= Globals ===================================
 
@@ -143,8 +144,8 @@ void mlatClientInit(void)
     // server_count, servers[], user, uuid_file, lat/lon/alt, etc.
 
     // Read UUID from file if configured
-    if (MlatConfig.uuid_file) {
-        FILE *f = fopen(MlatConfig.uuid_file, "r");
+    if (!MlatConfig.uuid_file.empty()) {
+        FILE *f = fopen(MlatConfig.uuid_file.c_str(), "r");
         if (f) {
             char raw[128];
             if (fgets(raw, sizeof(raw), f)) {
@@ -152,7 +153,7 @@ void mlatClientInit(void)
                 while (!buf.empty() && (buf.back() == '\n' || buf.back() == '\r'))
                     buf.pop_back();
                 if (!buf.empty()) {
-                    MlatConfig.uuid = strdup(buf.c_str());
+                    MlatConfig.uuid = buf;
                 }
             }
             fclose(f);
@@ -244,7 +245,7 @@ int32_t mlatClientAddServer(const char *hostport)
     }
 
     if (s->port <= 0 || s->port > 65535) {
-        fprintf(stderr, "MLAT: invalid port in '%s'\n", hostport);
+        gg::eprint("MLAT: invalid port in '%s'\n", hostport);
         free(s->host);
         return -1;
     }
@@ -260,8 +261,8 @@ void mlatClientCleanup(void)
         free(MlatConfig.servers[i].host);
     }
     free(MlatConfig.user);
-    free(MlatConfig.uuid);
-    free(MlatConfig.uuid_file);
+    MlatConfig.uuid.clear();
+    MlatConfig.uuid_file.clear();
 }
 
 void mlatClientDisconnectAll(const char *reason)
@@ -372,7 +373,7 @@ static void mlat_server_connect(struct mlat_server *s)
         if (delay > 0) {
             char dbuf[32];
             mlat_format_delay(delay, dbuf, sizeof(dbuf));
-            fprintf(stderr, "MLAT[%s:%d]: DNS resolve failed: %s, retry in %s\n", s->host, s->port, gai_strerror(gai), dbuf);
+            gg::eprint("MLAT[%s:%d]: DNS resolve failed: %s, retry in %s\n", s->host, s->port, gai_strerror(gai), dbuf);
         }
         return;
     }
@@ -402,7 +403,7 @@ static void mlat_server_connect(struct mlat_server *s)
         if (delay > 0) {
             char dbuf[32];
             mlat_format_delay(delay, dbuf, sizeof(dbuf));
-            fprintf(stderr, "MLAT[%s:%d]: connect failed, retry in %s\n", s->host, s->port, dbuf);
+            gg::eprint("MLAT[%s:%d]: connect failed, retry in %s\n", s->host, s->port, dbuf);
         }
         return;
     }
@@ -421,7 +422,7 @@ static void mlat_server_connect(struct mlat_server *s)
     if (err == 0) {
         s->state = MLAT_HANDSHAKING;
         s->last_data_received = mstime();
-        fprintf(stderr, "MLAT[%s:%d]: connected\n", s->host, s->port);
+        gg::eprint("MLAT[%s:%d]: connected\n", s->host, s->port);
         mlat_server_send_handshake(s);
     }
 }
@@ -434,7 +435,7 @@ static void mlat_server_disconnect(struct mlat_server *s, const char *reason)
     }
 
     if (s->state != MLAT_DISCONNECTED) {
-        fprintf(stderr, "MLAT[%s:%d]: disconnected (%s)\n", s->host, s->port, reason);
+        gg::eprint("MLAT[%s:%d]: disconnected (%s)\n", s->host, s->port, reason);
         if (PanelState.enabled)
             panelLog("MLAT[%s:%d]: disconnected (%s)", s->host, s->port, reason);
     }
@@ -448,7 +449,7 @@ static void mlat_server_disconnect(struct mlat_server *s, const char *reason)
         if (delay > 0) {
             char dbuf[32];
             mlat_format_delay(delay, dbuf, sizeof(dbuf));
-            fprintf(stderr, "MLAT[%s:%d]: retry in %s\n", s->host, s->port, dbuf);
+            gg::eprint("MLAT[%s:%d]: retry in %s\n", s->host, s->port, dbuf);
         }
     }
 
@@ -486,8 +487,8 @@ static void mlat_server_send_handshake(struct mlat_server *s)
     if (MlatConfig.user) {
         hs += ",\"user\":\"" + std::string(MlatConfig.user) + "\"";
     }
-    if (MlatConfig.uuid) {
-        hs += ",\"uuid\":\"" + std::string(MlatConfig.uuid) + "\"";
+    if (!MlatConfig.uuid.empty()) {
+        hs += ",\"uuid\":\"" + MlatConfig.uuid + "\"";
     }
     if (MlatConfig.position_set) {
         char pos_tmp[128];
@@ -597,7 +598,7 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
     const char *val;
     int32_t vlen;
     if (json_find_key(line, len, "deny", &val, &vlen)) {
-        fprintf(stderr, "MLAT[%s:%d]: server rejected connection\n", s->host, s->port);
+        gg::eprint("MLAT[%s:%d]: server rejected connection\n", s->host, s->port);
         mlat_server_disconnect(s, "server denied connection");
         return;
     }
@@ -633,7 +634,7 @@ static void mlat_server_handle_handshake(struct mlat_server *s, const char *line
             }
         }
         while (!clean.empty() && clean.back() == ' ') clean.pop_back();
-        fprintf(stderr, "MLAT[%s:%d]: server says: %s\n", s->host, s->port, clean.c_str());
+        gg::eprint("MLAT[%s:%d]: server says: %s\n", s->host, s->port, clean.c_str());
         if (PanelState.enabled)
             panelLog("MLAT[%s]: %s", s->host, clean.c_str());
     }
@@ -1470,7 +1471,7 @@ static int32_t json_find_string_array(const char *json, int32_t len, const char 
 static int32_t mlat_buf_append(struct mlat_server *s, const char *data, int32_t len)
 {
     if (s->writebuf_len + len > MLAT_WRITE_BUF_SIZE) {
-        fprintf(stderr, "MLAT[%s:%d]: write buffer overflow, dropping data\n", s->host, s->port);
+        gg::eprint("MLAT[%s:%d]: write buffer overflow, dropping data\n", s->host, s->port);
         return -1;
     }
     memcpy(s->writebuf + s->writebuf_len, data, len);

@@ -51,10 +51,6 @@
 #ifndef DUMP1090_STATS_H
 #define DUMP1090_STATS_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 struct stats {
@@ -156,9 +152,5 @@ void display_stats(struct stats *st);
 void reset_stats(struct stats *st);
 
 void add_timespecs(const struct timespec *x, const struct timespec *y, struct timespec *z);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

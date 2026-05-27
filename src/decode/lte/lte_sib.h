@@ -13,12 +13,8 @@
 #ifndef LTE_SIB_H
 #define LTE_SIB_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Constants ========================
 
@@ -252,9 +248,5 @@ const char *lte_etws_warning_type(uint8_t type_byte);
 // Decode CBS data coding scheme (GSM 03.38) to UTF-8
 int32_t lte_cbs_decode_text(const uint8_t *data, int32_t data_len, uint8_t dcs,
                         char *utf8_out, int32_t utf8_max);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // LTE_SIB_H

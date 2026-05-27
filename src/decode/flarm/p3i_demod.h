@@ -12,12 +12,8 @@
 #ifndef P3I_DEMOD_H
 #define P3I_DEMOD_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 #include "p3i_decode.h"
 
 // Forward declaration
@@ -54,9 +50,5 @@ void p3i_demod_process(struct p3i_demod_state *state, const uint8_t *iq_data, ui
 
 // Get stats
 void p3i_demod_get_stats(struct p3i_demod_state *state, p3i_demod_stats_t *stats);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // P3I_DEMOD_H

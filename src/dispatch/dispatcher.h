@@ -1,14 +1,15 @@
 // dispatcher.h: Central message dispatcher.
 // Polls decoder queues and routes data to aircraft list, feeders, and APIs.
 // C++ implementation with C-callable interface.
+//
+// Part of dump1090-gg-light.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #ifndef DISPATCHER_H
 #define DISPATCHER_H
 
 #include "decoder_types.h"
 #include <stdint.h>
-
-#ifdef __cplusplus
 
 #include "decoder_queue.h"
 #include <vector>
@@ -73,13 +74,7 @@ private:
 // Global dispatcher instance
 extern Dispatcher g_dispatcher;
 
-#endif // __cplusplus
-
 // ======================== C interface ========================
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // Opaque handles for C code to push into queues
 typedef void* aircraft_queue_handle_t;
@@ -109,9 +104,5 @@ aircraft_queue_handle_t dispatcher_register_aircraft_queue(const char *name);
 
 // Register a new ADS-B source queue (demod, net, feeder). Returns handle.
 adsb_queue_handle_t dispatcher_register_adsb_queue(const char *name);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // DISPATCHER_H

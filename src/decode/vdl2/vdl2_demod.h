@@ -10,12 +10,12 @@
 #ifndef VDL2_DEMOD_H
 #define VDL2_DEMOD_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include <stdint.h>
-#include <stdbool.h>
 
 #define VDL2_SYMBOL_RATE    10500     // symbols/sec (D8PSK: 3 bits/sym → 31500 bps)
 #define VDL2_BITS_PER_SYM   3         // D8PSK: 3 bits per symbol

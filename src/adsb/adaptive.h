@@ -20,19 +20,11 @@
 #ifndef ADAPTIVE_H
 #define ADAPTIVE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <inttypes.h>
 
 struct modesMessage;
 
 void adaptive_init();
 void adaptive_update(uint16_t *buf, uint32_t length, struct modesMessage *decoded);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

@@ -21,6 +21,13 @@ unclear — to avoid any potential legal issues, the working implementations are
 not included. All open-source feeders and 11 Beast-binary tracking networks are
 fully functional.
 
+Public tree note: this repository is in the middle of a staged C-to-C++
+migration. The documentation below refers to stable module names and public
+features; some implementation files are still `.c`, some are already `.cpp`,
+and older history sections may retain the filenames that were current when
+those notes were written. Internal one-off validation tools used during
+development are not part of the public tree unless the files are present here.
+
 ## About this project — AI as a developer
 
 This project is an **experiment to test the effectiveness of AI as a software
@@ -31,7 +38,7 @@ but this fork also extends several upstream files with new options, feeder
 integration, decoder hooks, panel endpoints, and build changes. All of the
 **new functionality** — the native feeder
 clients, multi-SDR architecture, FLARM / OGNTP / ADS-L / P3I / FANET+ /
-ACRS / VDL2 / Radiosonde / CPDLC / COSPAS-SARSAT / GSM / LTE / POCSAG / IoT
+ACARS / VDL2 / Radiosonde / CPDLC / COSPAS-SARSAT / GSM / LTE / POCSAG / IoT
 decoders, the airframes.io feed, the C++17 message dispatcher, the web control
 panel, Makefile modifications, protocol implementations, the information
 gathering, and this README itself — was
@@ -61,7 +68,7 @@ The human operator provided:
   forced to follow the given directives instead of inventing its own plan
 
 The AI performed:
-- All code writing (C, Python helper scripts, Makefile edits)
+- All code writing (C, C++, Python helper scripts, Makefile edits)
 - Protocol research and information gathering from open-source references
 - File transfers, remote compilation, and deployment to the target device
 - Diagnostic reading of logs, journal output
@@ -93,6 +100,8 @@ compiling, and deploying code — proved highly effective for this project.
 | Feature | dump1090-fa (upstream) | dump1090-gg-light |
 |---|---|---|
 | ADS-B decoding | ✅ | ✅ (enhanced Comm-B/TIS-B/ELM/CPDLC) |
+| BDS 4,4 / 4,5 meteorological | not decoded | **native** (MRAR: wind/temp/pressure; MHAR: turbulence/icing/windshear) |
+| BeastReduce rate limiting | not supported | **native** (per-aircraft 250 ms throttle for all beast feeds) |
 | PiAware / FlightAware feed | external `piaware` + `faup1090` | **native thread** (TLS, ADEPT protocol) |
 | FlightAware MLAT | external `fa-mlat-client` (Python) | **native thread** (UDP binary protocol) |
 | ADSBexchange MLAT | external `mlat-client` (Python) | **native thread** (JSON-over-TCP) |
@@ -112,10 +121,13 @@ compiling, and deploying code — proved highly effective for this project.
 | COSPAS-SARSAT 406 MHz | not supported | **native** (ELT/EPIRB/PLB beacon decoder, BCH FEC) |
 | GSM cell scanning | not supported | **native** (GMSK demod, FCCH/SCH sync, SI decode, cell tracking) |
 | POCSAG pager decoding | not supported | **native** (FSK demod, BCH ECC, alpha/numeric, multi-baud) |
-| IoT 868 MHz | not supported | **native** (OOK/FSK: Bresser, LaCrosse, Honeywell) |
+| IoT 868 MHz | not supported | **native** (OOK/FSK: Bresser, LaCrosse, Honeywell, wMBus C/T) |
 | Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR, 11 roles) |
 | SDR backend | librtlsdr only | **pluggable** (librtlsdr + libsdrgg optimized USB driver) |
 | Web control panel | not supported | **native** (HTTP REST API, live configuration) |
+| Waterfall / spectrum analyzer | not supported | **native** (real-time FFT, WebSocket stream, frequency tuning) |
+| Statistics dashboard | not supported | **native** (Chart.js time-series, persistent history, per-decoder counters) |
+| System warnings | not supported | **native** (DVB driver conflict detection, popup alerts) |
 
 All feeder threads use **lock-free SPSC ring buffers** to receive data from the main
 decode loop, so slow or failing network I/O on any single feed cannot block decoding.
@@ -166,13 +178,14 @@ RTL-SDR #8 (935 MHz)  ──► GSM decode  ───┬──► Cell tracker  
                        ──► POCSAG demod ──┬──► Message display  (512/1200/2400 baud)
                           (FSK, BCH ECC)  └──► /api/messages    (alpha + numeric pages)
 
-                       ──► LTE decode  ───┬──► Cell scanner     (PSS/SSS, MIB, SIB1-14)
+                        ──► LTE decode  ───┬──► Cell scanner     (PSS/SSS, MIB, selected SIBs)
                           (OFDM, ZC seq)  └──► ETWS/CMAS alerts (earthquake/tsunami warnings)
 
-                       ──► IoT 868 demod ─┬──► Message display  (Bresser, LaCrosse, Honeywell)
+                        ──► IoT 868 demod ─┬──► Message display  (Bresser, LaCrosse, Honeywell, wMBus)
                           (OOK/FSK)       └──► Temperature data
 
 Web control panel (port 8888) ──► Live config, status, logs, device management
+                               ──► Waterfall spectrum analyzer (WebSocket, per-device FFT)
 ```
 
 ---
@@ -196,7 +209,11 @@ make -j4 DUMP1090_VERSION=custom-threads
 
 `DUMP1090_VERSION` sets the version string embedded in the binary (shown in
 `--help` output and the SkyAware web interface). Any value can be used; omit it
-to default to the git tag.
+to use the Makefile default shown during the build.
+
+Normal builds keep decoder diagnostics quiet by default. To enable the
+development-oriented ACARS / VDL2 / FANET / GSM calibration / adaptive-gain
+trace output, build with `make -j4 DUMP1090_DIAGNOSTICS=yes`.
 
 This produces three binaries: `dump1090`, `view1090`, `starch-benchmark`.
 
@@ -212,6 +229,10 @@ The program supports two SDR backends:
 To build with libsdrgg support:
 
 ```bash
+cd ../libsdrgg
+make
+
+cd ../dump1090-gg-light
 make clean
 make -j4 SDRGG=yes
 ```
@@ -221,6 +242,11 @@ If libsdrgg is installed in a non-standard location:
 ```bash
 make -j4 SDRGG=yes SDRGG_PREFIX=/path/to/libsdrgg
 ```
+
+`SDRGG_PREFIX` can point either to the libsdrgg source tree or to an installed
+prefix. When a shared `libsdrgg.so` is present, the build prefers it and adds
+an rpath for that location; if only `libsdrgg.a` exists, it falls back to the
+static archive.
 
 When both backends are compiled in, each receiver can select its backend via
 the `backend=` option in the `--receiver` config string:
@@ -332,6 +358,12 @@ Each network can be enabled individually. Host and port are overridable.
 | `--theairtraffic` | feed.theairtraffic.com:30004 |
 | `--avdelphi` | data.avdelphi.com:24999 |
 | `--adsbhub` | data.adsbhub.org:5001 |
+| `--beast-reduce-interval <ms>` | BeastReduce min interval (default: 250, 0=off) |
+
+All beast feeds use **BeastReduce** by default: per-aircraft rate limiting sends
+state messages (position/velocity) at most every 250 ms, reducing upstream
+bandwidth while forwarding non-state messages (DF11, identity changes, etc.)
+immediately.
 
 #### Web control panel
 
@@ -425,8 +457,9 @@ Decodes CPDLC messages carried in Comm-D ELM frames (DF24–31) using
 - **Self-contained implementation**: hand-rolled ASN.1 UPER bitstream reader,
   no external ASN.1 library dependency. PER constraints extracted from
   libacars/asn1 generated specifications
-- **57 test vectors** (`test_cpdlc.c`): hand-crafted UPER bit-level encoder
-  exercising all parameter types, both DM and UM directions
+- **Validation coverage**: implementation was checked against 57 hand-crafted
+  UPER test vectors spanning both DM and UM directions; the private one-off
+  generator used during development is not shipped in this public tree
 
 **Standards:** ICAO Doc 9705 (FANS-1/A), RTCA DO-258A, EUROCAE ED-100A,
 ASN.1 UPER (ITU-T X.691).
@@ -482,7 +515,7 @@ All new data is exposed via the standard `aircraft.json` HTTP endpoint:
 
 | Field(s) | Source |
 |---|---|
-| `mhar_turbulence`, `mhar_windshear`, `mhar_microburst`, `mhar_icing`, `mhar_wake`, `mhar_temperature`, `mhar_pressure`, `mhar_humidity` | BDS 4,5 |
+| `mhar_turbulence`, `mhar_windshear`, `mhar_microburst`, `mhar_icing`, `mhar_wake`, `mhar_temperature`, `mhar_pressure`, `mhar_radio_height` | BDS 4,5 |
 | `waypoint`, `waypoint_lat`, `waypoint_lon`, `waypoint_alt` | BDS 4,1 / 4,2 |
 | `waypoint_crossing_alt`, `waypoint_crossing_speed` | BDS 4,3 |
 | `acas_ra` (object: ara, rac, rat, mte, tti, threat) | BDS 3,0 / DF16 / TC28 |
@@ -975,6 +1008,52 @@ PPM error, replicating the approach used by
 - Returns corrected PPM value, measurement RMS, and sample count
 - The dongle must be closed before calling (exclusive USB access)
 
+### LTE cell scanner (`lte_decode.cpp/.h`, `lte_sib.cpp/.h`, `lte_tracker.cpp/.h`)
+
+Passive **LTE** downlink scanner for dedicated SDR receivers, focused on cell
+discovery, broadcast-channel decoding, and emergency-alert extraction without
+any uplink transmission.
+
+- **PSS/SSS acquisition**: Zadoff-Chu correlation for the three LTE PSS roots,
+  followed by SSS correlation to recover the full PCI (`N_ID_1`, `N_ID_2`)
+- **PBCH / MIB decode**: 4-frame PBCH accumulation with CRC masking and PHICH
+  parameter extraction
+- **System information decode**: SIB1 plus the currently implemented subset of
+  SIBs exposed by `lte_sib` (`2`, `3`, `4`, `5`, `6`, `7`, `10`, `11`, `12`,
+  `14`) for cell parameters, neighbour lists, reselection info, and public
+  warning messages
+- **Alert extraction**: ETWS, CMAS, and EAB records are tracked and exposed by
+  the LTE tracker JSON output
+- **Tracker/API integration**: `/api/lte` exports PCI, EARFCN, band, sync
+  state, MIB/SIB1 fields, optional local cell-database enrichment, and alert
+  history for the web panel LTE page
+- **Deployment model**: intended for a dedicated receiver role (`lte`) rather
+  than timesharing with ADS-B decoding
+
+**Standards:** 3GPP TS 36.211, TS 36.212, TS 36.331.
+
+### IoT 868 MHz ISM decoder (`iot_decode.cpp/.h`, `iot_tracker.cpp/.h`)
+
+Wideband **IoT 868 MHz** monitor for low-power ISM devices, combining OOK and
+FSK/GFSK paths in a single 2 MSPS receiver centered on 868.3 MHz.
+
+- **Dual demodulation path**: AM-envelope pulse analysis for OOK devices and
+  FM-discriminator bit recovery for FSK / GFSK signals
+- **Protocol-specific decoders currently implemented**: LaCrosse TX weather
+  sensors, Bresser 5-in-1, Honeywell CM9xx thermostats, and wireless M-Bus
+  Mode C / Mode T traffic
+- **Fallback classification**: unsupported traffic can still be surfaced as
+  generic OOK or generic FSK messages instead of being silently discarded
+- **Tracker/API integration**: `/api/iot868` exports protocol name, modulation,
+  device ID, last measurements, RSSI / frequency offset, raw payload, and
+  message counts for up to 128 tracked devices
+- **Measured fields**: the tracker stores temperature, humidity, pressure,
+  wind, rain, power / energy, battery state, and similar decoded telemetry when
+  the active protocol provides them
+
+**References:** published sensor protocol documentation, wireless M-Bus public
+framing, and rtl_433 as an implementation reference.
+
 ### POCSAG pager decoder (`pocsag_demod.c/.h`)
 
 Multi-baud **POCSAG** (Post Office Code Standardisation Advisory Group) pager
@@ -1025,7 +1104,28 @@ restarts for most settings.
   | `/api/receivers` | GET | Multi-SDR receiver status (role, gain, state) |
   | `/api/decoders` | GET | Per-decoder configuration and dongle assignments |
   | `/api/gsm` | GET | GSM cell tracker (MCC/MNC/LAC/CellID/ARFCN) |
+  | `/api/lte` | GET | LTE cell tracker and alert state (PCI/EARFCN/MIB/SIB/alerts) |
+  | `/api/iot868` | GET | IoT 868 MHz device tracker (protocol, measurements, payload) |
   | `/api/fanet` | GET | FANET decoder statistics (preambles, packets, CRC) |
+  | `/api/system-stats` | GET | System-level statistics (CPU, memory, uptime) |
+  | `/api/decoder-stats` | GET | Per-decoder message counters and error rates |
+  | `/api/stats-history` | GET | Time-series statistics snapshots (persistent) |
+  | `/api/warnings` | GET | Active system warnings (DVB driver, etc.) |
+  | `/api/diagnostics` | GET | Runtime diagnostics (per-dongle signal metrics) |
+  | `/api/diagnostics/start` | POST | Trigger a diagnostic frequency sweep |
+  | `/ws/waterfall` | WebSocket | Real-time FFT spectrum stream (binary frames) |
+- **Waterfall spectrum analyzer** (`panel/waterfall.html`):
+  - Live FFT-based spectrum display and scrolling waterfall plot via WebSocket
+  - Per-device selection: tap any connected SDR dongle for spectrum view
+  - Adjustable gain slider and sample rate (1.0 / 1.6 / 2.0 / 2.4 Msps)
+  - Frequency tuning with "Take Ownership" mode (pauses decoder, retunes dongle)
+  - Automatic release and decoder restoration when done
+- **Statistics dashboard** (`panel/stats.html`):
+  - Chart.js time-series graphs for message rates, signal levels, decoder counters
+  - Persistent history engine: snapshots saved to disk, survives restarts
+- **System warnings** (`panel/warnings.js`):
+  - Full-screen popup alerts for critical system issues (loaded on all pages)
+  - DVB kernel module conflict detection (`dvb_usb_rtl28xxu`) with fix instructions
 - **Configurable items** (via POST, applied at runtime):
   - Beast feed networks: enable/disable per network
   - OpenSky Network: enable/disable, username
@@ -1064,6 +1164,10 @@ The aircraft table page includes several interactive features:
     AWACS, NATO, REAPER, etc.)
   - Owner keywords from ICAO database lookups (air force, navy, army, etc.)
 - **GPS integrity flags**: GPS! (suspect) and GPS↓ (degraded) badges
+- **Meteorological tooltip**: hover on the weather icon (🌡️) to see real-time
+  MRAR data (wind speed/direction, static air temperature, pressure, humidity,
+  turbulence) and MHAR hazard data (turbulence, windshear, microburst, icing,
+  wake vortex severity) decoded from Comm-B BDS 4,4 and BDS 4,5
 - **Version badge**: all pages display the running program version (fetched
   from `/api/status`) in the top-right corner of the navigation bar
 
@@ -1122,8 +1226,8 @@ which is listed in the protocol source column.
 | `gsm_decode.c/.h` | GSM broadcast channel decoder (GMSK, Viterbi, SI) | 3GPP TS 05.02/05.03/04.08/03.41/04.06 (public standards) | GPL-3.0-or-later |
 | `gsm_tracker.c/.h` | GSM cell tracker and JSON API | Original implementation | GPL-3.0-or-later |
 | `gsm_calibrate.c/.h` | RTL-SDR PPM calibration via GSM carriers | Approach from [ogn-rf](https://github.com/glidernet/ogn-rf) (GPL-3.0) | GPL-3.0-or-later |
-| `lte_decode.c/.h`, `lte_sib.c/.h`, `lte_tracker.c/.h` | LTE cell scanner, SIB decoder and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
-| `iot_decode.c/.h`, `iot_tracker.c/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell) | Published sensor protocols, [rtl_433](https://github.com/merbanan/rtl_433) protocol reference (GPL-2.0) | GPL-3.0-or-later |
+| `lte_decode.cpp/.h`, `lte_sib.cpp/.h`, `lte_tracker.cpp/.h` | LTE cell scanner, SIB decoder and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
+| `iot_decode.cpp/.h`, `iot_tracker.cpp/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell, wMBus C/T) | Published sensor protocols, wireless M-Bus public framing, [rtl_433](https://github.com/merbanan/rtl_433) protocol reference (GPL-2.0) | GPL-2.0-or-later |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (FSK, BCH, multi-baud) | ITU-R M.584, ETSI ETS 300 133-2 (public standards) | GPL-3.0-or-later |
 | `elm.c/.h` | Comm-D ELM reassembly | ICAO Annex 10 Vol IV (Comm-D framing) | GPL-3.0-or-later |
 | `cpdlc_decode.c/.h` | FANS-1/A CPDLC message decoder | ICAO Doc 9705, RTCA DO-258A, ASN.1 constraints from [libacars](https://github.com/szpajder/libacars) | GPL-3.0-or-later |
@@ -1346,7 +1450,8 @@ PiAware client, FlightAware MLAT client, feeder thread layer, SondeHub client,
 ELM/CPDLC code, VDL2 decoder, and the web control panel.
 
 Some other local files currently carry **GPL-2.0-or-later** notices,
-including `sdr_receiver.c/.h` and `lte_decode.c/.h`.
+including `sdr_receiver.c/.h`, the LTE scanner files, and the IoT decoder /
+tracker files.
 
 Any combined build or redistribution that includes the GPL-3.0-or-later files
 must therefore be treated as **GPL-3.0-or-later** as a whole.
@@ -1526,10 +1631,10 @@ These are included in the source tree and compiled directly into the binary.
 | `gsm_decode.c/.h` | GSM broadcast channel decoder (FCCH, SCH, BCCH, Viterbi, Fire CRC) | 3GPP TS 05.02, 05.03, 04.08 standards; GSM reference implementations |
 | `gsm_tracker.c/.h` | Multi-cell GSM tracker (SI3, frequency hopping, cell database) | Original |
 | `lte_decode.c/.h` | LTE PSS/SSS synchronization, PBCH/SIB1 decode | Approach from [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) by James Peroulas (AGPL-3.0); 3GPP TS 36.211, 36.212, 36.331 standards |
-| `lte_sib.c/.h` | LTE SIB1–SIB14 decode, PDCCH/PDSCH, ETWS/CMAS alerts | 3GPP TS 36.212, 36.331 standards |
-| `lte_tracker.c/.h` | LTE cell tracker with cell database | Original |
-| `iot_decode.c/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell CM921) | Published sensor protocols, [rtl_433](https://github.com/merbanan/rtl_433) (GPL-2.0) |
-| `iot_tracker.c/.h` | IoT device state tracker | Original |
+| `lte_sib.cpp/.h` | LTE SIB1 plus SIB2/3/4/5/6/7/10/11/12/14 decode, PDCCH/PDSCH, ETWS/CMAS alerts | 3GPP TS 36.212, 36.331 standards |
+| `lte_tracker.cpp/.h` | LTE cell tracker with cell database | Original |
+| `iot_decode.cpp/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell CM9xx, wMBus C/T) | Published sensor protocols, wireless M-Bus public framing, [rtl_433](https://github.com/merbanan/rtl_433) (GPL-2.0) |
+| `iot_tracker.cpp/.h` | IoT device state tracker | Original |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (512/1200/2400 baud, BCH ECC) | ITU-R M.584, ETSI ETS 300 133-2 standards |
 | `sdr_receiver.c/.h` | Multi-SDR receiver manager (dynamic role assignment) | Original (sdr_backend abstraction layer) |
 | `sdr_backend.c/.h` | SDR hardware abstraction layer (vtable dispatch, rtlsdr wrapper) | Original |

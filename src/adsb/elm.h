@@ -8,10 +8,6 @@
 #ifndef ELM_H
 #define ELM_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 #include <pthread.h>
 
@@ -80,9 +76,5 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
                    uint32_t ke, const uint8_t *md, uint64_t timestamp);
 void elmCleanupStale(struct elm_state *state, uint64_t now);
 void elmPrintPartial(struct elm_state *state, uint64_t now);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

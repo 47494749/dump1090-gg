@@ -1,6 +1,9 @@
 // msg_queue.cpp: Generic thread-safe message queue implementation.
 // Uses a flat ring buffer protected by std::mutex.
 // Replaces all SPSC lock-free ring buffers.
+//
+// Part of dump1090-gg-light.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "msg_queue.h"
 
@@ -52,8 +55,6 @@ struct MsgQueueImpl {
     }
 };
 
-extern "C" {
-
 msg_queue_t msg_queue_create(uint32_t item_size, uint32_t capacity) {
     auto *q = new (std::nothrow) MsgQueueImpl(item_size, capacity);
     if (q && !q->ring) { delete q; return nullptr; }
@@ -75,5 +76,3 @@ int32_t msg_queue_pop(msg_queue_t q, void *item) {
 void msg_queue_clear(msg_queue_t q) {
     static_cast<MsgQueueImpl*>(q)->clear();
 }
-
-} // extern "C"

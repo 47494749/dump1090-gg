@@ -4,6 +4,10 @@
 #include "dsp-types.h"
 #include "cpu.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* mixes */
 
 /* AARCH64 */
@@ -386,3 +390,6 @@ void starch_magnitude_sc16_aligned_exact_float_x86_avx2 ( const sc16_t * arg0, u
 
 int starch_read_wisdom (const char * path);
 
+#ifdef __cplusplus
+}
+#endif

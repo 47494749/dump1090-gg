@@ -1,16 +1,15 @@
 // decoder_types.h: Common data structures shared by all decoders.
 // These structs flow through DecoderQueue and are consumed by the Dispatcher.
 // C/C++ compatible via extern "C" for the struct definitions.
+//
+// Part of dump1090-gg-light.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #ifndef DECODER_TYPES_H
 #define DECODER_TYPES_H
 
 #include <stdint.h>
-#include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // ======================== Decoder source ID ========================
 
@@ -149,9 +148,5 @@ typedef struct {
     double            signal_level;
     uint8_t           score;
 } raw_modes_t;
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // DECODER_TYPES_H

@@ -21,13 +21,9 @@
 #ifndef MODE_S_H
 #define MODE_S_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
-#include <assert.h>
+#include <cassert>
 
 //
 // Functions exported from mode_s.c
@@ -153,9 +149,5 @@ static inline  __attribute__((always_inline)) uint32_t getbits(const uint8_t *da
         return 0;
     }
 }
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

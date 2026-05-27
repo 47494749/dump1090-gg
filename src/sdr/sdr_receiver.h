@@ -14,11 +14,7 @@
 #ifndef SDR_RECEIVER_H
 #define SDR_RECEIVER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#include <stdbool.h>
 #include "sdr_backend.h"
 #include <stdint.h>
 #include <pthread.h>
@@ -404,9 +400,5 @@ typedef struct {
 
 // Fill a stats snapshot from all running decoder receivers
 void rxGetStatsSnapshot(rx_stats_snapshot_t *out);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // SDR_RECEIVER_H

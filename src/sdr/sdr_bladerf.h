@@ -20,10 +20,6 @@
 #ifndef BLADERF_H
 #define BLADERF_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 // Support for the Nuand bladeRF SDR
 
 void bladeRFInitConfig();
@@ -32,9 +28,5 @@ bool bladeRFHandleOption(int argc, char **argv, int *jptr);
 bool bladeRFOpen();
 void bladeRFRun();
 void bladeRFClose();
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

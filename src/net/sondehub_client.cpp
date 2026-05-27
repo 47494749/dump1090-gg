@@ -14,14 +14,14 @@
 // Free Software Foundation, either version 3 of the License, or (at your
 // option) any later version.
 
-#include <stdio.h>
+#include <cstdio>
 #include <cstdint>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
-#include <errno.h>
-#include <time.h>
-#include <math.h>
+#include <cerrno>
+#include <ctime>
+#include <cmath>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <fcntl.h>
@@ -34,6 +34,7 @@
 
 #include "dump1090.h"
 #include "decoder_queue.h"
+#include "gg_format.h"
 
 // ======================== Constants ========================
 
@@ -116,7 +117,7 @@ static bool sondehub_put(const char *path, const char *json_body, size_t body_le
 
     int err = getaddrinfo(SONDEHUB_HOST, SONDEHUB_PORT, &hints, &res);
     if (err != 0) {
-        fprintf(stderr, "sondehub: DNS failed: %s\n", gai_strerror(err));
+        gg::eprint("sondehub: DNS failed: %s\n", gai_strerror(err));
         return false;
     }
 
@@ -149,7 +150,7 @@ static bool sondehub_put(const char *path, const char *json_body, size_t body_le
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        fprintf(stderr, "sondehub: connect failed\n");
+        gg::eprint("sondehub: connect failed\n");
         return false;
     }
 
@@ -182,7 +183,7 @@ connected:
     SSL_set1_host(ssl, SONDEHUB_HOST);
 
     if (SSL_connect(ssl) <= 0) {
-        fprintf(stderr, "sondehub: TLS handshake failed\n");
+        gg::eprint("sondehub: TLS handshake failed\n");
         goto cleanup;
     }
 
@@ -227,7 +228,7 @@ connected:
             } else {
                 auto nl = resp.find('\r');
                 if (nl != std::string::npos) resp.resize(nl);
-                fprintf(stderr, "sondehub: PUT %s → %s\n", path, resp.c_str());
+                gg::eprint("sondehub: PUT %s → %s\n", path, resp.c_str());
             }
         }
     }
@@ -309,7 +310,7 @@ static std::string build_telemetry_json(uint32_t count)
             "\"sats\":%d,"
             "\"frequency\":%.3f",
             SONDEHUB_SW_NAME, MODES_DUMP1090_VERSION,
-            SondehubConfig.callsign,
+            SondehubConfig.callsign.c_str(),
             time_recv.c_str(),
             msg->type,
             msg->serial,
@@ -352,7 +353,7 @@ static std::string build_listener_json(void)
         "\"mobile\":false"
         "}",
         SONDEHUB_SW_NAME, MODES_DUMP1090_VERSION,
-        SondehubConfig.callsign,
+        SondehubConfig.callsign.c_str(),
         Modes.fUserLat, Modes.fUserLon);
 }
 
@@ -380,7 +381,7 @@ void sondehubClientPeriodicWork(void)
                 if (sondehub_put("/listeners", json.c_str(), json.size())) {
                     if (!SH.listener_sent) {
                         fprintf(stderr, "sondehub: listener station registered (%s)\n",
-                                SondehubConfig.callsign);
+                                SondehubConfig.callsign.c_str());
                     }
                     SH.listener_sent = true;
                     SH.listener_fails = 0;

@@ -4,15 +4,21 @@
 //
 // Thread-safe device list updated from IoT decoder callbacks.
 
+// This file is free software: you may copy, redistribute and/or modify it
+// under the terms of the GNU General Public License as published by the
+// Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version.
+
 #include "iot_tracker.h"
 #include <cstdint>
 #include <inttypes.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <math.h>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <cmath>
 #include <pthread.h>
-#include <time.h>
+#include <ctime>
+using std::isnan;
 
 #include <string>
 #include <cstdarg>

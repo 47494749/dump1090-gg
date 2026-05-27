@@ -14,12 +14,8 @@
 #ifndef LTE_DECODE_H
 #define LTE_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 #include "lte_sib.h"
 
@@ -194,9 +190,5 @@ const char *lte_bw_string(uint8_t dl_bw);
 
 // Get number of RBs from dl_bandwidth
 int32_t lte_bw_to_nrb(uint8_t dl_bw);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // LTE_DECODE_H

@@ -24,12 +24,8 @@
 #ifndef GSM_DECODE_H
 #define GSM_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== Constants (TS 05.02, TS 05.03) ========================
 
@@ -384,9 +380,5 @@ gsm_chan_type_t gsm_get_channel_type(int32_t fn_mod51);
 int32_t detect_fcch(const float *freq_buf, int32_t n_freq,
                 float samples_per_symbol, float carrier_rps,
                 double *freq_offset_out);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // GSM_DECODE_H

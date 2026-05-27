@@ -13,11 +13,11 @@
 #ifndef ACARS_LABEL_H
 #define ACARS_LABEL_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <stdint.h>
 
 // ACARS message categories
 typedef enum {

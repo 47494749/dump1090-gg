@@ -8,12 +8,8 @@
 #ifndef P3I_DECODE_H
 #define P3I_DECODE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 // ======================== RF parameters ========================
 
@@ -70,9 +66,5 @@ void p3i_dewhiten(uint8_t *data, int32_t len);
 
 // CRC-8 with polynomial 0x107
 uint8_t p3i_crc8(const uint8_t *data, int32_t len);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // P3I_DECODE_H

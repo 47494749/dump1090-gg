@@ -15,12 +15,8 @@
 #ifndef SONDE_DEMOD_H
 #define SONDE_DEMOD_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 
 #define SONDE_BAUD_RATE     4800     // RS41 baud rate
 #define SONDE_FRAME_LEN     320      // RS41 frame length in bytes
@@ -78,9 +74,5 @@ typedef struct {
 } sonde_stats_t;
 
 void sonde_get_stats(struct sonde_state *state, sonde_stats_t *stats);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // SONDE_DEMOD_H

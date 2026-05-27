@@ -56,10 +56,11 @@
 
 static adsb_queue_handle_t net_adsb_queue = NULL;
 
-#include <assert.h>
-#include <stdarg.h>
+#include <cassert>
+#include <cstdarg>
 #include <string>
 #include <new>
+#include "gg_format.h"
 
 // Helper: format into std::string
 static std::string sfmt(const char *fmt, ...) __attribute__((format(printf,1,2)));
@@ -127,7 +128,7 @@ struct net_service *serviceInit(const char *descr, struct net_writer *writer, he
 {
     struct net_service *service = new net_service{};
     if (!service) {
-        fprintf(stderr, "Out of memory allocating service %s\n", descr);
+        gg::eprint("Out of memory allocating service %s\n", descr);
         exit(1);
     }
 
@@ -144,7 +145,7 @@ struct net_service *serviceInit(const char *descr, struct net_writer *writer, he
 
     if (service->writer) {
         if (! (service->writer->data = new (std::nothrow) char[MODES_OUT_BUF_SIZE]) ) {
-            fprintf(stderr, "Out of memory allocating output buffer for service %s\n", descr);
+            gg::eprint("Out of memory allocating output buffer for service %s\n", descr);
             exit(1);
         }
 
@@ -172,7 +173,7 @@ struct client *createGenericClient(struct net_service *service, int32_t fd)
     anetNonBlock(Modes.aneterr, fd);
 
     if (!(c = new (std::nothrow) client)) {
-        fprintf(stderr, "Out of memory allocating a new %s network client\n", service->descr);
+        gg::eprint("Out of memory allocating a new %s network client\n", service->descr);
         exit(1);
     }
 
@@ -213,7 +214,7 @@ void serviceListen(struct net_service *service, char *bind_addr, char *bind_port
     char *p, *end;
 
     if (service->listener_count > 0) {
-        fprintf(stderr, "Tried to set up the service %s twice!\n", service->descr);
+        gg::eprint("Tried to set up the service %s twice!\n", service->descr);
         exit(1);
     }
 
@@ -244,7 +245,7 @@ void serviceListen(struct net_service *service, char *bind_addr, char *bind_port
 
         fds = (int32_t*)realloc(fds, (n+nfds) * sizeof(int32_t));
         if (!fds) {
-            fprintf(stderr, "out of memory\n");
+            gg::eprint("out of memory\n");
             exit(1);
         }
 
@@ -349,7 +350,7 @@ static struct client * modesAcceptClients(void) {
 //
 static void modesCloseClient(struct client *c) {
     if (!c->service) {
-        fprintf(stderr, "warning: double close of net client\n");
+        gg::eprint("warning: double close of net client\n");
         return;
     }
 
@@ -1024,7 +1025,7 @@ static void modesSendStratuxOutput(struct modesMessage *mm, struct aircraft *a) 
     if (p < end)
         completeWrite(&Modes.stratux_out, p);
     else
-        fprintf(stderr, "stratux: output too large (max %d, overran by %d)\n", STRATUX_MAX_PACKET_SIZE, (int32_t) (p - end));
+        gg::eprint("stratux: output too large (max %d, overran by %d)\n", STRATUX_MAX_PACKET_SIZE, (int32_t) (p - end));
 }
 
 static void send_stratux_heartbeat(struct net_service *service)
@@ -1183,11 +1184,11 @@ static int32_t handleFaupCommand(struct client *c, char *p) {
 
             // Sanity check on multiplier value
             if (!(multiplier > 0 && multiplier <= 100)) {
-                fprintf(stderr, "handleFaupCommand(): upload_rate_multiplier (%0.2f) out of range\n", multiplier);
+                gg::eprint("handleFaupCommand(): upload_rate_multiplier (%0.2f) out of range\n", multiplier);
                 return 0;
             }
 
-            fprintf(stderr, "handleFaupCommand(): Adjusting message rate to FlightAware by %0.2fx\n", multiplier);
+            gg::eprint("handleFaupCommand(): Adjusting message rate to FlightAware by %0.2fx\n", multiplier);
             Modes.faup_rate_multiplier = multiplier;
             break;
         }
@@ -1195,7 +1196,7 @@ static int32_t handleFaupCommand(struct client *c, char *p) {
         if (!strcmp(msg_field, "upload_unknown_commb")) {
             msg_field = strtok (NULL, "\t");
             uint32_t enable = atoi(msg_field);
-            fprintf(stderr, "handleFaupCommand(): %s upload of unknown Comm-B messages\n", enable ? "Enabling" : "Disabling");
+            gg::eprint("handleFaupCommand(): %s upload of unknown Comm-B messages\n", enable ? "Enabling" : "Disabling");
             Modes.faup_upload_unknown_commb = enable;
             break;
         }
@@ -1964,7 +1965,7 @@ char *generateAircraftJson(const char *url_path, int32_t *len) {
         if (trackDataValid(&a->mhar_asp_valid))
             s += sfmt(",\"mhar_pressure\":%.0f", a->mhar_asp);
         if (trackDataValid(&a->mhar_rh_valid))
-            s += sfmt(",\"mhar_humidity\":%.1f", a->mhar_rh);
+            s += sfmt(",\"mhar_radio_height\":%d", (int)a->mhar_rh);
 
         // Waypoint data (BDS 4,1/4,2/4,3)
         if (trackDataValid(&a->waypoint_valid))
@@ -2281,10 +2282,10 @@ static void ratelimitWriteError(const char *format, ...)
     va_start(ap, format);
     vfprintf(stderr, format, ap);
     if (suppressed) {
-        fprintf(stderr, " (%u more error messages suppressed)", suppressed);
+        gg::eprint(" (%u more error messages suppressed)", suppressed);
         suppressed = 0;
     }
-    fprintf(stderr, "\n");
+    gg::eprint("\n");
     va_end(ap);
 }
 
@@ -2594,7 +2595,7 @@ static void writeFATSVPositionUpdate(float lat, float lon, float alt)
     if (p < end)
         completeWrite(&Modes.fatsv_out, p);
     else
-        fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
+        gg::eprint("fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
 }
 
 static void writeFATSVEventMessage(struct modesMessage *mm, const char *datafield, uint8_t *data, size_t len)
@@ -2621,7 +2622,7 @@ static void writeFATSVEventMessage(struct modesMessage *mm, const char *datafiel
     if (p < end)
         completeWrite(&Modes.fatsv_out, p);
     else
-        fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
+        gg::eprint("fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
 #       undef bufsize
 }
 
@@ -2980,7 +2981,7 @@ static void writeFATSV()
         if (p < end)
             completeWrite(&Modes.fatsv_out, p);
         else
-            fprintf(stderr, "fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
+            gg::eprint("fatsv: output too large (max %d, overran by %d)\n", TSV_MAX_PACKET_SIZE, (int32_t) (p - end));
 
         a->fatsv_emitted_altitude_baro = a->altitude_baro;
         a->fatsv_emitted_altitude_geom = a->altitude_geom;

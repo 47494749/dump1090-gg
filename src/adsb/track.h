@@ -50,10 +50,6 @@
 #ifndef DUMP1090_TRACK_H
 #define DUMP1090_TRACK_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 /* Maximum age of a reliable tracked aircraft in milliseconds */
@@ -274,7 +270,7 @@ struct aircraft {
     hazard_t      mhar_wake;
     float         mhar_sat;       // static air temperature, degrees C
     float         mhar_asp;       // average static pressure, hPa
-    float         mhar_rh;        // relative humidity, 0-100 %
+    float         mhar_rh;        // radio height, ft (LSB 16 ft)
 
     // data extracted from BDS 4,1/4,2/4,3 (waypoints)
     data_validity waypoint_valid;
@@ -507,9 +503,5 @@ double greatcircle(double lat0, double lon0, double lat1, double lon1);
 /* Get bearing from 2 points */
 double get_bearing(double lat0, double lon0, double lat1, double lon1);
 
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

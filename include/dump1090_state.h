@@ -8,10 +8,6 @@
 #ifndef DUMP1090_STATE_H
 #define DUMP1090_STATE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 // Program global state
 struct _Modes {                             // Internal state
     pthread_t       reader_thread;
@@ -180,9 +176,5 @@ struct _Modes {                             // Internal state
 };
 
 extern struct _Modes Modes;
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // DUMP1090_STATE_H

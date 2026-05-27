@@ -19,6 +19,10 @@ extern "C" {
 # define MODES_DUMP1090_VARIANT     "dump1090-unknown"
 #endif
 
+#ifndef MODES_ENABLE_DIAGNOSTICS
+# define MODES_ENABLE_DIAGNOSTICS   0
+#endif
+
 // ============================= #defines ===============================
 
 #define MODES_DEFAULT_FREQ         1090000000

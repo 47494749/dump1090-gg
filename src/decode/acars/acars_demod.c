@@ -18,12 +18,20 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <ctype.h>
 #include <string.h>
 #include <math.h>
 #include <complex.h>
+#include "dump1090_defs.h"
 #include "acars_demod.h"
 #include "acars_label.h"
+
+#if MODES_ENABLE_DIAGNOSTICS
+#define ACARS_DIAG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define ACARS_DIAG(...) do {} while (0)
+#endif
 
 // ======================== Constants ========================
 
@@ -165,7 +173,7 @@ struct acars_state {
 
 struct acars_state *acars_create(const acars_config_t *config)
 {
-    struct acars_state *s = calloc(1, sizeof(struct acars_state));
+    struct acars_state *s = (struct acars_state*)calloc(1, sizeof(struct acars_state));
     if (!s) return NULL;
 
     s->config = *config;
@@ -175,8 +183,8 @@ struct acars_state *acars_create(const acars_config_t *config)
     if (decim < 1) decim = 1;
     s->iq_block_size = decim;
 
-    fprintf(stderr, "ACARS: sample_rate=%.0f, intrate=%d, decim=%d, channels=%d\n",
-            config->sample_rate, ACARS_INTRATE, decim, config->num_channels);
+    ACARS_DIAG("ACARS: sample_rate=%.0f, intrate=%d, decim=%d, channels=%d\n",
+               config->sample_rate, ACARS_INTRATE, decim, config->num_channels);
 
     // Compute MSK matched filter (cosine at 600 Hz)
     for (int32_t i = 0; i < MFLT_TOTAL; i++) {
@@ -193,7 +201,7 @@ struct acars_state *acars_create(const acars_config_t *config)
         ch->decim_factor = decim;
 
         // Allocate mixer weights
-        ch->mixer = calloc((uint32_t)decim, sizeof(float complex));
+        ch->mixer = (float complex*)calloc((uint32_t)decim, sizeof(float complex));
         if (!ch->mixer) { acars_destroy(s); return NULL; }
 
         // Precompute mixer: e^(-j*2*pi*f_offset*n / sample_rate) / (decim * 127.5)
@@ -204,11 +212,11 @@ struct acars_state *acars_create(const acars_config_t *config)
         }
 
         // Allocate decimated buffer
-        ch->dm_buffer = calloc(ACARS_DECIM_BUFSZ, sizeof(float));
+        ch->dm_buffer = (float*)calloc(ACARS_DECIM_BUFSZ, sizeof(float));
         if (!ch->dm_buffer) { acars_destroy(s); return NULL; }
 
         // Allocate matched filter input buffer
-        ch->inb = calloc((uint32_t)MFLT_LEN, sizeof(float complex));
+        ch->inb = (float complex*)calloc((uint32_t)MFLT_LEN, sizeof(float complex));
         if (!ch->inb) { acars_destroy(s); return NULL; }
 
         // Initial state
@@ -223,8 +231,8 @@ struct acars_state *acars_create(const acars_config_t *config)
         ch->msg_len = 0;
         ch->msg_err = 0;
 
-        fprintf(stderr, "ACARS: channel %d: %.3f MHz, offset=%.0f Hz\n",
-                n, ch->freq / 1e6, ch->freq - config->center_freq);
+        ACARS_DIAG("ACARS: channel %d: %.3f MHz, offset=%.0f Hz\n",
+               n, ch->freq / 1e6, ch->freq - config->center_freq);
     }
 
     return s;

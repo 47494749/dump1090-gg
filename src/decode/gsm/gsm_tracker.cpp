@@ -5,11 +5,11 @@
 #include "gsm_tracker.h"
 #include <cstdint>
 #include <inttypes.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 #include <pthread.h>
-#include <time.h>
+#include <ctime>
 
 #include <string>
 #include <cstdarg>

@@ -6,12 +6,8 @@
 #ifndef GSM_TRACKER_H
 #define GSM_TRACKER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <stdbool.h>
+
 #include "gsm_decode.h"
 
 #define GSM_MAX_CELLS  64    // max tracked cells
@@ -75,11 +71,8 @@ void gsmTrackerUpdateCB(const gsm_cell_info_t *cell, const gsm_cb_msg_t *cb);
 // Get number of active (non-stale) cells
 int32_t gsmTrackerActiveCount(void);
 
-#ifdef __cplusplus
-}
-// C++ only: returns std::string
+// Returns std::string
 #include <string>
 std::string gsmTrackerToJSON(void);
-#endif
 
 #endif // GSM_TRACKER_H
