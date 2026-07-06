@@ -3,53 +3,40 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>dump1090-gg — Config</title>
+<title>dump1090-gg — Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 :root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
 --accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
 --head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
-nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:1000}
 nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 .tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}
 .tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
 .tabs a:hover{background:var(--hover);color:var(--text)}
 .tabs a.active{background:var(--accent);color:#000;font-weight:600}
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
-.card h3{color:var(--accent);margin-bottom:12px;font-size:15px;border-bottom:1px solid var(--border);padding-bottom:6px}
-.field{display:grid;grid-template-columns:200px 1fr;gap:8px;align-items:center;margin-bottom:8px}
-.field label{color:var(--dim);font-size:13px;text-align:right}
-.field label[title]{cursor:help;border-bottom:1px dotted var(--dim)}
-.field input,.field select,.field textarea{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit}
-.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);outline:none}
-.field input[type=checkbox]{width:18px;height:18px;justify-self:start}
-.field textarea{font-family:'Cascadia Code','Fira Code',monospace;resize:vertical}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:0;z-index:10}
-td{padding:6px 8px;border-bottom:1px solid var(--border)}
-tr:hover td{background:var(--hover)}
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
-.badge.ok{background:#003322;color:var(--ok)}
-.badge.warn{background:#332200;color:var(--warn)}
-.badge.err{background:#330000;color:var(--danger)}
-.badge.info{background:#002244;color:var(--link)}
-.btn{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
-.btn-primary{background:var(--accent);color:#000}.btn-primary:hover{filter:brightness(1.2)}
-.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{filter:brightness(1.2)}
-.toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
-.main{padding:16px;max-width:1600px;margin:0 auto}
-.section-toggle{cursor:pointer;user-select:none}
-.section-toggle::before{content:'▶ ';font-size:11px}
-.section-toggle.open::before{content:'▼ '}
-@media(max-width:768px){.field{grid-template-columns:1fr}.field label{text-align:left}}
+#map{width:100%;height:calc(100vh - 49px)}
+.version-badge{position:absolute;bottom:24px;right:12px;z-index:999;background:rgba(10,10,26,0.85);color:var(--dim);font-size:12px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);pointer-events:none}
+.ac-tooltip{font-family:'Segoe UI',system-ui,sans-serif;font-size:12px;line-height:1.5;color:#d0d0d0;background:#141428;border:1px solid #2a2a4a;border-radius:6px;padding:8px 10px;box-shadow:0 4px 12px rgba(0,0,0,0.5)}
+.ac-tooltip .tt-row{display:flex;justify-content:space-between;gap:12px}
+.ac-tooltip .tt-lbl{color:#888;white-space:nowrap}
+.ac-tooltip .tt-val{color:#d0d0d0;font-weight:600;text-align:right}
+.ac-tooltip .tt-call{color:#4fc3f7;font-size:14px;font-weight:700;margin-bottom:4px;border-bottom:1px solid #2a2a4a;padding-bottom:4px}
+.leaflet-popup-content-wrapper{background:transparent!important;box-shadow:none!important;padding:0!important}
+.leaflet-popup-content{margin:0!important}
+.leaflet-popup-tip{background:#141428!important}
 </style>
 </head>
 <body>
 <nav>
 <h1>✈ dump1090-gg-light</h1>
 <div class="tabs">
-<a class="active" href="/">⚙️ Config</a>
+<a class="active" href="/">🗺️ Map</a>
+<a href="/config.html">⚙️ Config</a>
+<a href="/feeders.html">📡 Feeders</a>
 <a href="/status.html">📡 Status</a>
 <a href="/connections.html">🔌 Connections</a>
 <a href="/logs.html">📋 Logs</a>
@@ -67,630 +54,151 @@ tr:hover td{background:var(--hover)}
 <span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
 </nav>
 
-<div class="main">
-<div class="toolbar">
-<button class="btn btn-primary" onclick="saveConfig()">💾 Save</button>
-<span id="save-status" style="color:var(--dim)"></span>
-</div>
-<div id="config-form"></div>
-</div>
+<div id="map"></div>
+<div class="version-badge" id="map-version">dump1090-gg</div>
 
 <script>
-let cfg={};
+// ---- Map setup ----
+let map, acLayer, acMarkers = {};
+let stationLat = 45.0, stationLon = 9.0;
 
-const configSchema=[
-{title:'📍 Station',id:'station',fields:[
-    {k:'station.name',l:'Station name',t:'text',h:'Station identifier — used as MLAT username, and for OGN if not specified otherwise'},
-    {k:'station.lat',l:'Latitude',t:'number',s:'0.000001'},
-    {k:'station.lon',l:'Longitude',t:'number',s:'0.000001'},
-    {k:'station.max_range',l:'Max Range (NM)',t:'number',s:'1'},
-    {k:'mlat.alt',l:'Altitude (m)',t:'number',s:'1',h:'Station altitude — also used for MLAT'},
-]},
-
-{title:'📊 Network',id:'network',fields:[
-    {k:'network.raw_out',l:'Raw output ports',t:'text',h:'Ports for raw output (default: 30002)'},
-    {k:'network.raw_in',l:'Raw input ports',t:'text',h:'Ports for raw input (default: 30001)'},
-    {k:'network.sbs_out',l:'SBS output ports',t:'text',h:'Ports for SBS/BaseStation output (default: 30003)'},
-    {k:'network.beast_in',l:'Beast input ports',t:'text',h:'Ports for Beast input (default: 30004,30104)'},
-    {k:'network.beast_out',l:'Beast output ports',t:'text',h:'Ports for Beast output (default: 30005)'},
-    {k:'network.json_dir',l:'JSON directory',t:'text',h:'Directory for periodic JSON output (aircraft.json, stats.json)'},
-]},
-{title:'🔐 Panel',id:'panel',fields:[
-    {k:'panel.port',l:'Panel port',t:'number',s:'1'},
-    {k:'panel.password',l:'New password',t:'password'},
-]},
-];
-
-function getNestedVal(obj,path){
-    return path.split('.').reduce((o,k)=>o&&o[k],obj);
-}
-
-function renderConfigForm(){
-    let html='';
-    for(const sec of configSchema){
-        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">${sec.title}</h3><div>`;
-        for(const f of sec.fields){
-            const val=getNestedVal(cfg,f.k);
-            const help=f.h?`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">${f.h}</div>`:'';
-            if(f.t==='checkbox'){
-                html+=`<div class="field"><label>${f.l}</label><input type="checkbox" data-key="${f.k}" ${val?'checked':''}></div>${help}`;
-            }else if(f.t==='textarea'){
-                html+=`<div class="field"><label>${f.l}</label><textarea data-key="${f.k}" rows="3">${val||''}</textarea></div>${help}`;
-            }else{
-                html+=`<div class="field"><label>${f.l}</label><input type="${f.t}" data-key="${f.k}" value="${val!=null?val:''}" ${f.s?'step="'+f.s+'"':''} ${f.t==='text'&&f.k.startsWith('keys.')?'style="font-family:monospace;letter-spacing:1px"':''}></div>${help}`;
-            }
-        }
-        html+=`</div></div>`;
-    }
-
-    // ---- Feeder section ----
-    html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 Feeder</h3><div>`;
-
-    // OpenSky Network
-    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
-        <input type="checkbox" data-key="opensky.enabled" ${cfg.opensky&&cfg.opensky.enabled?'checked':''} style="width:20px;height:20px">
-        <div style="flex:1"><strong style="color:var(--accent)">OpenSky Network</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to opensky-network.org — academic open data project</span></div>
-        <a href="https://opensky-network.org/my-opensky/sensors/view-sensors" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
-    </div>`;
-    html+=`<div style="padding:8px 0 8px 32px">
-        <div class="field"><label>Username</label><input type="text" data-key="opensky.username" value="${cfg.opensky&&cfg.opensky.username||''}"></div>
-        <div class="field"><label>Host</label><input type="text" data-key="opensky.host" value="${cfg.opensky&&cfg.opensky.host||''}"></div>
-        <div class="field"><label>Port</label><input type="number" data-key="opensky.port" value="${cfg.opensky&&cfg.opensky.port||10004}" step="1"></div>
-    </div>`;
-
-    // PiAware / FlightAware
-    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
-        <input type="checkbox" data-key="piaware.enabled" ${cfg.piaware&&cfg.piaware.enabled?'checked':''} style="width:20px;height:20px">
-        <div style="flex:1"><strong style="color:var(--accent)">PiAware / FlightAware</strong><br><span style="color:var(--dim);font-size:12px">Send ADS-B data to FlightAware for statistics and tracking</span></div>
-        <a href="https://flightaware.com/adsb/stats" target="_blank" style="color:var(--link);font-size:12px">Dashboard ↗</a>
-    </div>`;
-    html+=`<div style="padding:8px 0 8px 32px">
-        <div class="field"><label>Feeder ID</label><input type="text" data-key="piaware.feeder_id" value="${cfg.piaware&&cfg.piaware.feeder_id||''}" style="font-family:monospace"></div>
-    </div>`;
-
-    // FLARM / OGN — derive enabled from decoders dongles
-    {const flarmOn=decoderCfg.dongles&&decoderCfg.dongles.some(d=>d.decoder==='flarm');
-    const flarmCfg=decoderCfg.flarm||{};
-    html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
-        <span style="font-size:20px;width:20px;text-align:center">${flarmOn?'🟢':'🔴'}</span>
-        <div style="flex:1"><strong style="color:var(--accent)">FLARM / Open Glider Network</strong><br><span style="color:var(--dim);font-size:12px">${flarmOn?'Active — managed from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page':'Inactive — assign a dongle from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
-        <a href="https://ognrange.glidernet.org/?station=${encodeURIComponent(flarmCfg.ogn_station||(cfg.station&&cfg.station.name)||'')}&lat=${(cfg.station&&cfg.station.lat)||''}&lng=${(cfg.station&&cfg.station.lon)||''}&zoom=10" target="_blank" style="color:var(--link);font-size:12px">Live Map ↗</a>
-    </div>`;}
-    html+=`<div style="padding:8px 0 8px 32px">
-        <div class="field"><label>Solo OGN</label><input type="checkbox" data-dkey="flarm.ogn_only" ${(decoderCfg.flarm&&decoderCfg.flarm.ogn_only)?'checked':''}></div>
-    </div>`;
-
-    // Beast feeds
-    const feedInfo={
-        'ADSBx':{desc:'ADS-B Exchange — community-driven aggregator, no restrictions',url:'https://adsbexchange.com/myip/'},
-        'adsb.fi':{desc:'adsb.fi — open and free Finnish tracker',url:'https://adsb.fi'},
-        'FlyItaly':{desc:'Fly Italy ADSB — Italian ADS-B tracking network',url:'https://flyitalyadsb.com'},
-        'PlaneWatch':{desc:'plane.watch — open source Australian tracker',url:'https://plane.watch'},
-        'adsb.one':{desc:'adsb.one — global open data aggregator',url:'https://adsb.one'},
-        'adsb.lol':{desc:'adsb.lol — non-profit open data aggregator',url:'https://adsb.lol'},
-        'airplanes.live':{desc:'airplanes.live — live tracker with 3D map',url:'https://airplanes.live'},
-        'Planespotters':{desc:'Planespotters — aircraft database and photos',url:'https://planespotters.net'},
-        'TheAirTraffic':{desc:'TheAirTraffic — air traffic aggregator',url:'https://theairtraffic.com'},
-        'AVDelphi':{desc:'AVDelphi — air traffic analysis platform',url:'https://avdelphi.com'},
-        'ADSBHub':{desc:'ADSBHub — aggregator with free sharing',url:'https://adsbhub.org'},
-    };
-
-    html+=`<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-        <strong style="color:var(--accent);font-size:14px">📡 Beast Feeds — Aggregatori Open Data</strong>
-        <div style="color:var(--dim);font-size:12px;margin:4px 0 12px 0">Enable/disable data feeding to each aggregator. Feeds use the Beast (or RAW) protocol on the indicated port.</div>
-    </div>`;
-
-    if(cfg.beast_feeds&&cfg.beast_feeds.length){
-        for(let i=0;i<cfg.beast_feeds.length;i++){
-            const bf=cfg.beast_feeds[i];
-            const info=feedInfo[bf.name]||{desc:'Custom feed',url:''};
-            const isRaw=bf.format==='raw';
-            const isSbs=bf.format==='sbs';
-            html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
-                <input type="checkbox" data-key="beast_feeds.${i}.enabled" ${bf.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0">
-                <div style="flex:1;min-width:0">
-                    <strong style="color:${bf.enabled?'var(--accent)':'var(--dim)'}">${bf.name}</strong>
-                    ${isRaw?'<span class="badge warn" style="margin-left:6px">RAW</span>':''}
-                    ${isSbs?'<span class="badge info" style="margin-left:6px">SBS</span>':''}
-                    <br><span style="color:var(--dim);font-size:11px">${info.desc}</span>
-                </div>
-                <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
-                    <span style="color:var(--dim);font-size:11px">${bf.host}:${bf.port}</span>
-                </div>
-                ${info.url?`<a href="${info.url}" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0">↗</a>`:''}
-            </div>`;
-            // ADSBHub: show ckey field
-            if(bf.name==='ADSBHub'){
-                const ckeyVal=cfg.adsbhub&&cfg.adsbhub.ckey||'';
-                html+=`<div style="padding:6px 0 6px 32px">
-                    <div class="field"><label>Station ckey</label><input type="text" data-key="adsbhub.ckey" id="adsbhub-ckey-input" style="font-family:monospace;font-size:11px;letter-spacing:0.5px"></div>
-                    <div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Dynamic IP update key — from the Settings page on adsbhub.org</div>
-                </div>`;
-                // Set value via JS to avoid HTML attribute escaping issues
-                setTimeout(()=>{const el=document.getElementById('adsbhub-ckey-input');if(el)el.value=ckeyVal;},0);
-            }
-        }
-    } else {
-        html+=`<div style="color:var(--dim);font-size:12px;margin-top:6px;padding:8px;background:var(--input-bg);border-radius:4px">No beast feeds available.</div>`;
-    }
-
-    html+=`</div></div>`;
-
-    // Sonde Feeds section
-    {
-        const sondeOn=cfg.sdr_radiosonde&&cfg.sdr_radiosonde.enabled;
-        const stationName=cfg.station&&cfg.station.name||'';
-        const sondeFeeds=[
-            {key:'sondehub',name:'SondeHub',desc:'Upload radiosonde telemetry to sondehub.org — global open radiosonde tracker',url:'https://sondehub.org'},
-            {key:'radiosondy',name:'radiosondy.info',desc:'Upload radiosonde data to radiosondy.info — European radiosonde tracker',url:'https://radiosondy.info'},
-            {key:'wettersonde',name:'wettersonde.net',desc:'Upload radiosonde data to wettersonde.net — German radiosonde network',url:'https://wettersonde.net'},
-        ];
-        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🎈 Sonde Feeds — Radiosonde Tracking Hubs</h3><div>`;
-        html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
-            <span style="font-size:20px;width:20px;text-align:center">${sondeOn?'🟢':'🔴'}</span>
-            <div style="flex:1"><strong style="color:var(--accent)">Radiosonde Receiver</strong><br><span style="color:var(--dim);font-size:12px">${sondeOn?'Active — managed from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page':'Inactive — assign a dongle from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
-        </div>`;
-        html+=`<div style="padding:8px 0 4px 32px">
-            <div class="field"><label>Callsign</label><span style="color:var(--accent);font-size:13px">${stationName||'(not set)'}</span></div>
-            <div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Taken from Station → Station name</div>
-        </div>`;
-        if(!sondeOn){
-            html+=`<div style="padding:8px 12px;background:var(--input-bg);border-radius:6px;color:var(--dim);font-size:12px;margin:8px 0">
-                ⚠️ Sonde feeds disabled — no radiosonde dongle assigned.
-            </div>`;
-        }
-        html+=`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
-            <strong style="color:var(--dim);font-size:12px">Upload destinations</strong>
-        </div>`;
-        for(const sf of sondeFeeds){
-            const feedCfg=cfg[sf.key]||{};
-            const isEnabled=sondeOn&&feedCfg.enabled;
-            html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!sondeOn?'opacity:0.45;pointer-events:none':''}">
-                <input type="checkbox" data-key="${sf.key}.enabled" ${isEnabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!sondeOn?'disabled':''}>
-                <div style="flex:1;min-width:0">
-                    <strong style="color:${isEnabled?'var(--accent)':'var(--dim)'}">${sf.name}</strong>
-                    <br><span style="color:var(--dim);font-size:11px">${sf.desc}</span>
-                </div>
-                ${sf.url?`<a href="${sf.url}" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0;${!sondeOn?'pointer-events:auto':''}">↗</a>`:''}
-            </div>`;
-        }
-        html+=`</div></div>`;
-    }
-
-    // POCSAG section
-    {
-        const pocsagActive=cfg.sdr_pocsag&&cfg.sdr_pocsag.active;
-        const pocsagEnabled=cfg.sdr_pocsag&&cfg.sdr_pocsag.enabled;
-        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📟 POCSAG Pager Decoder</h3><div>`;
-        html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
-            <span style="font-size:20px;width:20px;text-align:center">${pocsagActive?'🟢':'🔴'}</span>
-            <div style="flex:1"><strong style="color:var(--accent)">POCSAG Receiver</strong><br><span style="color:var(--dim);font-size:12px">${pocsagActive?'Active — receiving on '+(cfg.sdr_pocsag.freq_mhz||'466.075')+' MHz. Messages appear on the <a href="/messages.html" style="color:var(--accent)">Messages</a> page':'Inactive — assign a dongle with role <code>pocsag</code> from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
-        </div>`;
-        html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!pocsagActive?'opacity:0.45;pointer-events:none':''}">
-            <input type="checkbox" data-key="sdr_pocsag.enabled" ${pocsagEnabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!pocsagActive?'disabled':''}>
-            <div style="flex:1;min-width:0">
-                <strong style="color:${pocsagEnabled&&pocsagActive?'var(--accent)':'var(--dim)'}">Decode messages</strong>
-                <br><span style="color:var(--dim);font-size:11px">Enable POCSAG decoding output — decoded pager messages will appear on the Messages page</span>
-            </div>
-        </div>`;
-        if(!pocsagActive){
-            html+=`<div style="padding:8px 12px;background:var(--input-bg);border-radius:6px;color:var(--dim);font-size:12px;margin:8px 0">
-                ⚠️ POCSAG decoder disabled — no dongle assigned with role <code>pocsag</code>.
-            </div>`;
-        } else if(pocsagActive){
-            html+=`<div style="padding:8px 0 8px 32px">
-                <div class="field"><label>Frequency</label><span style="color:var(--accent);font-size:13px">${cfg.sdr_pocsag.freq_mhz||'466.075'} MHz</span></div>
-                <div class="field"><label>Baud rates</label><span style="color:var(--dim);font-size:13px">512 / 1200 / 2400 (auto-detect)</span></div>
-            </div>`;
-        }
-        html+=`</div></div>`;
-    }
-
-    // Airframes.io — ACARS/VDL2 Feeds
-    {
-        const af=cfg.airframes||{};
-        const afAcars=af.acars||{};
-        const afVdl2=af.vdl2||{};
-        const acarsOn=afAcars.active;
-        const vdl2On=afVdl2.active;
-        const anyOn=acarsOn||vdl2On;
-        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">✈️ Airframes.io — ACARS/VDL2 Feeds</h3><div>`;
-        html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
-            <span style="font-size:20px;width:20px;text-align:center">${anyOn?'🟢':'🔴'}</span>
-            <div style="flex:1"><strong style="color:var(--accent)">ACARS/VDL2 Decoders</strong><br><span style="color:var(--dim);font-size:12px">${acarsOn&&vdl2On?'Both ACARS and VDL2 active':acarsOn?'ACARS active, VDL2 inactive':vdl2On?'VDL2 active, ACARS inactive':'Inactive — assign a dongle with role <code>acars</code> or <code>vdl2</code> from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page'}</span></div>
-            <a href="https://app.airframes.io" target="_blank" style="color:var(--link);font-size:12px">Airframes ↗</a>
-        </div>`;
-        html+=`<div style="padding:8px 0 4px 32px">
-            <div class="field"><label>Station ID</label><input type="text" data-key="airframes.station_id" value="${af.station_id||'dump1090-gg'}"></div>
-            <div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Identifies your station on airframes.io (e.g. XX-EDDF1)</div>
-        </div>`;
-        if(!anyOn){
-            html+=`<div style="padding:8px 12px;background:var(--input-bg);border-radius:6px;color:var(--dim);font-size:12px;margin:8px 0">
-                ⚠️ Airframes feeds unavailable — no ACARS or VDL2 dongle assigned.
-            </div>`;
-        }
-        html+=`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
-            <strong style="color:var(--dim);font-size:12px">Feed destinations</strong>
-        </div>`;
-        // ACARS feed
-        html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!acarsOn?'opacity:0.45;pointer-events:none':''}">
-            <input type="checkbox" data-key="airframes.acars.enabled" ${afAcars.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!acarsOn?'disabled':''}>
-            <div style="flex:1;min-width:0">
-                <strong style="color:${afAcars.enabled&&acarsOn?'var(--accent)':'var(--dim)'}">Airframes ACARS</strong>
-                <br><span style="color:var(--dim);font-size:11px">Send decoded ACARS messages (acarsdec JSON format via UDP)</span>
-            </div>
-            <span style="color:var(--dim);font-size:11px;flex-shrink:0">${afAcars.host||'feed.acars.io'}:${afAcars.port||5550}</span>
-            <a href="https://app.airframes.io" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0;${!acarsOn?'pointer-events:auto':''}">↗</a>
-        </div>`;
-        // VDL2 feed
-        html+=`<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);${!vdl2On?'opacity:0.45;pointer-events:none':''}">
-            <input type="checkbox" data-key="airframes.vdl2.enabled" ${afVdl2.enabled?'checked':''} style="width:20px;height:20px;flex-shrink:0" ${!vdl2On?'disabled':''}>
-            <div style="flex:1;min-width:0">
-                <strong style="color:${afVdl2.enabled&&vdl2On?'var(--accent)':'var(--dim)'}">Airframes VDL2</strong>
-                <br><span style="color:var(--dim);font-size:11px">Send decoded VDL2 messages (dumpvdl2 JSON format via UDP)</span>
-            </div>
-            <span style="color:var(--dim);font-size:11px;flex-shrink:0">${afVdl2.host||'feed.acars.io'}:${afVdl2.port||5552}</span>
-            <a href="https://app.airframes.io" target="_blank" style="color:var(--link);font-size:11px;flex-shrink:0;${!vdl2On?'pointer-events:auto':''}">↗</a>
-        </div>`;
-        html+=`</div></div>`;
-    }
-
-    // MLAT section
-    if(cfg.mlat&&cfg.mlat.servers){
-        html+=`<div class="card"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 MLAT (${cfg.mlat.servers.length} server)</h3><div>`;
-        html+=`<div class="field"><label>Username</label><span style="color:var(--accent);font-size:13px">${cfg.station&&cfg.station.name||cfg.mlat&&cfg.mlat.user||'(not set)'}</span></div>`;
-        html+=`<div style="grid-column:2;color:var(--dim);font-size:11px;margin-top:-4px;margin-bottom:4px">Set in the Station → Station name section</div>`;
-        html+=`<div class="field"><label>Return results</label><input type="checkbox" data-key="mlat.return_results" ${cfg.mlat.return_results?'checked':''}></div>`;
-        if(cfg.mlat.servers.length){
-            html+=`<table><tr><th>Host</th><th>Port</th><th>State</th></tr>`;
-            const mstates=['disconnected','connecting','handshake','ready'];
-            for(const ms of cfg.mlat.servers){
-                const st=mstates[ms.state]||'?';
-                const cls=ms.state===3?'ok':ms.state===0?'err':'warn';
-                html+=`<tr><td>${ms.host}</td><td>${ms.port}</td><td><span class="badge ${cls}">${st}</span></td></tr>`;
-            }
-            html+=`</table>`;
-        }
-        html+=`</div></div>`;
-    }
-
-    // Dynamic SDR Receivers section (decoder configs only, dongles are on Devices page)
-    html+=`<div id="decoder-configs"></div>`;
-    document.getElementById('config-form').innerHTML=html;
-    loadSdrReceiverConfig();
-}
-
-const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)',gsm:'GSM (935 MHz)',lte:'LTE (800 MHz)',iot868:'IoT 868 MHz',fanet:'FANET (868.2 MHz)',sarsat:'SARSAT (406 MHz)'};
-const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟',gsm:'📶',lte:'📶',iot868:'🌡️',fanet:'🚩',sarsat:'🚨'};
-
-let decoderCfg={};  // loaded from /api/decoders
-
-async function loadSdrReceiverConfig(){
-    try{
-        const [devRes,rxRes,decRes]=await Promise.all([
-            fetch('/api/devices').then(r=>r.json()),
-            fetch('/api/receivers').then(r=>r.json()),
-            fetch('/api/decoders').then(r=>r.json())
-        ]);
-        decoderCfg=decRes;
-
-        // Determine which decoder types are active (have a dongle assigned)
-        const activeDecoders=new Set();
-        if(decRes.dongles){
-            for(const d of decRes.dongles){
-                if(d.decoder&&d.decoder!=='none') activeDecoders.add(d.decoder);
-            }
-        }
-
-        // ===== Decoder configs section =====
-        let dhtml='';
-
-        // ADS-B decoder
-        {const active=activeDecoders.has('adsb');
-        const dc=decRes.adsb||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">✈️ ADS-B Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div style="margin-bottom:12px"><strong style="color:var(--dim);font-size:12px">Decode Options</strong></div>`;
-        dhtml+=`<div class="field"><label title="Number of bit errors to correct in CRC (0=none, 1=1-bit, 2=2-bit). Higher values recover more messages but may increase false positives.">Error Correction</label><input type="number" step="1" data-dkey="adsb.fix_crc" value="${dc.fix_crc!=null?dc.fix_crc:1}" min="0" max="2"></div>`;
-        dhtml+=`<div class="field"><label title="Validate CRC checksum on received messages. Disabling accepts messages without CRC verification.">CRC check</label><input type="checkbox" data-dkey="adsb.check_crc" ${dc.check_crc?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Attempt to correct the Downlink Format (DF) field in corrupted messages to recover otherwise lost data.">Fix DF</label><input type="checkbox" data-dkey="adsb.fix_df" ${dc.fix_df?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Enable decoding of DF24 Comm-D extended length messages used for advanced aircraft data exchange (ELM/EHS).">DF24 (Comm-D)</label><input type="checkbox" data-dkey="adsb.enable_df24" ${dc.enable_df24?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Enable decoding of legacy Mode A (squawk code) and Mode C (altitude) transponder signals at 1090 MHz.">Mode A/C</label><input type="checkbox" data-dkey="adsb.mode_ac" ${dc.mode_ac?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Automatically enable Mode A/C decoding only when ADS-B traffic is detected nearby, reducing false positives from noise.">Mode A/C auto</label><input type="checkbox" data-dkey="adsb.mode_ac_auto" ${dc.mode_ac_auto?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Recover messages with CRC errors by trying known ICAO addresses as error syndromes. Improves message count for already-seen aircraft.">CRC Rescue</label><input type="checkbox" data-dkey="adsb.crc_rescue" ${dc.crc_rescue?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Prefer GNSS (GPS) altitude over barometric altitude in aircraft position reports when both are available.">Use GNSS alt</label><input type="checkbox" data-dkey="adsb.use_gnss" ${dc.use_gnss?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Enable high-resolution 12 MHz timestamps needed for multilateration (MLAT) position calculation by feeding networks like FlightAware.">MLAT timestamps</label><input type="checkbox" data-dkey="adsb.mlat" ${dc.mlat?'checked':''}></div>`;
-        dhtml+=`<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)"><strong style="color:var(--dim);font-size:12px">Adaptive Gain</strong></div>`;
-        dhtml+=`<div class="field"><label title="Automatically adjust receiver gain based on the range of detected aircraft to optimize long-range reception.">Adaptive Range</label><input type="checkbox" data-dkey="adsb.adaptive_range" ${dc.adaptive_range?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Automatically reduce gain when strong signal bursts from nearby transmitters are detected, preventing receiver saturation.">Adaptive Burst</label><input type="checkbox" data-dkey="adsb.adaptive_burst" ${dc.adaptive_burst?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label title="Minimum gain value (in dB) the adaptive algorithm is allowed to set. Prevents the gain from dropping too low.">Min Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_min_gain" value="${dc.adaptive_min_gain||0}"></div>`;
-        dhtml+=`<div class="field"><label title="Maximum gain value (in dB) the adaptive algorithm is allowed to set. Use 99999 for no upper limit.">Max Gain (dB)</label><input type="number" step="0.1" data-dkey="adsb.adaptive_max_gain" value="${dc.adaptive_max_gain||99999}"></div>`;
-        dhtml+=`<div class="field"><label title="Fraction of time (0.0–1.0) the adaptive gain algorithm actively adjusts. Lower values change gain less frequently, reducing instability.">Duty cycle</label><input type="number" step="0.01" data-dkey="adsb.adaptive_duty_cycle" value="${dc.adaptive_duty_cycle||0.5}"></div>`;
-        dhtml+=`</div></div>`;}
-
-        // FLARM decoder (includes keys)
-        {const active=activeDecoders.has('flarm');
-        const dc=decRes.flarm||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🚩 FLARM Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Solo OGN</label><input type="checkbox" data-dkey="flarm.ogn_only" ${dc.ogn_only?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>OGN Server</label><input type="text" data-dkey="flarm.ogn_server" value="${dc.ogn_server||''}"></div>`;
-        dhtml+=`<div class="field"><label>OGN Port</label><input type="number" data-dkey="flarm.ogn_port" value="${dc.ogn_port||14580}"></div>`;
-        dhtml+=`<div class="field"><label>OGN Station</label><input type="text" data-dkey="flarm.ogn_station" value="${dc.ogn_station||''}"></div>`;
-        dhtml+=`<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border)"><strong style="color:var(--accent);font-size:13px">🔑 Encryption Keys</strong>
-            <span class="badge ${dc.keys_loaded?'ok':'err'}" style="margin-left:8px">${dc.keys_loaded?'Loaded':'Not loaded'}</span></div>`;
-        dhtml+=`<div class="field"><label>key_table (12×hex)</label><input type="text" data-dkey="flarm.key_table" value="${dc.key_table||''}" style="font-family:monospace;font-size:11px;letter-spacing:0.5px"></div>`;
-        dhtml+=`<div class="field"><label>key2</label><input type="text" data-dkey="flarm.key2" value="${dc.key2||''}" style="font-family:monospace"></div>`;
-        dhtml+=`<div class="field"><label>key3</label><input type="text" data-dkey="flarm.key3" value="${dc.key3||''}" style="font-family:monospace"></div>`;
-        dhtml+=`<div class="field"><label>key4</label><input type="text" data-dkey="flarm.key4" value="${dc.key4||''}" style="font-family:monospace"></div>`;
-        dhtml+=`<div class="field"><label>key5 (4×hex)</label><input type="text" data-dkey="flarm.key5" value="${dc.key5||''}" style="font-family:monospace"></div>`;
-        dhtml+=`</div></div>`;}
-
-        // ACARS decoder
-        {const active=activeDecoders.has('acars');
-        const dc=decRes.acars||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 ACARS Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Channels</label><span style="color:var(--dim);font-size:12px">${(dc.channels||[]).map(f=>(f/1e6).toFixed(3)+' MHz').join(', ')}</span></div>`;
-        dhtml+=`</div></div>`;}
-
-        // VDL2 decoder
-        {const active=activeDecoders.has('vdl2');
-        const dc=decRes.vdl2||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📡 VDL2 Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Squelch (dBFS)</label><input type="number" step="1" data-dkey="vdl2.squelch_level" value="${dc.squelch_level||-32}"></div>`;
-        dhtml+=`<div class="field"><label>Channels</label><span style="color:var(--dim);font-size:12px">${(dc.channels||[]).map(f=>(f/1e6).toFixed(3)+' MHz').join(', ')}</span></div>`;
-        dhtml+=`</div></div>`;}
-
-        // Radiosonde decoder
-        {const active=activeDecoders.has('radiosonde');
-        const dc=decRes.radiosonde||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🎈 Radiosonde Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>SondeHub upload</label><input type="checkbox" data-dkey="radiosonde.sondehub_upload" ${dc.sondehub_upload?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>radiosondy.info</label><input type="checkbox" data-dkey="radiosonde.radiosondy_upload" ${dc.radiosondy_upload?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>wettersonde.net</label><input type="checkbox" data-dkey="radiosonde.wettersonde_upload" ${dc.wettersonde_upload?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Callsign</label><input type="text" data-dkey="radiosonde.callsign" value="${dc.callsign||''}"></div>`;
-        dhtml+=`</div></div>`;}
-
-        // POCSAG decoder
-        {const active=activeDecoders.has('pocsag');
-        const dc=decRes.pocsag||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📟 POCSAG Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="pocsag.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Channels</label><span style="color:var(--dim);font-size:12px">${(dc.channels||[]).map(f=>(f/1e6).toFixed(3)+' MHz').join(', ')}</span></div>`;
-        dhtml+=`</div></div>`;}
-
-        // GSM decoder
-        {const active=activeDecoders.has('gsm');
-        const dc=decRes.gsm||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📶 GSM Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="gsm.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>ARFCN Freq (Hz)</label><input type="number" data-dkey="gsm.arfcn_freq" value="${dc.arfcn_freq||947000000}"></div>`;
-        dhtml+=`</div></div>`;}
-
-        // LTE decoder
-        {const active=activeDecoders.has('lte');
-        const dc=decRes.lte||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">📶 LTE Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="lte.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
-        dhtml+=`<div class="field"><label>Hop enabled</label><input type="checkbox" data-dkey="lte.hop_enabled" ${dc.hop_enabled?'checked':''}></div>`;
-        dhtml+=`</div></div>`;}
-
-        // IoT 868 decoder
-        {const active=activeDecoders.has('iot868');
-        const dc=decRes.iot868||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🌡️ IoT 868 Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="iot868.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
-        dhtml+=`</div></div>`;}
-
-        // FANET decoder
-        {const active=activeDecoders.has('fanet');
-        const dc=decRes.fanet||{};
-        dhtml+=`<div class="card" style="${active?'':'opacity:0.5;pointer-events:none'}"><h3 class="section-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">🚩 FANET Decoder${active?'':' <span style="font-size:11px;color:var(--dim)">(no dongle)</span>'}</h3><div>`;
-        dhtml+=`<div class="field"><label>Output enabled</label><input type="checkbox" data-dkey="fanet.output_enabled" ${dc.output_enabled?'checked':''}></div>`;
-        dhtml+=`</div></div>`;}
-
-        document.getElementById('decoder-configs').innerHTML=dhtml;
-    }catch(e){
-        document.getElementById('decoder-configs').innerHTML=`<div class="card"><h3>📡 SDR Receivers</h3><p style="color:var(--danger)">Error: ${e}</p></div>`;
-    }
-}
-
-async function loadConfig(){
-    try{
-        const [cfgRes,decRes]=await Promise.all([
-            fetch('/api/config').then(r=>r.json()),
-            fetch('/api/decoders').then(r=>r.json())
-        ]);
-        cfg=cfgRes;
-        decoderCfg=decRes;
-        renderConfigForm();
-    }catch(e){document.getElementById('config-form').innerHTML=`<p style="color:var(--danger)">Error: ${e}</p>`}
-}
-
-// ---- Security: Input sanitization ----
-const DANGEROUS_CHARS=/[`$!|;&()<>'"]/;
-const DANGEROUS_PATTERNS=/(\.\.|\/\/|\\\\|%2e|%00|<script|javascript:|onerror|onload)/i;
-
-let _agRunning=false;
-function showStatus(msg,ok,timeout){
-    const el=document.getElementById('save-status');
-    if(!el)return;
-    el.textContent=msg;
-    el.style.color=ok?'#66bb6a':'#f44336';
-    el.style.fontSize='12px';
-    el.style.display='inline';
-    if(timeout!==0)setTimeout(()=>{el.style.color='var(--dim)';},timeout||8000);
-}
-function _rxNoise(stats,serial){
-    if(!stats.rx_noise)return null;
-    return stats.rx_noise.find(n=>n.serial===serial)||null;
-}
-async function autoGain(serial){
-    if(_agRunning){showStatus('Auto-gain already running',false);return;}
-    let rx=null;
-    try{
-        const rxRes=await fetch('/api/receivers').then(r=>r.json());
-        rx=rxRes.receivers.find(r=>r.serial===serial||r.serial_actual===serial);
-    }catch(e){showStatus('Failed to load receiver data',false);return;}
-    if(!rx||!rx.gain_list||rx.gain_list.length<2){showStatus('No gain table for '+serial,false);return;}
-    _agRunning=true;
-    const isAdsb=(rx.role==='adsb');
-    const btn=document.getElementById('ag_'+serial);
-    if(btn)btn.disabled=true;
-    const steps=rx.gain_list.length;
-    const results=[];
-    let bestStep=0,bestScore=-999;
-    showStatus(`Auto-gain: testing ${steps} steps for ${serial}... (${isAdsb?'msg count':'noise floor'})`,true);
-
-    for(let i=0;i<steps;i++){
-        if(btn)btn.textContent=`⏳ ${i+1}/${steps}`;
-        try{
-            await fetch('/api/receivers/setgain',{method:'POST',headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({serial:serial,step:i})});
-            const s1=await fetch('/api/stats/quick').then(r=>r.json());
-            await new Promise(r=>setTimeout(r,2000));
-            const s2=await fetch('/api/stats/quick').then(r=>r.json());
-
-            if(isAdsb){
-                const msgs=s2.demod_total-s1.demod_total;
-                results.push({step:i,gain:rx.gain_list[i],msgs,noise:0});
-                if(msgs>bestScore){bestScore=msgs;bestStep=i;}
-            }else{
-                const n1=_rxNoise(s1,rx.serial_actual||serial);
-                const n2=_rxNoise(s2,rx.serial_actual||serial);
-                let noiseDb=-99;
-                if(n1&&n2&&(n2.iq_count-n1.iq_count)>0){
-                    const dSum=n2.iq_sum-n1.iq_sum;
-                    const dCnt=n2.iq_count-n1.iq_count;
-                    noiseDb=10*Math.log10(dSum/dCnt/32768);
-                }
-                results.push({step:i,gain:rx.gain_list[i],msgs:0,noise:noiseDb});
-                if(noiseDb<-8&&i>=bestStep){bestScore=noiseDb;bestStep=i;}
-            }
-        }catch(e){results.push({step:i,gain:rx.gain_list[i],msgs:-1,noise:-99});}
-    }
-
-    await fetch('/api/receivers/setgain',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({serial:serial,step:bestStep})});
-
-    const gainSel=document.getElementById('rx_gain_'+serial);
-    if(gainSel){
-        for(let j=0;j<gainSel.options.length;j++){
-            if(Math.abs(parseFloat(gainSel.options[j].value)-rx.gain_list[bestStep])<0.05){
-                gainSel.selectedIndex=j;break;}
-        }
-    }
-
-    let summary=`Best: ${rx.gain_list[bestStep].toFixed(1)} dB. `;
-    results.forEach(r=>{
-        summary+=`${r.gain.toFixed(1)}=`;
-        summary+=isAdsb?`${r.msgs}msg `:`${r.noise.toFixed(1)}dB `;
+function initMap() {
+    map = L.map('map', {
+        center: [stationLat, stationLon],
+        zoom: 7,
+        zoomControl: true
     });
-    showStatus(summary,true,0);
 
-    if(btn){btn.textContent='🔍 Auto';btn.disabled=false;}
-    _agRunning=false;
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19
+    }).addTo(map);
+
+    acLayer = L.layerGroup().addTo(map);
 }
 
-async function saveConfig(){
-    let hasError=false;
-    document.querySelectorAll('[data-key]').forEach(el=>{
-        const keys=el.dataset.key.split('.');
-        let obj=cfg;
-        for(let i=0;i<keys.length-1;i++){if(!obj[keys[i]])obj[keys[i]]={};obj=obj[keys[i]];}
-        if(el.type==='checkbox'){obj[keys[keys.length-1]]=el.checked;}
-        else if(el.type==='number'){obj[keys[keys.length-1]]=parseFloat(el.value)||0;}
-        else{
-            const raw=el.value;
-            const skipSanitize=el.dataset.key==='adsbhub.ckey';
-            if(!skipSanitize&&(DANGEROUS_CHARS.test(raw)||DANGEROUS_PATTERNS.test(raw))){
-                el.style.borderColor='var(--danger)';
-                hasError=true;
-            }else{
-                el.style.borderColor='';
-                obj[keys[keys.length-1]]=raw;
-            }
-        }
-    });
-    // Collect decoder config changes (data-dkey attributes)
-    let dcUpdate={};
-    document.querySelectorAll('[data-dkey]').forEach(el=>{
-        const keys=el.dataset.dkey.split('.');
-        let obj=dcUpdate;
-        for(let i=0;i<keys.length-1;i++){if(!obj[keys[i]])obj[keys[i]]={};obj=obj[keys[i]];}
-        if(el.type==='checkbox'){obj[keys[keys.length-1]]=el.checked;}
-        else if(el.type==='number'){obj[keys[keys.length-1]]=parseFloat(el.value)||0;}
-        else{obj[keys[keys.length-1]]=el.value;}
-    });
-    if(hasError){
-        document.getElementById('save-status').textContent='❌ Forbidden characters in highlighted fields';
-        document.getElementById('save-status').style.color='var(--danger)';
-        return;
+// ---- Aircraft icon ----
+function acIcon(track, alt) {
+    // Color based on altitude
+    let color = '#888';
+    if (alt != null) {
+        if (alt <= 0) color = '#996633';
+        else if (alt < 5000) color = '#00cc44';
+        else if (alt < 15000) color = '#44aaff';
+        else if (alt < 30000) color = '#ffaa00';
+        else color = '#ff4444';
     }
-    document.getElementById('save-status').textContent='Saving...';
-    document.getElementById('save-status').style.color='var(--dim)';
-    try{
-        // Save receiver gain changes
-        const gainEls=document.querySelectorAll('[id^="rx_gain_"]');
-        for(const gel of gainEls){
-            const serial=gel.id.replace('rx_gain_','');
-            const gain=parseFloat(gel.value)||40.0;
-            let role='none',ppm=0;
-            try{const rxRes=await fetch('/api/receivers').then(r=>r.json());
-            const rx=rxRes.receivers.find(r=>r.serial===serial||r.serial_actual===serial);
-            if(rx){role=rx.role;ppm=rx.ppm||0;}}catch(e){}
-            if(role!=='none'){
-                await fetch('/api/receivers/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({serial:serial,role:role,gain:gain,ppm:ppm})});
-            }
-        }
-        // Save decoder configs
-        if(Object.keys(dcUpdate).length>0){
-            await fetch('/api/decoders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(dcUpdate)});
-        }
-        // Save general config
-        const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
-        const j=await r.json();
-        if(j.error){document.getElementById('save-status').textContent='❌ '+j.error;document.getElementById('save-status').style.color='var(--danger)';return;}
-        document.getElementById('save-status').textContent='✅ Configuration saved and applied';document.getElementById('save-status').style.color='var(--ok)';
-        setTimeout(()=>{document.getElementById('save-status').textContent='';loadConfig();},3000);
-    }catch(e){document.getElementById('save-status').textContent='❌ Error: '+e;}
+    const rot = (track != null) ? track : 0;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+        <g transform="rotate(${rot} 14 14)">
+            <path d="M14 2 L16 12 L24 16 L16 15 L16 24 L19 26 L14 27 L9 26 L12 24 L12 15 L4 16 L12 12 Z"
+                  fill="${color}" stroke="#000" stroke-width="0.8" opacity="0.95"/>
+        </g>
+    </svg>`;
+    return L.divIcon({
+        html: svg,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        className: ''
+    });
 }
 
-async function calibratePPM(serial){
-    const btn=document.getElementById('cal_btn_'+serial);
-    const ppmInput=document.getElementById('rx_ppm_'+serial);
-    const status=document.getElementById('cal_status_'+serial);
-    if(!btn||!status)return;
-    btn.disabled=true;
-    const oldText=btn.innerHTML;
-    btn.innerHTML='⏳ Scanning...';
-    btn.style.color='var(--warn)';
-    status.textContent='Stopping receiver, scanning GSM 920-960 MHz...';
-    status.style.color='var(--dim)';
-    try{
-        const resp=await fetch('/api/calibrate-ppm',{
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({serial:serial})
-        });
-        const data=await resp.json();
-        if(data.ok){
-            if(ppmInput)ppmInput.value=data.ppm;
-            status.innerHTML=`✅ Calibrated: <b>${data.old_ppm} → ${data.ppm} ppm</b> (offset ${data.offset>=0?'+':''}${data.offset.toFixed(1)}, RMS ${data.rms.toFixed(2)}, ${data.samples} samples)`+(data.warning?` ⚠️ ${data.warning}`:'');
-            status.style.color='var(--ok)';
-        }else{
-            status.textContent='❌ '+data.error;
-            status.style.color='var(--danger)';
+// ---- Tooltip content ----
+function tooltipHtml(ac) {
+    let rows = '';
+    const call = ac.flight ? ac.flight.trim() : ac.hex;
+    rows += `<div class="tt-call">${call}</div>`;
+    if (ac.hex) rows += `<div class="tt-row"><span class="tt-lbl">ICAO</span><span class="tt-val">${ac.hex}</span></div>`;
+    if (ac.flight) rows += `<div class="tt-row"><span class="tt-lbl">Callsign</span><span class="tt-val">${ac.flight.trim()}</span></div>`;
+    if (ac.squawk) rows += `<div class="tt-row"><span class="tt-lbl">Squawk</span><span class="tt-val">${ac.squawk}</span></div>`;
+    if (ac.alt_baro != null) rows += `<div class="tt-row"><span class="tt-lbl">Altitude</span><span class="tt-val">${ac.alt_baro} ft</span></div>`;
+    if (ac.gs != null) rows += `<div class="tt-row"><span class="tt-lbl">Speed</span><span class="tt-val">${ac.gs} kt</span></div>`;
+    if (ac.track != null) rows += `<div class="tt-row"><span class="tt-lbl">Heading</span><span class="tt-val">${Math.round(ac.track)}°</span></div>`;
+    if (ac.baro_rate != null) rows += `<div class="tt-row"><span class="tt-lbl">VS</span><span class="tt-val">${ac.baro_rate} ft/min</span></div>`;
+    if (ac.category) rows += `<div class="tt-row"><span class="tt-lbl">Category</span><span class="tt-val">${ac.category}</span></div>`;
+    if (ac.rssi != null) rows += `<div class="tt-row"><span class="tt-lbl">RSSI</span><span class="tt-val">${ac.rssi} dB</span></div>`;
+    if (ac.messages != null) rows += `<div class="tt-row"><span class="tt-lbl">Messages</span><span class="tt-val">${ac.messages}</span></div>`;
+    const src = ac.type || (ac.lat != null ? 'ADS-B' : 'Mode S');
+    rows += `<div class="tt-row"><span class="tt-lbl">Source</span><span class="tt-val">${src}</span></div>`;
+    return `<div class="ac-tooltip">${rows}</div>`;
+}
+
+// ---- Update aircraft ----
+function updateAircraft(data) {
+    const now = Date.now();
+    const seen = new Set();
+
+    for (const ac of data.aircraft || []) {
+        if (ac.lat == null || ac.lon == null) continue;
+        seen.add(ac.hex);
+
+        const tt = tooltipHtml(ac);
+
+        if (acMarkers[ac.hex]) {
+            const m = acMarkers[ac.hex];
+            m.setLatLng([ac.lat, ac.lon]);
+            m.setIcon(acIcon(ac.track, ac.alt_baro));
+            m.setTooltipContent(tt);
+            m.lastSeen = now;
+        } else {
+            const m = L.marker([ac.lat, ac.lon], {
+                icon: acIcon(ac.track, ac.alt_baro)
+            });
+            m.bindTooltip(tt, {
+                direction: 'top',
+                offset: [0, -14],
+                opacity: 1,
+                className: ''
+            });
+            m.addTo(acLayer);
+            m.lastSeen = now;
+            acMarkers[ac.hex] = m;
         }
-    }catch(e){
-        status.textContent='❌ Network error: '+e.message;
-        status.style.color='var(--danger)';
     }
-    btn.innerHTML=oldText;
-    btn.style.color='var(--accent)';
-    btn.disabled=false;
+
+    // Remove stale markers (not seen for 60s)
+    for (const hex of Object.keys(acMarkers)) {
+        if (!seen.has(hex) && (now - acMarkers[hex].lastSeen > 60000)) {
+            acLayer.removeLayer(acMarkers[hex]);
+            delete acMarkers[hex];
+        }
+    }
 }
 
-loadConfig();
-fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
+// ---- Fetch loop ----
+async function fetchAircraft() {
+    try {
+        const r = await fetch('/api/aircraft');
+        const d = await r.json();
+        updateAircraft(d);
+    } catch (e) { /* retry next cycle */ }
+}
+
+async function fetchConfig() {
+    try {
+        const r = await fetch('/api/config');
+        const d = await r.json();
+        if (d.station && d.station.lat && d.station.lon) {
+            stationLat = d.station.lat;
+            stationLon = d.station.lon;
+            map.setView([stationLat, stationLon], map.getZoom());
+        }
+    } catch (e) { /* ignore */ }
+}
+
+// ---- Init ----
+initMap();
+fetchConfig();
+fetchAircraft();
+setInterval(fetchAircraft, 1500);
+
+// ---- Version badge ----
+fetch('/api/status').then(r => r.json()).then(d => {
+    const b = document.getElementById('ver-badge');
+    if (b && d.version) b.textContent = 'v' + d.version;
+    const mb = document.getElementById('map-version');
+    if (mb && d.version) mb.textContent = 'dump1090-gg v' + d.version;
+}).catch(() => {});
 </script>
 <script src="/warnings.js"></script>
 </body>

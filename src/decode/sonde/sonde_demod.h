@@ -52,17 +52,29 @@ typedef struct {
 // Callback for decoded messages
 typedef void (*sonde_msg_cb)(const sonde_msg_t *msg, void *ctx);
 
+// Frequency scan mode
+#define SONDE_SCAN_STEPS    3
+// Scan frequencies: 401, 403, 405 MHz (each covers ±1.2 MHz with 2.4 Msps)
+static const uint32_t SONDE_SCAN_FREQS[SONDE_SCAN_STEPS] = {
+    401000000, 403000000, 405000000
+};
+
 // Configuration
 typedef struct {
     double   center_freq;
     double   sample_rate;
     sonde_msg_cb callback;
     void    *callback_ctx;
+    int32_t  scan_enabled;      // 1 = scanning mode
+    int32_t  scan_dwell_sec;    // seconds per scan step (default 5)
 } sonde_config_t;
 
 struct sonde_state *sonde_create(const sonde_config_t *config);
 void sonde_destroy(struct sonde_state *state);
 void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t len);
+
+// Returns non-zero frequency if the decoder wants a retune (scan hop)
+uint32_t sonde_get_scan_freq(struct sonde_state *state);
 
 typedef struct {
     uint64_t samples_processed;

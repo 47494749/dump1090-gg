@@ -223,6 +223,26 @@ bool rtlsdrOpen(void)
         return false;
     }
 
+    /*
+     * IMPORTANT RTL-SDR NOTE - DO NOT add rtlsdr_set_direct_sampling(dev, 0) here.
+     *
+     * Required behaviour:
+     * - If digital AGC is disabled in config, disable only AGC here.
+     * - Enter direct sampling only when the user explicitly requested it.
+     *
+     * Forbidden behaviour:
+     * - Do NOT force direct_sampling=0 as a generic "known baseline" or "cleanup"
+     *   step after rtlsdr_open().
+     *
+     * Reason:
+     * - On real R820T hardware, traced against stock rtl_adsb/rtl_sdr, that call was
+     *   not neutral: it triggered a transient direct-sampling path, caused PLL-not-
+     *   locked behaviour, and regressed dump1090-gg while stock tools still worked.
+     */
+    if (!RTLSDR.digital_agc) {
+        rtlsdr_set_agc_mode(RTLSDR.dev, 0);
+    }
+
     // Set gain, frequency, sample rate, and reset the device
     if (RTLSDR.direct_sampling) {
         gg::eprint("rtlsdr: direct sampling from input %d\n", RTLSDR.direct_sampling);

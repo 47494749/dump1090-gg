@@ -780,6 +780,11 @@ struct sonde_state {
     // Per-frequency channels (DFM and M10 on different frequencies)
     struct sonde_channel dfm_ch;
     struct sonde_channel m10_ch;
+
+    // Frequency scanning state
+    int32_t  scan_step;            // current index into SONDE_SCAN_FREQS[]
+    uint64_t scan_step_samples;    // samples processed on current step
+    uint32_t scan_pending_freq;    // non-zero = request retune to this freq
 };
 
 // ======================== Channel Demod Helper ========================
@@ -964,6 +969,10 @@ struct sonde_state *sonde_create(const sonde_config_t *config)
             DFM_BAUD_RATE, DFM_SPS, SONDE_DFM_OFFSET);
     fprintf(stderr, "  M10:  %d baud, sps=%.1f, offset=%+.0f Hz, IQ fc=25kHz\n",
             M10_BAUD_RATE, M10_SPS, SONDE_M10_OFFSET);
+    if (s->config.scan_enabled) {
+        fprintf(stderr, "  SCAN: %d steps, dwell=%d sec, covering 400-406 MHz\n",
+                SONDE_SCAN_STEPS, s->config.scan_dwell_sec);
+    }
 
     return s;
 }
@@ -976,6 +985,14 @@ void sonde_destroy(struct sonde_state *state)
 void sonde_get_stats(struct sonde_state *state, sonde_stats_t *stats)
 {
     *stats = state->stats;
+}
+
+// Check if scanner wants a frequency hop. Returns new freq or 0.
+uint32_t sonde_get_scan_freq(struct sonde_state *state)
+{
+    uint32_t f = state->scan_pending_freq;
+    state->scan_pending_freq = 0;
+    return f;
 }
 
 // ======================== RS41 Frame Parser ========================
@@ -2284,6 +2301,23 @@ void sonde_process(struct sonde_state *state, const uint8_t *iq_data, uint32_t l
                     pwr_cnt = 0;
                 }
             }
+        }
+    }
+
+    // ======== Frequency scanning: hop to next step after dwell time ========
+    if (state->config.scan_enabled) {
+        state->scan_step_samples += samples;
+        uint64_t dwell_samples = (uint64_t)state->config.scan_dwell_sec *
+                                 (uint64_t)SONDE_SAMPLE_RATE;
+        if (state->scan_step_samples >= dwell_samples) {
+            state->scan_step_samples = 0;
+            state->scan_step = (state->scan_step + 1) % SONDE_SCAN_STEPS;
+            state->scan_pending_freq = SONDE_SCAN_FREQS[state->scan_step];
+            // Reset AFC flags so new frequency gets fresh correction
+            state->m10.afc_done = 0;
+            fprintf(stderr, "SONDE-SCAN: hop to %.3f MHz (step %d/%d)\n",
+                    state->scan_pending_freq / 1e6, state->scan_step + 1,
+                    SONDE_SCAN_STEPS);
         }
     }
 }

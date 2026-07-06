@@ -10,6 +10,38 @@ actually present here.
 
 ---
 
+### v1.0.7 (2026-07-06)
+
+**Panel restructure:**
+- New home page with OpenStreetMap aircraft map (zoom, pan, hover tooltips)
+- Configuration page moved from `/` to `/config.html`
+- New Feeders page (`/feeders.html`) with all feeder/hub settings
+- Version badge on map overlay (bottom-right)
+- Updated navigation bar across all pages (static and inline)
+
+**Multi-SDR enhancements:**
+- Full libsdrgg backend support for FC0012 tuner (dongle 00000103): frequency
+  tuning, gain control, waterfall spectrum display
+- Receiver health monitor: detect stalled receivers (30s no ADS-B with active
+  USB) and auto-recover via reset cascade
+- `dump_registers` and `read_demod_reg` backend operations for runtime
+  diagnostics panel
+- Tuner AGC capability flag per device (R820T/R820T2 only)
+
+**Radiosonde decoder improvements:**
+- Configurable sonde frequency via decoder config (no longer hardcoded)
+
+**Bug fixes:**
+- Remove unconditional USB trace logging from libsdrgg backend
+- Remove waterfall power diagnostic print (wf-diag)
+- Fix panel nav bar consistency across all pages
+
+**Cleanup:**
+- Remove `rtl_demod_dump.cpp`, `rtl_init_stress.cpp`, `rtl_register_test.py`
+  (development test tools, not part of public distribution)
+
+---
+
 ### v1.0.6 (2026-05-27)
 
 **BDS 4,4 / 4,5 meteorological decoders (new):**

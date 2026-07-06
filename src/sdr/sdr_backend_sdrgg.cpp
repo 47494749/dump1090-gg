@@ -16,6 +16,7 @@
 #include <cstring>
 #include <new>
 #include <pthread.h>
+#include <time.h>
 
 #include "sdr_backend.h"
 
@@ -153,6 +154,10 @@ static sdr_device_t *gg_open_by_index(int32_t index)
         case SDRGG_TUNER_E4000:  sdev->tuner_type = SDR_TUNER_E4000;  break;
         default:                 sdev->tuner_type = SDR_TUNER_UNKNOWN; break;
     }
+
+    sdev->supports_tuner_agc =
+        (sdev->tuner_type == SDR_TUNER_R820T) ||
+        (sdev->tuner_type == SDR_TUNER_R820T2);
 
     // Note: sdr::open() already calls rtl::init + tuner family startup
     // (r820t::init or fc0012::init) internally via the family contract.
@@ -520,6 +525,78 @@ static int32_t gg_write_tuner_reg(sdr_device_t *dev, uint8_t reg, uint8_t val)
     return tuner::write_reg(static_cast<sdrgg_dev_t *>(dev->handle), reg, val);
 }
 
+// ======================== Diagnostic operations ========================
+
+static int32_t gg_read_demod_reg(sdr_device_t *dev, uint8_t block, uint16_t reg, uint8_t *val)
+{
+    return demod::read(static_cast<sdrgg_dev_t *>(dev->handle), block, reg, val);
+}
+
+static void gg_dump_all_registers(sdr_device_t *dev, FILE *out)
+{
+    sdrgg_dev_t *h = static_cast<sdrgg_dev_t *>(dev->handle);
+    if (!h || !out) return;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    fprintf(out, "\n======= FULL REGISTER DUMP %02d:%02d:%02d =======\n",
+            tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    // Demod page 0 (block 0, reg = (page<<8)|offset)
+    fprintf(out, "  DEMOD PAGE 0:\n   ");
+    for (int i = 0; i < 32; i++) {
+        uint8_t val = 0xFF;
+        demod::read(h, 0, (0 << 8) | i, &val);
+        fprintf(out, " %02X:%02X", i, val);
+        if ((i & 7) == 7) fprintf(out, "\n   ");
+    }
+
+    // Demod page 1
+    fprintf(out, "  DEMOD PAGE 1:\n   ");
+    for (int i = 0; i < 32; i++) {
+        uint8_t val = 0xFF;
+        demod::read(h, 0, (1 << 8) | i, &val);
+        fprintf(out, " %02X:%02X", i, val);
+        if ((i & 7) == 7) fprintf(out, "\n   ");
+    }
+
+    // Page 1 extended critical regs
+    fprintf(out, "  DEMOD P1 EXT:");
+    static const uint8_t p1_ext[] = {0x93, 0x94, 0x9F, 0xA0, 0xA1, 0xA2, 0xB1};
+    for (int i = 0; i < 7; i++) {
+        uint8_t val = 0xFF;
+        demod::read(h, 0, (1 << 8) | p1_ext[i], &val);
+        fprintf(out, " %02X:%02X", p1_ext[i], val);
+    }
+    fputc('\n', out);
+
+    // SYS block (block 2) key registers
+    fprintf(out, "  SYS:");
+    static const uint16_t sys_regs[] = {0x0001, 0x0002, 0x0003, 0x0004, 0x000B, 0x3000};
+    for (int i = 0; i < 6; i++) {
+        uint8_t val = 0xFF;
+        demod::read(h, 2, sys_regs[i], &val);
+        fprintf(out, " %04X:%02X", sys_regs[i], val);
+    }
+    fputc('\n', out);
+
+    // USB block (block 1) key registers
+    fprintf(out, "  USB:");
+    static const uint16_t usb_regs[] = {0x2000, 0x2040, 0x2048, 0x2100, 0x2104};
+    for (int i = 0; i < 5; i++) {
+        uint8_t val = 0xFF;
+        demod::read(h, 1, usb_regs[i], &val);
+        fprintf(out, " %04X:%02X", usb_regs[i], val);
+    }
+    fputc('\n', out);
+
+    fprintf(out, "=============================================\n");
+    fflush(out);
+}
+
 // ======================== Exported vtable ========================
 
 extern "C" const sdr_backend_ops_t sdrgg_backend_ops = {
@@ -552,4 +629,6 @@ extern "C" const sdr_backend_ops_t sdrgg_backend_ops = {
     .set_vga_gain       = gg_set_vga_gain,
     .read_tuner_reg     = gg_read_tuner_reg,
     .write_tuner_reg    = gg_write_tuner_reg,
+    .read_demod_reg     = gg_read_demod_reg,
+    .dump_registers     = gg_dump_all_registers,
 };

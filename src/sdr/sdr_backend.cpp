@@ -76,6 +76,11 @@ static sdr_device_t *rtl_open_by_index(int32_t index)
         default:                  sdev->tuner_type = SDR_TUNER_UNKNOWN; break;
     }
 
+    sdev->supports_tuner_agc =
+        (sdev->tuner_type == SDR_TUNER_R820T) ||
+        (sdev->tuner_type == SDR_TUNER_R820T2) ||
+        (sdev->tuner_type == SDR_TUNER_E4000);
+
     return sdev;
 }
 
@@ -224,6 +229,8 @@ static const sdr_backend_ops_t rtlsdr_backend_ops = {
     .set_vga_gain       = NULL,
     .read_tuner_reg     = NULL,
     .write_tuner_reg    = NULL,
+    .read_demod_reg     = NULL,
+    .dump_registers     = NULL,
 };
 
 #endif // ENABLE_RTLSDR

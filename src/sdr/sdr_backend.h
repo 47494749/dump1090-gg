@@ -16,6 +16,7 @@
 #define SDR_BACKEND_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 
 // ======================== Backend selection ========================
@@ -128,6 +129,9 @@ typedef struct sdr_backend_ops {
     int32_t  (*set_vga_gain)(sdr_device_t *dev, int32_t index);
     int32_t  (*read_tuner_reg)(sdr_device_t *dev, uint8_t reg, uint8_t *val);
     int32_t  (*write_tuner_reg)(sdr_device_t *dev, uint8_t reg, uint8_t val);
+    // Diagnostic ops
+    int32_t  (*read_demod_reg)(sdr_device_t *dev, uint8_t block, uint16_t reg, uint8_t *val);
+    void     (*dump_registers)(sdr_device_t *dev, FILE *out);
 } sdr_backend_ops_t;
 
 // ======================== Device handle structure ========================
@@ -140,6 +144,7 @@ struct sdr_device {
     uint32_t current_rate;          // cached sample rate
     int32_t      current_gain;          // cached gain (tenth dB)
     sdr_tuner_type_t tuner_type;    // cached tuner type
+    bool supports_tuner_agc;        // backend can switch tuner between manual/auto gain
     volatile int32_t async_running;     // nonzero while read_async should stay blocked
 };
 

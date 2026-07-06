@@ -104,13 +104,19 @@ typedef struct {
 
 // ======================== Radiosonde Decoder Config ========================
 
+// Frequency mode for radiosonde receiver
+#define SONDE_FREQ_MODE_FIXED   0   // Fixed center frequency
+#define SONDE_FREQ_MODE_SCAN    1   // Scan 401/403/405 MHz (full 400-406 coverage)
+
 typedef struct {
     bool    enabled;
     bool    sondehub_upload;
     bool    radiosondy_upload;
     bool    wettersonde_upload;
     char    callsign[64];
-    double  center_freq;
+    double  center_freq;        // used when freq_mode == FIXED
+    int32_t freq_mode;          // SONDE_FREQ_MODE_FIXED or SONDE_FREQ_MODE_SCAN
+    int32_t scan_dwell_sec;     // seconds per step in scan mode (default 5)
 } radiosonde_decoder_config_t;
 
 // ======================== POCSAG Decoder Config ========================

@@ -1113,6 +1113,9 @@ static void backgroundTasks(void) {
         pthread_rwlock_wrlock(&aircraft_lock);
         trackPeriodicUpdate();
         pthread_rwlock_unlock(&aircraft_lock);
+
+        // Diagnostic: check receiver RF health (detects 0-message condition)
+        rxDiagHealthCheck();
         elmCleanupStale(&Modes.elm, now);
     }
 

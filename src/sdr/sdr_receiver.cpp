@@ -22,7 +22,9 @@
 #include <unistd.h>
 #include <cmath>
 #include <ctype.h>
+#include <dirent.h>
 #include "config_panel.h"
+#include "decoder_config.h"
 #include "pocsag_demod.h"
 #include "gsm_decode.h"
 #include "gsm_tracker.h"
@@ -685,6 +687,216 @@ int32_t rxGetGain(sdr_receiver_t *rx)
     return rx->rtl.current_gain;
 }
 
+static bool rxSupportsTunerAgc(const sdr_receiver_t *rx)
+{
+    return rx && rx->backend_dev && rx->backend_dev->supports_tuner_agc;
+}
+
+static bool rxDebugInitTrace(const sdr_receiver_t *rx)
+{
+    return rx != NULL;
+}
+
+static void rxDebugLogState(const sdr_receiver_t *rx, const char *step, int32_t rc)
+{
+    if (!rxDebugInitTrace(rx) || !rx->backend_dev || !rx->backend_ops) {
+        return;
+    }
+
+    int32_t actual_gain = 0;
+    if (rx->backend_ops->get_gain) {
+        actual_gain = rx->backend_ops->get_gain(rx->backend_dev);
+    }
+
+    fprintf(stderr,
+            "rx[%d]: DEBUG %s rc=%d serial=%s role=%s freq=%u rate=%u dev_gain=%d api_gain=%d gain_step=%d direct=%d digital_agc=%d tuner_agc=%d\n",
+            rx->id,
+            step,
+            rc,
+            rx->serial_actual[0] ? rx->serial_actual : rx->config.serial,
+            sdrRoleName(rx->config.role),
+            rx->backend_dev->current_freq,
+            rx->backend_dev->current_rate,
+            rx->backend_dev->current_gain,
+            actual_gain,
+            rx->rtl.current_gain,
+            rx->config.direct_sampling,
+            rx->config.digital_agc,
+            rx->backend_dev->supports_tuner_agc);
+}
+
+// ============== USB/RF HEALTH DIAGNOSTIC ==============
+// Dumps all R820T registers (0x00-0x1F) and checks PLL lock.
+// Called after init and when "no messages" condition is detected.
+
+static const char *r820t_reg_names[32] = {
+    "ChipID",   "r01",      "r02",      "r03",      "r04",      "LNA-power",
+    "LNA-gain", "Mixer-gn", "ImgR-adj", "ImgI-adj", "IF-fltcal","IF-flt2",
+    "Filt-BW",  "Filt-ext", "VGA-clk",  "VGA-gain", "PLL-syn",  "PLL-Xtal",
+    "PLL-Div",  "PLL-SD3",  "PLL-SD2",  "PLL-SD1",  "PLL-SD0",  "PLL-test",
+    "Cal-VCO",  "Mix-LNA",  "LO-div",   "LNA-dpw",  "RF-flt3",  "RF-flt2",
+    "RF-flt1",  "RF-flt0"
+};
+
+static void rxDiagDumpR820T(const sdr_receiver_t *rx, const char *reason)
+{
+    if (!rx || !rx->backend_dev || !rx->backend_ops) return;
+    if (!rx->backend_ops->read_tuner_reg) return;
+
+    uint8_t regs[32];
+    int32_t errors = 0;
+    for (int32_t i = 0; i < 32; i++) {
+        if (rx->backend_ops->read_tuner_reg(rx->backend_dev, (uint8_t)i, &regs[i]) != 0) {
+            regs[i] = 0xFF;
+            errors++;
+        }
+    }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    fprintf(stderr,
+            "\n===== R820T DIAG rx[%d] serial=%s role=%s reason=%s time=%02d:%02d:%02d =====\n",
+            rx->id,
+            rx->serial_actual[0] ? rx->serial_actual : rx->config.serial,
+            sdrRoleName(rx->config.role),
+            reason,
+            tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    if (errors == 32) {
+        fprintf(stderr, "  *** ALL READS FAILED — I2C bus dead! ***\n");
+        fprintf(stderr, "======================================================\n\n");
+        return;
+    }
+
+    // Print register table
+    fprintf(stderr, "  REG  NAME        VALUE\n");
+    for (int32_t i = 0; i < 32; i++) {
+        fprintf(stderr, "  0x%02X %-10s  0x%02X\n", i, r820t_reg_names[i], regs[i]);
+    }
+
+    // Key diagnostics
+    bool pll_locked = (regs[0x12] & 0x40) != 0;  // PLL lock indicator in reg 0x12 bit 6
+    uint8_t lna_gain = (regs[0x06] >> 4) & 0x0F;
+    uint8_t mixer_gain = (regs[0x07] >> 4) & 0x0F;
+    uint8_t vga_gain = regs[0x0F] & 0x0F;
+    uint8_t lo_div = (regs[0x1A] >> 5) & 0x07;
+
+    fprintf(stderr, "  --- KEY STATUS ---\n");
+    fprintf(stderr, "  PLL locked: %s\n", pll_locked ? "YES" : "*** NO — NOT LOCKED! ***");
+    fprintf(stderr, "  LNA gain index: %d  Mixer gain index: %d  VGA gain: %d\n",
+            lna_gain, mixer_gain, vga_gain);
+    fprintf(stderr, "  LO divider: %d (div=%d)\n", lo_div, 2 << lo_div);
+    fprintf(stderr, "  Freq set: %u Hz  Rate: %u\n",
+            rx->backend_dev->current_freq, rx->backend_dev->current_rate);
+
+    if (!pll_locked) {
+        fprintf(stderr, "  *** PLL NOT LOCKED — RF front-end is DEAD! ***\n");
+    }
+
+    fprintf(stderr, "======================================================\n\n");
+}
+
+// Per-receiver health state for the watchdog
+struct rx_health_state {
+    uint64_t last_check_time;       // mstime of last check
+    uint64_t last_sample_counter;   // sample_counter at last check
+    uint32_t last_messages_total;   // messages at last check (ADSB only)
+    uint32_t no_msg_seconds;        // consecutive seconds with 0 new messages
+    bool     dump_done;             // already dumped for this "episode"
+    bool     baseline_done;         // init dump completed
+};
+static struct rx_health_state rx_health[MAX_SDR_RECEIVERS];
+
+// Helper: dump all registers to /tmp/sdrgg_watchdog_dump.log and stderr
+static void rxDiagFullDump(const sdr_receiver_t *rx, const char *reason)
+{
+    if (!rx || !rx->backend_dev || !rx->backend_ops) return;
+    if (!rx->backend_ops->dump_registers) return;
+
+    // Dump to persistent log file
+    FILE *dumpf = fopen("/tmp/sdrgg_watchdog_dump.log", "a");
+    if (dumpf) {
+        fprintf(dumpf, "\n*** %s rx[%d] serial=%s ***\n",
+                reason, rx->id,
+                rx->serial_actual[0] ? rx->serial_actual : rx->config.serial);
+        rx->backend_ops->dump_registers(rx->backend_dev, dumpf);
+        fclose(dumpf);
+    }
+    // Also dump to stderr (journald)
+    fprintf(stderr, "\n*** %s rx[%d] serial=%s — FULL REG DUMP ***\n",
+            reason, rx->id,
+            rx->serial_actual[0] ? rx->serial_actual : rx->config.serial);
+    rx->backend_ops->dump_registers(rx->backend_dev, stderr);
+}
+
+// Called from backgroundTasks() every ~1 second to monitor receiver health
+void rxDiagHealthCheck(void)
+{
+    uint64_t now = mstime();
+
+    for (int32_t i = 0; i < SdrManager.count; i++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[i];
+        struct rx_health_state *h = &rx_health[i];
+
+        if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) continue;
+
+        // Only check R820T-based receivers (ADSB, FLARM)
+        if (rx->config.role != SDR_ROLE_ADSB && rx->config.role != SDR_ROLE_FLARM)
+            continue;
+
+        // Throttle to once per second
+        if (now - h->last_check_time < 1000) continue;
+        h->last_check_time = now;
+
+        // Check if samples are flowing (USB data arriving)
+        bool samples_flowing = (rx->sample_counter > h->last_sample_counter);
+        h->last_sample_counter = rx->sample_counter;
+
+        if (!samples_flowing) continue;  // USB problem, not RF — handled elsewhere
+
+        // For ADSB: check message count
+        if (rx->config.role == SDR_ROLE_ADSB) {
+            uint32_t current_msgs = Modes.stats_current.messages_total +
+                                    Modes.stats_alltime.messages_total;
+            if (current_msgs == h->last_messages_total) {
+                h->no_msg_seconds++;
+            } else {
+                // Messages flowing — reset watchdog
+                if (h->no_msg_seconds >= 30 && h->dump_done) {
+                    // Recovered! Log recovery dump
+                    fprintf(stderr, "rx[%d]: DIAG receiver RECOVERED after %u seconds of silence\n",
+                            rx->id, h->no_msg_seconds);
+                    rxDiagDumpR820T(rx, "RECOVERED");
+                    rxDiagFullDump(rx, "RECOVERED");
+                }
+                h->no_msg_seconds = 0;
+                h->dump_done = false;
+            }
+            h->last_messages_total = current_msgs;
+
+            // Trigger dump after 30s of 0 messages (samples flowing but no RF decoded)
+            if (h->no_msg_seconds == 30 && !h->dump_done) {
+                fprintf(stderr, "rx[%d]: DIAG *** 30s with 0 ADS-B messages while USB data flows! ***\n",
+                        rx->id);
+                rxDiagDumpR820T(rx, "NO_MESSAGES_30s");
+                rxDiagFullDump(rx, "NO_MESSAGES_30s");
+                h->dump_done = true;
+            }
+            // Repeat dump every 5 minutes if still silent
+            if (h->no_msg_seconds > 0 && (h->no_msg_seconds % 300) == 0) {
+                rxDiagDumpR820T(rx, "STILL_SILENT_5min");
+                rxDiagFullDump(rx, "STILL_SILENT_5min");
+            }
+        }
+
+        // For FLARM: use sample_counter growth without decoded frames
+        // (FLARM is sparse, so use longer timeout — handled by FLARM decoder stats)
+    }
+}
+
 int32_t rxGetMaxGain(sdr_receiver_t *rx)
 {
     return rx->rtl.gain_steps - 1;
@@ -701,23 +913,29 @@ double rxGetGainDb(sdr_receiver_t *rx, int32_t step)
 int32_t rxSetGain(sdr_receiver_t *rx, int32_t step)
 {
     if (!rx->rtl.gains || !rx->backend_dev) return -1;
+    bool supports_tuner_agc = rxSupportsTunerAgc(rx);
+    int32_t mode_rc = 0;
+    int32_t gain_rc = 0;
 
     if (step < 0) step = 0;
     if (step >= rx->rtl.gain_steps) step = rx->rtl.gain_steps - 1;
 
-    if (step == rx->rtl.gain_steps - 1) {
-        if (rx->backend_ops->set_gain_mode(rx->backend_dev, 0) < 0) {
+    if (supports_tuner_agc && step == rx->rtl.gain_steps - 1) {
+        mode_rc = rx->backend_ops->set_gain_mode(rx->backend_dev, 0);
+        if (mode_rc < 0) {
             gg::eprint("rx[%d]: failed to enable tuner AGC\n", rx->id);
             return rx->rtl.current_gain;
         }
         fprintf(stderr, "rx[%d]: tuner gain set to about %.1f dB (step %d, AGC)\n",
                 rx->id, rx->rtl.gains[step] / 10.0, step);
     } else {
-        if (rx->backend_ops->set_gain_mode(rx->backend_dev, 1) < 0) {
+        mode_rc = rx->backend_ops->set_gain_mode(rx->backend_dev, 1);
+        if (mode_rc < 0) {
             gg::eprint("rx[%d]: failed to disable tuner AGC\n", rx->id);
             return rx->rtl.current_gain;
         }
-        if (rx->backend_ops->set_gain(rx->backend_dev, rx->rtl.gains[step]) < 0) {
+        gain_rc = rx->backend_ops->set_gain(rx->backend_dev, rx->rtl.gains[step]);
+        if (gain_rc < 0) {
             fprintf(stderr, "rx[%d]: failed to set tuner gain to %.1fdB\n",
                     rx->id, rx->rtl.gains[step] / 10.0);
             return rx->rtl.current_gain;
@@ -727,6 +945,17 @@ int32_t rxSetGain(sdr_receiver_t *rx, int32_t step)
     }
 
     rx->rtl.current_gain = step;
+    if (rxDebugInitTrace(rx)) {
+        fprintf(stderr,
+                "rx[%d]: DEBUG gain-select step=%d requested=%.1f mode_rc=%d gain_rc=%d gain_steps=%d\n",
+                rx->id,
+                step,
+                rx->rtl.gains[step] / 10.0,
+                mode_rc,
+                gain_rc,
+                rx->rtl.gain_steps);
+        rxDebugLogState(rx, "after-gain", gain_rc ? gain_rc : mode_rc);
+    }
     return step;
 }
 
@@ -792,19 +1021,22 @@ static void rx_stream_callback(uint8_t *buf, uint32_t len, void *ctx)
     if (!samples_read) return;
 
     // Waterfall IQ tap: copy raw IQ into ring buffer for spectrum display
-    if (rx->wf_tap_active && rx->wf_tap_buf) {
+    if (__atomic_load_n(&rx->wf_tap_active, __ATOMIC_ACQUIRE)) {
+        uint8_t *tap_buf = rx->wf_tap_buf;
         uint32_t sz = rx->wf_tap_size;
-        uint32_t wr = rx->wf_tap_wr;
-        uint32_t to_copy = len;
-        if (to_copy > sz) to_copy = sz;  // cap at buffer size
-        uint32_t first = sz - wr;
-        if (first >= to_copy) {
-            memcpy(rx->wf_tap_buf + wr, buf, to_copy);
-        } else {
-            memcpy(rx->wf_tap_buf + wr, buf, first);
-            memcpy(rx->wf_tap_buf, buf + first, to_copy - first);
+        if (tap_buf && sz > 0) {
+            uint32_t wr = rx->wf_tap_wr;
+            uint32_t to_copy = len;
+            if (to_copy > sz) to_copy = sz;  // cap at buffer size
+            uint32_t first = sz - wr;
+            if (first >= to_copy) {
+                memcpy(tap_buf + wr, buf, to_copy);
+            } else {
+                memcpy(tap_buf + wr, buf, first);
+                memcpy(tap_buf, buf + first, to_copy - first);
+            }
+            __atomic_store_n(&rx->wf_tap_wr, (wr + to_copy) % sz, __ATOMIC_RELEASE);
         }
-        __atomic_store_n(&rx->wf_tap_wr, (wr + to_copy) % sz, __ATOMIC_RELEASE);
     }
 
     // Dispatch to decoder_ops (all roles use this uniform path)
@@ -921,6 +1153,39 @@ bool rxOpen(sdr_receiver_t *rx)
         }
     }
 
+    char selected_serial[sizeof(rx->serial_actual)] = {0};
+
+    for (int32_t i = 0; i < dev_count; i++) {
+        if (devs[i].index == dev_index) {
+            strncpy(selected_serial, devs[i].serial, sizeof(selected_serial) - 1);
+            break;
+        }
+    }
+
+    /* FC0012 MUST use the rtlsdr backend.
+     * The sdrgg enumerate does not probe tuners (tuner_type = UNKNOWN),
+     * so we use the rtlsdr backend to probe the tuner type for this serial.
+     * If the device is FC0012, force rtlsdr which has proven RF reception. */
+    if (ops->type == SDR_BACKEND_SDRGG) {
+        const sdr_backend_ops_t *rtl_ops = sdrBackendGet(SDR_BACKEND_RTLSDR);
+        if (rtl_ops) {
+            sdr_dev_info_t rtl_devs[MAX_SDR_RECEIVERS];
+            int32_t rtl_count = rtl_ops->enumerate(rtl_devs, MAX_SDR_RECEIVERS);
+            for (int32_t i = 0; i < rtl_count; i++) {
+                if (strcmp(rtl_devs[i].serial, selected_serial) == 0 &&
+                    rtl_devs[i].tuner == SDR_TUNER_FC0012) {
+                    gg::eprint("rx[%d]: forcing backend rtlsdr for FC0012 serial %s\n",
+                               rx->id, selected_serial);
+                    ops = rtl_ops;
+                    rx->backend_ops = ops;
+                    dev_count = rtl_count;
+                    dev_index = rtl_devs[i].index;
+                    break;
+                }
+            }
+        }
+    }
+
     // Fill identity from enumeration info
     for (int32_t i = 0; i < dev_count; i++) {
         if (devs[i].index == dev_index) {
@@ -948,10 +1213,63 @@ bool rxOpen(sdr_receiver_t *rx)
     rx->rtl.dev = sdev->handle;  // legacy compat: keep raw handle in rtl.dev
     rx->rtl.tuner_type = (int32_t)sdev->tuner_type;
 
+    /*
+     * IMPORTANT RTL-SDR NOTE - DO NOT "RESET" direct sampling here.
+     *
+     * What MUST be done here:
+     * - If digital AGC is not requested, disable only digital AGC.
+     * - Call set_direct_sampling() ONLY when direct sampling was explicitly requested
+     *   by config and we really want to enter that mode.
+     *
+     * What MUST NOT be done here:
+     * - Do NOT call set_direct_sampling(dev, 0) as a generic baseline reset when
+     *   direct_sampling == 0.
+     *
+     * Why this warning exists:
+     * - On real R820T devices traced against stock rtl_adsb/rtl_sdr, that call is
+     *   NOT a harmless no-op.
+     * - Reintroducing it made librtlsdr flip through direct-sampling mode during open,
+     *   produced PLL-not-locked behaviour, and diverged from the stock startup
+     *   sequence that actually works.
+     * - This regression broke dump1090-gg's rtlsdr path even though stock tools and
+     *   the sdrgg backend were fine.
+     */
+    if (!rx->config.digital_agc) {
+        int32_t agc_rc = ops->set_agc(sdev, 0);
+        rxDebugLogState(rx, "set_agc(0)", agc_rc);
+    }
+
+    /* ================================================================
+     * FC0012 CRITICAL FIX — DO NOT REMOVE
+     * ================================================================
+     * FC0012 Zero-IF tuners NEED rtlsdr_set_direct_sampling(dev, 0)
+     * called after open. This is the ONLY place in librtlsdr that
+     * programs RTL2832U demod register page0:0x08 = 0xCD, which
+     * enables BOTH I and Q ADC channels for Zero-IF reception.
+     *
+     * WITHOUT this call:
+     *   - Only one ADC channel is active
+     *   - Gain changes return success but have NO effect on IQ data
+     *   - Frequency changes return success but spectrum doesn't move
+     *   - Waterfall shows identical noise regardless of settings
+     *
+     * This call is HARMFUL for R820T (triggers PLL-not-locked),
+     * so the tuner_type == SDR_TUNER_FC0012 guard is essential.
+     *
+     * If this code is accidentally removed, the FC0012 dongle
+     * appears to work (streaming OK, API calls return 0) but
+     * the RF front-end is effectively disconnected from the ADC.
+     * ================================================================ */
+    if (!rx->config.direct_sampling && sdev->tuner_type == SDR_TUNER_FC0012) {
+        int32_t ds_rc = ops->set_direct_sampling(sdev, 0);
+        rxDebugLogState(rx, "set_direct_sampling(0) for FC0012", ds_rc);
+    }
+
     // Gain setup
     if (rx->config.direct_sampling) {
         gg::eprint("rx[%d]: direct sampling from input %d\n", rx->id, rx->config.direct_sampling);
-        ops->set_direct_sampling(sdev, rx->config.direct_sampling);
+        int32_t ds_rc = ops->set_direct_sampling(sdev, rx->config.direct_sampling);
+        rxDebugLogState(rx, "set_direct_sampling", ds_rc);
         rx->rtl.gain_steps = 0;
     } else {
         int32_t numgains = ops->get_tuner_gains(sdev, NULL, 0);
@@ -961,7 +1279,9 @@ bool rxOpen(sdr_receiver_t *rx)
             return false;
         }
 
-        int32_t *gains = static_cast<int32_t*>(malloc((numgains + 1) * sizeof(int32_t)));
+        bool supports_tuner_agc = sdev->supports_tuner_agc;
+        int32_t gain_slots = numgains + (supports_tuner_agc ? 1 : 0);
+        int32_t *gains = static_cast<int32_t*>(malloc((size_t)gain_slots * sizeof(int32_t)));
         if (ops->get_tuner_gains(sdev, gains, numgains) != numgains) {
             gg::eprint("rx[%d]: error getting tuner gains\n", rx->id);
             free(gains);
@@ -971,22 +1291,38 @@ bool rxOpen(sdr_receiver_t *rx)
 
         qsort(gains, numgains, sizeof(gains[0]), rx_sort_gains);
 
-        // Fake entry at slightly higher than max: "tuner AGC enabled"
-        gains[numgains] = gains[numgains - 1] + 90;
-        rx->rtl.gain_steps = numgains + 1;
+        if (supports_tuner_agc) {
+            // Fake entry at slightly higher than max: "tuner AGC enabled"
+            gains[numgains] = gains[numgains - 1] + 90;
+        }
+        rx->rtl.gain_steps = gain_slots;
         rx->rtl.gains = gains;
 
         // Select gain step
         int32_t selected = -1;
         if (rx->config.gain == MODES_LEGACY_AUTO_GAIN) {
-            selected = numgains;  // AGC
+            selected = supports_tuner_agc ? numgains : (numgains - 1);
         } else if (rx->config.gain == MODES_DEFAULT_GAIN) {
             selected = numgains - 1;  // max manual gain
         } else {
-            for (int32_t i = 0; i <= numgains; ++i) {
+            for (int32_t i = 0; i < gain_slots; ++i) {
                 if (selected == -1 || fabs(gains[i] / 10.0 - rx->config.gain) < fabs(gains[selected] / 10.0 - rx->config.gain))
                     selected = i;
             }
+        }
+
+        if (rxDebugInitTrace(rx)) {
+            fprintf(stderr,
+                    "rx[%d]: DEBUG gain-table role=%s serial=%s requested_gain=%.1f numgains=%d gain_slots=%d supports_tuner_agc=%d selected=%d selected_db=%.1f\n",
+                    rx->id,
+                    sdrRoleName(rx->config.role),
+                    rx->serial_actual[0] ? rx->serial_actual : rx->config.serial,
+                    rx->config.gain,
+                    numgains,
+                    gain_slots,
+                    supports_tuner_agc,
+                    selected,
+                    gains[selected] / 10.0);
         }
 
         rxSetGain(rx, selected);
@@ -994,18 +1330,27 @@ bool rxOpen(sdr_receiver_t *rx)
 
     if (rx->config.digital_agc) {
         gg::eprint("rx[%d]: enabling digital AGC\n", rx->id);
-        ops->set_agc(sdev, 1);
+        int32_t agc_rc = ops->set_agc(sdev, 1);
+        rxDebugLogState(rx, "set_agc(1)", agc_rc);
     }
 
-    ops->set_freq_correction(sdev, rx->config.ppm_error);
-    ops->set_frequency(sdev, rx->config.freq);
-    if (ops->set_sample_rate(sdev, (uint32_t)rx->config.sample_rate) != 0) {
+    int32_t ppm_rc = ops->set_freq_correction(sdev, rx->config.ppm_error);
+    rxDebugLogState(rx, "set_freq_correction", ppm_rc);
+
+    int32_t freq_rc = ops->set_frequency(sdev, rx->config.freq);
+    rxDebugLogState(rx, "set_frequency(initial)", freq_rc);
+
+    int32_t rate_rc = ops->set_sample_rate(sdev, (uint32_t)rx->config.sample_rate);
+    rxDebugLogState(rx, "set_sample_rate(initial)", rate_rc);
+    if (rate_rc != 0) {
         fprintf(stderr, "rx[%d]: failed to set sample rate %.0f for role %s\n",
                 rx->id, rx->config.sample_rate, sdrRoleName(rx->config.role));
         rxClose(rx);
         return false;
     }
-    ops->reset_buffer(sdev);
+
+    int32_t reset_rc = ops->reset_buffer(sdev);
+    rxDebugLogState(rx, "reset_buffer", reset_rc);
 
     // Set decoder_ops for this role (uniform plugin interface)
     rx->decoder_ops = decoderOpsForRole(rx->config.role);
@@ -1018,7 +1363,8 @@ bool rxOpen(sdr_receiver_t *rx)
         }
         /* GSM init may change rx->config.freq (IF offset); retune if needed */
         if (ops->get_frequency(sdev) != (uint32_t)rx->config.freq) {
-            ops->set_frequency(sdev, rx->config.freq);
+            int32_t retune_rc = ops->set_frequency(sdev, rx->config.freq);
+            rxDebugLogState(rx, "set_frequency(post-init)", retune_rc);
         }
     } else if (rx->config.role != SDR_ROLE_NONE) {
         fprintf(stderr, "rx[%d]: no decoder_ops for role %s\n",
@@ -1033,6 +1379,19 @@ bool rxOpen(sdr_receiver_t *rx)
 
     fprintf(stderr, "rx[%d]: opened successfully (freq=%d, rate=%.0f, role=%s)\n",
             rx->id, rx->config.freq, rx->config.sample_rate, sdrRoleName(rx->config.role));
+
+    // Diagnostic: dump R820T baseline registers after init
+    if (rx->config.role == SDR_ROLE_ADSB || rx->config.role == SDR_ROLE_FLARM) {
+        rxDiagDumpR820T(rx, "POST_INIT_BASELINE");
+        rxDiagFullDump(rx, "POST_INIT_BASELINE");
+        if (rx->id < MAX_SDR_RECEIVERS) {
+            rx_health[rx->id].baseline_done = true;
+            rx_health[rx->id].last_check_time = mstime();
+            rx_health[rx->id].no_msg_seconds = 0;
+            rx_health[rx->id].dump_done = false;
+        }
+    }
+
     return true;
 }
 
@@ -1073,6 +1432,15 @@ static void *rx_reader_thread(void *arg)
         sdev = new_dev;
 
         // Reconfigure device
+        /*
+         * IMPORTANT: same rule as initial open.
+         * Do NOT reintroduce set_direct_sampling(dev, 0) here as a reopen/reset step.
+         * For R820T dongles that "reset" caused the same bad direct-sampling toggle
+         * seen during initial open and does not match stock rtl_sdr behaviour.
+         */
+        if (!rx->config.digital_agc) {
+            ops->set_agc(sdev, 0);
+        }
         ops->set_gain_mode(sdev, 1);
         if (rx->rtl.gains && rx->rtl.current_gain < rx->rtl.gain_steps)
             ops->set_gain(sdev, rx->rtl.gains[rx->rtl.current_gain]);
@@ -1277,11 +1645,12 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
     // Gain: find closest step
     if (rx->rtl.gains && rx->rtl.gain_steps > 0) {
         int32_t numgains = rx->rtl.gain_steps;
+        bool supports_tuner_agc = sdev->supports_tuner_agc;
         int32_t selected = -1;
         if (rx->config.gain == MODES_LEGACY_AUTO_GAIN) {
-            selected = numgains - 1;  // AGC (last = fake AGC entry)
+            selected = numgains - 1;
         } else if (rx->config.gain == MODES_DEFAULT_GAIN) {
-            selected = numgains - 2;  // max manual
+            selected = supports_tuner_agc ? (numgains - 2) : (numgains - 1);
         } else {
             for (int32_t i = 0; i < numgains; ++i) {
                 if (selected == -1 || fabs(rx->rtl.gains[i] / 10.0 - rx->config.gain) <
@@ -1543,12 +1912,15 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
         cfg.sample_rate = rx->config.sample_rate;
         cfg.callback = sonde_queue_cb;
         cfg.callback_ctx = ctx;
+        cfg.scan_enabled = (DecoderConfigs.radiosonde.freq_mode == SONDE_FREQ_MODE_SCAN);
+        cfg.scan_dwell_sec = DecoderConfigs.radiosonde.scan_dwell_sec;
 
         ctx->inner = sonde_create(&cfg);
         if (!ctx->inner) { msg_queue_destroy(ctx->queue); free(ctx); return false; }
         rx->decoder_state = ctx;
-        fprintf(stderr, "rx[%d]: Radiosonde decoder created, freq=%.3f MHz\n",
-                rx->id, cfg.center_freq / 1e6);
+        fprintf(stderr, "rx[%d]: Radiosonde decoder created, freq=%.3f MHz%s\n",
+                rx->id, cfg.center_freq / 1e6,
+                cfg.scan_enabled ? " (SCAN)" : "");
         return true;
     }
     case SDR_ROLE_POCSAG: {
@@ -1764,9 +2136,16 @@ void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, uint32_t len)
     case SDR_ROLE_VDL2:
         vdl2_process(((vdl2_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
-    case SDR_ROLE_RADIOSONDE:
-        sonde_process(((sonde_ctx_t *)rx->decoder_state)->inner, iq_data, len);
+    case SDR_ROLE_RADIOSONDE: {
+        sonde_ctx_t *ctx = (sonde_ctx_t *)rx->decoder_state;
+        sonde_process(ctx->inner, iq_data, len);
+        // Check if scanner requests a frequency hop
+        uint32_t scan_freq = sonde_get_scan_freq(ctx->inner);
+        if (scan_freq > 0) {
+            rx->pending_freq = scan_freq;
+        }
         break;
+    }
     case SDR_ROLE_POCSAG:
         pocsag_process(((pocsag_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
@@ -2853,8 +3232,96 @@ bool sdrManagerRemoveReceiver(int32_t index)
     return true;
 }
 
+// ======================== USB Device Reset ========================
+// Resets all RTL2832U USB devices via sysfs before opening.
+// Clears stale hardware state (e.g. direct sampling mode left by buggy librtlsdr)
+// that persists across normal open/close cycles and even USB soft resets.
+static void rxResetRtlUsbDevices(void)
+{
+    const char *sysfs = "/sys/bus/usb/devices";
+    DIR *d = opendir(sysfs);
+    if (!d) return;
+
+    int32_t reset_count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+
+        // Only look at top-level device entries (e.g. "1-1.1.4"), skip interfaces (contain ':')
+        if (strchr(ent->d_name, ':')) continue;
+
+        char path[512];
+
+        // Check idVendor = 0bda (Realtek)
+        snprintf(path, sizeof(path), "%s/%s/idVendor", sysfs, ent->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char vid[16] = {0};
+        if (fgets(vid, sizeof(vid), f)) {
+            vid[strcspn(vid, "\n")] = 0;
+        }
+        fclose(f);
+        if (strcmp(vid, "0bda") != 0) continue;
+
+        // Check idProduct = 2838 (RTL2832U)
+        snprintf(path, sizeof(path), "%s/%s/idProduct", sysfs, ent->d_name);
+        f = fopen(path, "r");
+        if (!f) continue;
+        char pid[16] = {0};
+        if (fgets(pid, sizeof(pid), f)) {
+            pid[strcspn(pid, "\n")] = 0;
+        }
+        fclose(f);
+        if (strcmp(pid, "2838") != 0) continue;
+
+        // Read serial for logging
+        char serial[128] = {0};
+        snprintf(path, sizeof(path), "%s/%s/serial", sysfs, ent->d_name);
+        f = fopen(path, "r");
+        if (f) {
+            if (fgets(serial, sizeof(serial), f)) {
+                serial[strcspn(serial, "\n")] = 0;
+            }
+            fclose(f);
+        }
+
+        // Deauthorize the device
+        snprintf(path, sizeof(path), "%s/%s/authorized", sysfs, ent->d_name);
+        f = fopen(path, "w");
+        if (!f) {
+            fprintf(stderr, "sdr_usb_reset: can't write %s: %s (need root?)\n", path, strerror(errno));
+            continue;
+        }
+        fputs("0\n", f);
+        fclose(f);
+
+        // Wait for USB bus to process the disconnection
+        usleep(200000); // 200ms
+
+        // Reauthorize the device
+        f = fopen(path, "w");
+        if (f) {
+            fputs("1\n", f);
+            fclose(f);
+            reset_count++;
+            fprintf(stderr, "sdr_usb_reset: reset %s (SN %s)\n", ent->d_name, serial);
+        }
+    }
+    closedir(d);
+
+    if (reset_count > 0) {
+        // Wait for USB re-enumeration to complete
+        fprintf(stderr, "sdr_usb_reset: reset %d RTL2832U device(s), waiting for re-enumeration...\n", reset_count);
+        usleep(2000000); // 2 seconds
+        fprintf(stderr, "sdr_usb_reset: ready\n");
+    }
+}
+
 int32_t sdrManagerOpenAll(void)
 {
+    // Reset all RTL2832U USB devices to clear stale hardware state
+    rxResetRtlUsbDevices();
+
     int32_t opened = 0;
     for (int32_t i = 0; i < SdrManager.count; i++) {
         if (SdrManager.receivers[i].state == RX_STATE_IDLE) {
@@ -3088,7 +3555,16 @@ int32_t sdrManagerLoad(void)
                         break;
                     case SDR_ROLE_ACARS:      cfg.freq = 131550000;  cfg.sample_rate = 2400000; break;
                     case SDR_ROLE_VDL2:       cfg.freq = 136975000;  cfg.sample_rate = 2400000; break;
-                    case SDR_ROLE_RADIOSONDE: cfg.freq = 403000000;  cfg.sample_rate = 2400000; break;
+                    case SDR_ROLE_RADIOSONDE:
+                        if (DecoderConfigs.radiosonde.freq_mode == SONDE_FREQ_MODE_SCAN) {
+                            cfg.freq = 401000000;  // scan starts at 401 MHz
+                        } else {
+                            cfg.freq = (uint32_t)DecoderConfigs.radiosonde.center_freq;
+                            if (cfg.freq < 400000000 || cfg.freq > 406000000)
+                                cfg.freq = 403000000;
+                        }
+                        cfg.sample_rate = 2400000;
+                        break;
                     case SDR_ROLE_POCSAG:     cfg.freq = 466075000;  cfg.sample_rate = 1200000; break;
                     case SDR_ROLE_GSM:        cfg.freq = 947000000;  cfg.sample_rate = 1000000; break;
                     case SDR_ROLE_LTE:        cfg.freq = LTE_DEFAULT_FREQ; cfg.sample_rate = LTE_SAMPLE_RATE; break;

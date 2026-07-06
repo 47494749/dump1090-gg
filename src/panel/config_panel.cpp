@@ -90,8 +90,8 @@ static void http_send_json(int32_t fd, const char *json, int32_t len);
 
 #define STATS_HISTORY_MAX_ENTRIES  129600 // 90 days at 60s interval (~12 MB)
 #define STATS_HISTORY_FILE        "/etc/dump1090-gg/stats_history.dat"
-#define STATS_HISTORY_MAGIC       0x53483031  // "SH01"
-#define STATS_HISTORY_VERSION     1
+#define STATS_HISTORY_MAGIC       0x53483032  // "SH02"
+#define STATS_HISTORY_VERSION     2
 #define STATS_HISTORY_SAVE_INTERVAL 10  // save every N snapshots
 
 struct stats_snapshot {
@@ -135,6 +135,9 @@ struct stats_snapshot {
     uint32_t stratux_out_kb;
     uint32_t raw_in_kb;
     uint32_t beast_in_kb;
+    // Per-receiver raw sample counters (cumulative, for USB throughput chart)
+    uint64_t rx_samples[8];  // sample_counter per receiver slot
+    uint8_t  rx_count;       // active receivers at snapshot time
 };
 
 struct stats_file_header {
@@ -396,6 +399,15 @@ static void statsHistoryTakeSnapshot(void)
             snap.beast_in_kb = in_kb;
     }
 
+    // --- Per-receiver raw sample counters ---
+    {
+        int32_t n = SdrManager.count;
+        if (n > 8) n = 8;
+        snap.rx_count = (uint8_t)n;
+        for (int32_t i = 0; i < n; i++)
+            snap.rx_samples[i] = SdrManager.receivers[i].sample_counter;
+    }
+
     pthread_mutex_lock(&StatsHistory.mutex);
     StatsHistory.ring[StatsHistory.head] = snap;
     StatsHistory.head = (StatsHistory.head + 1) % StatsHistory.max_entries;
@@ -422,7 +434,7 @@ static void api_get_stats_history(int32_t fd)
     int32_t max_e = StatsHistory.max_entries;
 
     // Pre-calculate buffer size for serialized snapshots.
-    size_t buf_cap = (size_t)count * 320 + 1024;
+    size_t buf_cap = (size_t)count * 480 + 1024;
     char *buf = (char *)malloc(buf_cap);
     if (!buf) {
         pthread_mutex_unlock(&StatsHistory.mutex);
@@ -432,11 +444,25 @@ static void api_get_stats_history(int32_t fd)
 
     int32_t pos = 0;
     pos += snprintf(buf + pos, buf_cap - (size_t)pos,
-        "{\"config\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_s\":%d,\"entries\":%d},\"snapshots\":[",
+        "{\"config\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_s\":%d,\"entries\":%d}",
         StatsHistory.enabled ? "true" : "false",
         StatsHistory.retention_hours,
         StatsHistory.interval_s,
         count);
+
+    // Receiver metadata for chart labeling
+    pos += snprintf(buf + pos, buf_cap - (size_t)pos, ",\"receivers\":[");
+    for (int32_t r = 0; r < SdrManager.count && r < 8; r++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[r];
+        if (r > 0) buf[pos++] = ',';
+        pos += snprintf(buf + pos, buf_cap - (size_t)pos,
+            "{\"serial\":\"%s\",\"role\":\"%s\",\"rate\":%u}",
+            rx->config.serial, sdrRoleName(rx->config.role),
+            (uint32_t)rx->config.sample_rate);
+    }
+    buf[pos++] = ']';
+
+    pos += snprintf(buf + pos, buf_cap - (size_t)pos, ",\"snapshots\":[");
 
     // Read ring buffer in chronological order
     int32_t start = (count < max_e) ? 0 : StatsHistory.head;
@@ -458,7 +484,7 @@ static void api_get_stats_history(int32_t fd)
             ",\"tro\":%" PRIu32 ",\"tbc\":%" PRIu32
             ",\"tbv\":%" PRIu32 ",\"tbl\":%" PRIu32
             ",\"tbs\":%" PRIu32 ",\"tst\":%" PRIu32
-            ",\"tri\":%" PRIu32 ",\"tbi\":%" PRIu32 "}",
+            ",\"tri\":%" PRIu32 ",\"tbi\":%" PRIu32,
             s->ts,
             s->cpu_u, s->cpu_s,
             s->rss, s->mem_avail,
@@ -473,6 +499,16 @@ static void api_get_stats_history(int32_t fd)
             s->beast_verbatim_out_kb, s->beast_verbatim_local_out_kb,
             s->basestation_out_kb, s->stratux_out_kb,
             s->raw_in_kb, s->beast_in_kb);
+        // Per-receiver samples array
+        if (s->rx_count > 0) {
+            pos += snprintf(buf + pos, buf_cap - (size_t)pos, ",\"rs\":[");
+            for (int32_t r = 0; r < s->rx_count && r < 8; r++) {
+                if (r > 0) buf[pos++] = ',';
+                pos += snprintf(buf + pos, buf_cap - (size_t)pos, "%" PRIu64, s->rx_samples[r]);
+            }
+            buf[pos++] = ']';
+        }
+        buf[pos++] = '}';
     }
 
     pos += snprintf(buf + pos, buf_cap - (size_t)pos, "]}");
@@ -1240,7 +1276,10 @@ static struct wf_state WF = { .ws_fd = -1, .rx_id = -1, .owned = false, .tap_buf
 static void wf_stop_tap(void) {
     if (WF.rx_id >= 0 && WF.rx_id < SdrManager.count) {
         sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
-        rx->wf_tap_active = 0;
+        __atomic_store_n(&rx->wf_tap_active, 0, __ATOMIC_RELEASE);
+        // Allow any in-flight streaming callback to complete before
+        // clearing the buffer pointer (prevents use-after-free)
+        usleep(5000);
         rx->wf_tap_buf = NULL;
         rx->wf_tap_size = 0;
     }
@@ -1306,8 +1345,9 @@ static void wf_disconnect(void) {
         close(WF.ws_fd);
         WF.ws_fd = -1;
     }
-    free(WF.tap_buf);
-    WF.tap_buf = NULL;
+    // Don't free tap_buf here — keep it allocated for reuse.
+    // Freeing while a streaming thread might still be completing a
+    // memcpy causes use-after-free crashes.
 }
 
 // Start tapping a receiver (observe mode - decoder keeps running)
@@ -1315,8 +1355,7 @@ static bool wf_start_tap(int32_t rx_id) {
     if (rx_id < 0 || rx_id >= SdrManager.count) return false;
     sdr_receiver_t *rx = &SdrManager.receivers[rx_id];
     if (rx->state != RX_STATE_RUNNING) return false;
-    // Only allow sdrgg backend
-    if (!rx->backend_ops || rx->backend_ops->type != SDR_BACKEND_SDRGG) return false;
+    if (!rx->backend_ops) return false;
 
     wf_stop_tap(); // stop any existing tap
 
@@ -1488,6 +1527,25 @@ static void wf_process_and_send(void) {
         rd = (wr + sz - WF_FFT_SIZE * 2) % sz;
     }
 
+    // Raw IQ diagnostic: print actual ADC sample statistics every 100 frames
+    static uint32_t iq_diag_count = 0;
+    if (++iq_diag_count % 100 == 0) {
+        float sum_i = 0, sum_q = 0, sum_i2 = 0, sum_q2 = 0;
+        for (int32_t j = 0; j < WF_FFT_SIZE; j++) {
+            uint32_t idx = (rd + j * 2) % sz;
+            float sI = (float)WF.tap_buf[idx];
+            float sQ = (float)WF.tap_buf[(idx + 1) % sz];
+            sum_i += sI; sum_q += sQ;
+            sum_i2 += sI * sI; sum_q2 += sQ * sQ;
+        }
+        float mean_i = sum_i / WF_FFT_SIZE;
+        float mean_q = sum_q / WF_FFT_SIZE;
+        float var_i = sum_i2 / WF_FFT_SIZE - mean_i * mean_i;
+        float var_q = sum_q2 / WF_FFT_SIZE - mean_q * mean_q;
+        fprintf(stderr, "iq-diag: mean_I=%.1f mean_Q=%.1f rms_I=%.1f rms_Q=%.1f (N=%d)\n",
+                mean_i, mean_q, sqrtf(var_i > 0 ? var_i : 0), sqrtf(var_q > 0 ? var_q : 0), WF_FFT_SIZE);
+    }
+
     wf_init_tables();
     float re[WF_FFT_SIZE], im[WF_FFT_SIZE];
     for (int32_t i = 0; i < WF_FFT_SIZE; i++) {
@@ -1504,17 +1562,21 @@ static void wf_process_and_send(void) {
 
     // Compute power spectrum in dB, reorder (DC in center)
     uint8_t spectrum[WF_FFT_SIZE];
+    float avg_db = 0.0f;
+    const float fft_norm = 1.0f / (float)(WF_FFT_SIZE * WF_FFT_SIZE);
     for (int32_t i = 0; i < WF_FFT_SIZE; i++) {
         // Reorder: move DC to center
         int32_t fi = (i + WF_FFT_SIZE / 2) % WF_FFT_SIZE;
-        float pwr = re[fi] * re[fi] + im[fi] * im[fi];
+        float pwr = (re[fi] * re[fi] + im[fi] * im[fi]) * fft_norm;
         float db = 10.0f * log10f(pwr + 1e-10f);
+        avg_db += db;
         // Map dB range [-60, 0] to [0, 255]
         float val = (db + 60.0f) * (255.0f / 60.0f);
         if (val < 0.0f) val = 0.0f;
         if (val > 255.0f) val = 255.0f;
         spectrum[i] = (uint8_t)val;
     }
+    avg_db /= WF_FFT_SIZE;
 
     // Send as binary WebSocket frame
     if (!ws_send_binary(WF.ws_fd, spectrum, WF_FFT_SIZE)) {
@@ -1561,7 +1623,7 @@ static void wf_handle_message(const char *msg, int32_t len) {
             rlen += snprintf(resp + rlen, sizeof(resp) - rlen, "]}");
             ws_send_text(WF.ws_fd, resp, rlen);
         } else {
-            const char *e = "{\"status\":\"error\",\"msg\":\"Cannot tap receiver (not sdrgg or not running)\"}";
+            const char *e = "{\"status\":\"error\",\"msg\":\"Cannot tap receiver (not running)\"}";
             ws_send_text(WF.ws_fd, e, (int32_t)strlen(e));
         }
     } else if (strcmp(cmd, "stop") == 0) {
@@ -1627,7 +1689,7 @@ static void wf_handle_message(const char *msg, int32_t len) {
 static void wf_handle_ws_read(void) {
     if (WF.ws_fd < 0) return;
     uint8_t buf[1024];
-    uint8_t opcode;
+    uint8_t opcode = 0;
     int32_t plen = ws_read_frame(WF.ws_fd, buf, sizeof(buf) - 1, &opcode);
     if (plen < 0) {
         wf_disconnect();
@@ -3458,7 +3520,17 @@ static void rx_set_freq_for_role(rx_config_t *cfg)
         case SDR_ROLE_FLARM:      cfg->freq = 868300000;  cfg->sample_rate = 1600000; break;
         case SDR_ROLE_ACARS:      cfg->freq = 131550000;  cfg->sample_rate = 2400000; break;
         case SDR_ROLE_VDL2:       cfg->freq = 136975000;  cfg->sample_rate = 2400000; break;
-        case SDR_ROLE_RADIOSONDE: cfg->freq = 403000000;  cfg->sample_rate = 2400000; break;
+        case SDR_ROLE_RADIOSONDE: {
+            if (DecoderConfigs.radiosonde.freq_mode == SONDE_FREQ_MODE_SCAN) {
+                cfg->freq = 401000000;  // scan starts at 401 MHz
+            } else {
+                cfg->freq = (uint32_t)DecoderConfigs.radiosonde.center_freq;
+                if (cfg->freq < 400000000 || cfg->freq > 406000000)
+                    cfg->freq = 403000000;
+            }
+            cfg->sample_rate = 2400000;
+            break;
+        }
         case SDR_ROLE_POCSAG:     cfg->freq = 466150000;  cfg->sample_rate = POCSAG_SAMPLE_RATE; break;
         case SDR_ROLE_GSM:        cfg->freq = 947000000;  cfg->sample_rate = 1000000;  break;
         case SDR_ROLE_LTE:        cfg->freq = LTE_DEFAULT_FREQ; cfg->sample_rate = LTE_SAMPLE_RATE; break;
@@ -3876,6 +3948,13 @@ static void api_post_receiver_assign(int32_t fd, const char *body)
         fprintf(stderr, "panel: reassigning rx[%d] %s -> %s\n",
                 idx, sdrRoleName(rx->config.role), sdrRoleName(role));
 
+        // If waterfall is tapping this receiver, stop the tap first to
+        // prevent use-after-free when rxStop/rxStart cycles the streaming thread
+        if (WF.rx_id == idx) {
+            panelLog("Panel: stopping waterfall tap on rx[%d] before reassign", idx);
+            wf_stop_tap();
+        }
+
         // Sync FlarmConfig before reconfigure
         if (rx->config.role == SDR_ROLE_FLARM && role != SDR_ROLE_FLARM)
             FlarmConfig.enabled = 0;
@@ -4060,13 +4139,16 @@ static void api_get_decoders(int32_t fd)
     buf += sfmt(
         "\"radiosonde\":{\"enabled\":%s,\"sondehub_upload\":%s,"
         "\"radiosondy_upload\":%s,\"wettersonde_upload\":%s,"
-        "\"callsign\":\"%s\",\"center_freq\":%.0f},\n",
+        "\"callsign\":\"%s\",\"center_freq\":%.0f,"
+        "\"freq_mode\":%d,\"scan_dwell_sec\":%d},\n",
         DecoderConfigs.radiosonde.enabled ? "true" : "false",
         DecoderConfigs.radiosonde.sondehub_upload ? "true" : "false",
         DecoderConfigs.radiosonde.radiosondy_upload ? "true" : "false",
         DecoderConfigs.radiosonde.wettersonde_upload ? "true" : "false",
         DecoderConfigs.radiosonde.callsign,
-        DecoderConfigs.radiosonde.center_freq);
+        DecoderConfigs.radiosonde.center_freq,
+        DecoderConfigs.radiosonde.freq_mode,
+        DecoderConfigs.radiosonde.scan_dwell_sec);
 
     // POCSAG decoder config
     buf += sfmt("\"pocsag\":{\"enabled\":%s,\"output_enabled\":%s,\"center_freq\":%.0f,\"channels\":[",
@@ -4326,7 +4408,9 @@ static void serve_gsm_page(int32_t fd)
         "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
         "</style></head><body>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
-        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4366,7 +4450,7 @@ static void serve_gsm_page(int32_t fd)
         "      document.getElementById('content').innerHTML="
         "        '<div class=\"no-gsm\"><h3>&#x1f4f6; GSM Scanner Disabled</h3>'"
         "        +'<p>The GSM decoder is currently disabled.</p>'"
-        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/config.html\">Config</a> page.</p></div>';"
         "      document.getElementById('cell-count').textContent='';"
         "      return;"
         "    }"
@@ -4504,7 +4588,9 @@ static void serve_lte_page(int32_t fd)
         "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
         "</style></head><body>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
-        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4548,7 +4634,7 @@ static void serve_lte_page(int32_t fd)
         "      document.getElementById('content').innerHTML="
         "        '<div class=\"no-lte\"><h3>&#x1f4f6; LTE Scanner Disabled</h3>'"
         "        +'<p>The LTE decoder is currently disabled.</p>'"
-        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/config.html\">Config</a> page.</p></div>';"
         "      document.getElementById('cell-count').textContent='';"
         "      return;"
         "    }"
@@ -4690,7 +4776,9 @@ static void serve_iot868_page(int32_t fd)
         "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
         "</style></head><body>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
-        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4734,7 +4822,7 @@ static void serve_iot868_page(int32_t fd)
         "      document.getElementById('content').innerHTML="
         "        '<div class=\"no-data\"><h3>&#x1f321;&#xfe0f; IoT 868 MHz Scanner Disabled</h3>'"
         "        +'<p>The IoT 868 MHz decoder is currently disabled.</p>'"
-        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/config.html\">Config</a> page.</p></div>';"
         "      document.getElementById('dev-count').textContent='';"
         "      return;"
         "    }"
@@ -4865,7 +4953,9 @@ static void serve_fanet_page(int32_t fd)
         "@media(max-width:768px){.stats{grid-template-columns:1fr 1fr}}"
         "</style></head><body>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
-        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4907,7 +4997,7 @@ static void serve_fanet_page(int32_t fd)
         "      document.getElementById('content').innerHTML="
         "        '<div class=\"no-data\"><h3>&#x1f6a9; FANET Decoder Disabled</h3>'"
         "        +'<p>The FANET decoder is currently disabled (output muted).</p>'"
-        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/\">Config</a> page.</p></div>';"
+        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/config.html\">Config</a> page.</p></div>';"
         "      document.getElementById('status-badge').innerHTML='<span style=\"color:var(--warn)\">&#x1f7e1; Disabled</span>';"
         "      return;"
         "    }"
@@ -5125,7 +5215,9 @@ static void serve_devices_page(int32_t fd)
         ".state-stopping{color:#ff9800}"
         "</style></head><body>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
-        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -5513,7 +5605,9 @@ static void serve_diagnostics_page(int32_t fd)
         ".pll-fail{color:#ff4444}"
         "</style></head><body>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
-        "<a href='/'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -5933,6 +6027,10 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
     if (method_sv == "GET") {
         if (path_sv == "/" || path_sv == "/index.html") {
             serve_file(fd, "index.html");
+        } else if (path_sv == "/config.html" || path_sv == "/config") {
+            serve_file(fd, "config.html");
+        } else if (path_sv == "/feeders.html" || path_sv == "/feeders") {
+            serve_file(fd, "feeders.html");
         } else if (path_sv == "/api/config") {
             api_get_config(fd);
         } else if (path_sv == "/api/status") {
@@ -6187,6 +6285,50 @@ static void *panel_thread_entry(void *arg)
                             WF.last_frame_ms = 0;
                             client_fd = -1; // prevent close below
                             panelLog("Panel: Waterfall WebSocket client connected");
+                            // Process any leftover data after HTTP headers as a WS frame.
+                            // The greedy read() may have consumed data beyond \r\n\r\n.
+                            const char *hdr_end = strstr(reqbuf.c_str(), "\r\n\r\n");
+                            if (hdr_end) {
+                                int32_t hdr_len = (int32_t)(hdr_end + 4 - reqbuf.c_str());
+                                int32_t leftover = total - hdr_len;
+                                if (leftover > 0) {
+                                    // Push leftover bytes back to socket via unread simulation:
+                                    // Simplest fix: just call wf_handle_ws_read immediately
+                                    // since the data is already in the kernel recv buffer... 
+                                    // Actually, the data was read() out of the socket — it's gone.
+                                    // We need to process it directly here.
+                                    uint8_t *ws_data = (uint8_t*)(reqbuf.data() + hdr_len);
+                                    if (leftover >= 2) {
+                                        uint8_t opcode = ws_data[0] & 0x0F;
+                                        bool masked = (ws_data[1] & 0x80) != 0;
+                                        int32_t plen = ws_data[1] & 0x7F;
+                                        int32_t frame_hdr = 2 + (masked ? 4 : 0) + (plen == 126 ? 2 : 0);
+                                        if (plen == 126 && leftover >= 4) {
+                                            plen = (ws_data[2] << 8) | ws_data[3];
+                                        }
+                                        if (leftover >= frame_hdr + plen) {
+                                            uint8_t mask[4] = {0};
+                                            int32_t payload_off = 2 + (plen >= 126 ? 2 : 0);
+                                            if (masked) {
+                                                memcpy(mask, ws_data + payload_off, 4);
+                                                payload_off += 4;
+                                            }
+                                            uint8_t msg[1024];
+                                            if (plen < (int32_t)sizeof(msg)) {
+                                                memcpy(msg, ws_data + payload_off, plen);
+                                                if (masked) {
+                                                    for (int32_t i = 0; i < plen; i++)
+                                                        msg[i] ^= mask[i & 3];
+                                                }
+                                                msg[plen] = '\0';
+                                                if (opcode == 0x01) {
+                                                    wf_handle_message((const char*)msg, plen);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         } else {
                             http_send(client_fd, 400, "text/plain", "Bad handshake", 13);
                         }

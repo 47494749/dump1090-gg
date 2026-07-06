@@ -53,7 +53,9 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 <nav>
 <h1>✈ dump1090-gg-light</h1>
 <div class="tabs">
-<a href="/">⚙️ Config</a>
+<a href="/">🗺️ Map</a>
+<a href="/config.html">⚙️ Config</a>
+<a href="/feeders.html">📡 Feeders</a>
 <a href="/status.html">📡 Status</a>
 <a href="/connections.html">🔌 Connections</a>
 <a href="/logs.html">📋 Logs</a>
@@ -267,13 +269,18 @@ function updateGainSlider(gains) {
     gainList = gains || [];
     var slider = document.getElementById('gain-slider');
     if (gainList.length > 0) {
-        slider.min = 0;
+        slider.min = Math.round(gainList[0] * 10);
         slider.max = Math.round(gainList[gainList.length - 1] * 10);
         slider.step = 1;
     } else {
-        slider.min = 0;
+        slider.min = -100;
         slider.max = 500;
     }
+    // Clamp current value to new range and update label
+    var v = parseInt(slider.value);
+    if (v < parseInt(slider.min)) slider.value = slider.min;
+    if (v > parseInt(slider.max)) slider.value = slider.max;
+    document.getElementById('gain-val').textContent = (slider.value / 10).toFixed(1) + ' dB';
 }
 
 function connectWS() {

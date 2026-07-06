@@ -75,6 +75,8 @@ void decoderConfigInit(void)
     DecoderConfigs.radiosonde.radiosondy_upload = false;
     DecoderConfigs.radiosonde.wettersonde_upload = false;
     DecoderConfigs.radiosonde.center_freq = 403000000;
+    DecoderConfigs.radiosonde.freq_mode = SONDE_FREQ_MODE_FIXED;
+    DecoderConfigs.radiosonde.scan_dwell_sec = 5;
 
     // POCSAG defaults
     DecoderConfigs.pocsag.enabled = true;
@@ -119,16 +121,17 @@ static void skip_ws(const char **p) { while (**p && isspace((uint8_t)**p)) (*p)+
 
 static bool match_key(const char **p, const char *key)
 {
+    const char *save = *p;
     skip_ws(p);
-    if (**p != '"') return false;
+    if (**p != '"') { *p = save; return false; }
     (*p)++;
     size_t klen = strlen(key);
-    if (strncmp(*p, key, klen) != 0) return false;
+    if (strncmp(*p, key, klen) != 0) { *p = save; return false; }
     *p += klen;
-    if (**p != '"') return false;
+    if (**p != '"') { *p = save; return false; }
     (*p)++;
     skip_ws(p);
-    if (**p != ':') return false;
+    if (**p != ':') { *p = save; return false; }
     (*p)++;
     skip_ws(p);
     return true;
@@ -394,6 +397,8 @@ static void parse_radiosonde(const char **p)
         else if (match_key(p, "wettersonde_upload")) DecoderConfigs.radiosonde.wettersonde_upload = parse_bool(p);
         else if (match_key(p, "callsign")) parse_string(p, DecoderConfigs.radiosonde.callsign, sizeof(DecoderConfigs.radiosonde.callsign));
         else if (match_key(p, "center_freq")) DecoderConfigs.radiosonde.center_freq = parse_number(p);
+        else if (match_key(p, "freq_mode")) DecoderConfigs.radiosonde.freq_mode = (int32_t)parse_number(p);
+        else if (match_key(p, "scan_dwell_sec")) DecoderConfigs.radiosonde.scan_dwell_sec = (int32_t)parse_number(p);
         else { skip_value(p); }
     }
     if (**p == '}') (*p)++;
@@ -648,7 +653,9 @@ bool decoderConfigSave(void)
     gg::fprint(f, "    \"radiosondy_upload\": %s,\n", DecoderConfigs.radiosonde.radiosondy_upload ? "true" : "false");
     gg::fprint(f, "    \"wettersonde_upload\": %s,\n", DecoderConfigs.radiosonde.wettersonde_upload ? "true" : "false");
     gg::fprint(f, "    \"callsign\": \"%s\",\n", DecoderConfigs.radiosonde.callsign);
-    gg::fprint(f, "    \"center_freq\": %.0f\n", DecoderConfigs.radiosonde.center_freq);
+    gg::fprint(f, "    \"center_freq\": %.0f,\n", DecoderConfigs.radiosonde.center_freq);
+    gg::fprint(f, "    \"freq_mode\": %d,\n", DecoderConfigs.radiosonde.freq_mode);
+    gg::fprint(f, "    \"scan_dwell_sec\": %d\n", DecoderConfigs.radiosonde.scan_dwell_sec);
     gg::fprint(f, "  },\n");
 
     // POCSAG

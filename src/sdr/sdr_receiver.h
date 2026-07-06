@@ -331,6 +331,9 @@ int32_t rxGetMaxGain(sdr_receiver_t *rx);
 double rxGetGainDb(sdr_receiver_t *rx, int32_t step);
 int32_t rxSetGain(sdr_receiver_t *rx, int32_t step);
 
+// Diagnostic: periodic health check for receiver RF (call from backgroundTasks)
+void rxDiagHealthCheck(void);
+
 // ======================== Utility ========================
 
 // Enumerate connected RTL-SDR devices, return count.

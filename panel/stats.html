@@ -61,7 +61,9 @@ tr:hover td{background:var(--hover)}
 </head>
 <body>
 <nav><h1>&#x2708; dump1090-gg-light</h1><div class="tabs">
-<a href="/">&#x2699;&#xfe0f; Config</a>
+<a href="/">&#x1f5fa;&#xfe0f; Map</a>
+<a href="/config.html">&#x2699;&#xfe0f; Config</a>
+<a href="/feeders.html">&#x1f4e1; Feeders</a>
 <a href="/status.html">&#x1f4e1; Status</a>
 <a href="/connections.html">&#x1f50c; Connections</a>
 <a href="/logs.html">&#x1f4cb; Logs</a>
@@ -111,9 +113,11 @@ var chartColors={
     trafficRawOut:'#29b6f6', trafficBeastCooked:'#ab47bc',
     trafficBeastVerbatim:'#ef5350', trafficBeastLocal:'#ffa726',
     trafficBasestation:'#66bb6a', trafficStratux:'#8d6e63',
-    trafficRawIn:'#26c6da', trafficBeastIn:'#ec407a'
+    trafficRawIn:'#26c6da', trafficBeastIn:'#ec407a',
+    dongle:['#4fc3f7','#66bb6a','#ff9800','#ec407a','#7e57c2','#26c6da','#d4e157','#8d6e63']
 };
 var chartInstances={};
+var receiverMeta=[];
 var prevChartHash='';
 var historyBounds={min:null,max:null};
 var historyIntervalMs=60000;
@@ -361,6 +365,24 @@ function computeRatePerSecond(snapshots,key){
     return rates;
 }
 
+function computeDongleRate(snapshots,idx){
+    // Compute per-dongle sample rate in Msps from cumulative rs[] array
+    var rates=[];
+    for(var i=1;i<snapshots.length;i++){
+        var dt=(snapshots[i].t-snapshots[i-1].t)/1000;
+        if(dt<=0)continue;
+        if((snapshots[i].t-snapshots[i-1].t)>gapThresholdMs){
+            rates.push({x:new Date(snapshots[i-1].t+1),y:null});
+        }
+        var cur=snapshots[i].rs?snapshots[i].rs[idx]:0;
+        var prev=snapshots[i-1].rs?snapshots[i-1].rs[idx]:0;
+        if(!cur||!prev){rates.push({x:new Date(snapshots[i].t),y:null});continue;}
+        var dv=cur-prev;
+        rates.push({x:new Date(snapshots[i].t),y:dt>0?Math.max(0,dv/dt/1e6):0});
+    }
+    return rates;
+}
+
 function instantValues(snapshots,key){
     var vals=[];
     for(var i=0;i<snapshots.length;i++){
@@ -412,6 +434,9 @@ function buildCharts(hist){
     snaps=hist.snapshots;
     setHistoryBounds(snaps,hist.config.interval_s);
 
+    // Store receiver metadata for chart labels
+    if(hist.receivers)receiverMeta=hist.receivers;
+
     hasAdsb=snaps.some(function(s){return s.am>0;});
     hasFlarm=snaps.some(function(s){return s.fd>0||s.fc>0;});
     hasAcars=snaps.some(function(s){return s.ad>0;});
@@ -422,8 +447,9 @@ function buildCharts(hist){
     hasLte=snaps.some(function(s){return s.lm>0;});
     hasFanet=snaps.some(function(s){return s.nd>0;});
     hasSarsat=snaps.some(function(s){return s.sf>0;});
+    var hasDongle=snaps.some(function(s){return s.rs&&s.rs.length>0;});
 
-    hash=[hasAdsb,hasFlarm,hasAcars,hasVdl2,hasSonde,hasPocsag,hasGsm,hasLte,hasFanet,hasSarsat].join(',');
+    hash=[hasAdsb,hasFlarm,hasAcars,hasVdl2,hasSonde,hasPocsag,hasGsm,hasLte,hasFanet,hasSarsat,hasDongle].join(',');
     if(hash===prevChartHash){
         updateChartsData(hist);
         return;
@@ -437,6 +463,7 @@ function buildCharts(hist){
 
     html='';
     html+=chartContainerHTML('ch-traffic','Port Traffic (KB/s)');
+    if(hasDongle)html+=chartContainerHTML('ch-dongle','Dongle Throughput (Msps)');
     html+='<div class="chart-row">';
     html+=chartContainerHTML('ch-cpu','CPU Usage (rate per minute)');
     html+=chartContainerHTML('ch-mem','Memory');
@@ -479,6 +506,15 @@ function buildCharts(hist){
     bindToolbarEvents();
 
     chartInstances['ch-traffic']=makeChart('ch-traffic',trafficSeries.map(formatTrafficLabel),trafficSeries.map(function(s){return s.color;}),'KB/s',{noZero:true});
+    if(hasDongle){
+        var dlabels=[],dcolors=[];
+        for(var d=0;d<receiverMeta.length;d++){
+            var rm=receiverMeta[d];
+            dlabels.push('rx['+d+'] '+rm.serial+' ('+rm.role+')');
+            dcolors.push(chartColors.dongle[d%chartColors.dongle.length]);
+        }
+        chartInstances['ch-dongle']=makeChart('ch-dongle',dlabels,dcolors,'Msps');
+    }
     chartInstances['ch-cpu']=makeChart('ch-cpu',['User CPU','System CPU'],[chartColors.cpu,chartColors.cpuSys],'CPU s/min');
     chartInstances['ch-mem']=makeChart('ch-mem',['RSS','Available'],[chartColors.rss,chartColors.memAvail],'MB');
 
@@ -511,6 +547,13 @@ function updateChartsData(hist){
             ds.borderDash=trafficSeries[i].dir==='IN'?[6,3]:[];
         });
         chartInstances['ch-traffic'].update(mode);
+    }
+    if(chartInstances['ch-dongle']){
+        var nRx=chartInstances['ch-dongle'].data.datasets.length;
+        for(var d=0;d<nRx;d++){
+            chartInstances['ch-dongle'].data.datasets[d].data=computeDongleRate(snaps,d);
+        }
+        chartInstances['ch-dongle'].update(mode);
     }
     if(chartInstances['ch-cpu']){
         chartInstances['ch-cpu'].data.datasets[0].data=computeRates(snaps,'cu');
