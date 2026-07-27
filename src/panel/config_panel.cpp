@@ -423,18 +423,162 @@ static void statsHistoryTakeSnapshot(void)
     pthread_mutex_unlock(&StatsHistory.mutex);
 }
 
-static void api_get_stats_history(int32_t fd)
+static int64_t parse_query_int64(const char *query, const char *key, int64_t def)
 {
-    // Take a snapshot now if due
+    if (!query) return def;
+    size_t klen = strlen(key);
+    const char *p = query;
+    while ((p = strstr(p, key)) != NULL) {
+        char before = (p > query) ? *(p - 1) : '?';
+        if ((before == '?' || before == '&') && p[klen] == '=')
+            return strtoll(p + klen + 1, NULL, 10);
+        p += klen;
+    }
+    return def;
+}
+
+static void serialize_snapshot(char *buf, size_t buf_cap, int32_t *pos, struct stats_snapshot *s)
+{
+    *pos += snprintf(buf + *pos, buf_cap - (size_t)*pos,
+        "{\"t\":%" PRIu64
+        ",\"cu\":%.1f,\"cs\":%.1f"
+        ",\"rss\":%" PRIu32 ",\"ma\":%" PRIu32
+        ",\"am\":%" PRIu32 ",\"at\":%" PRIu32
+        ",\"an\":%.1f,\"as\":%.1f,\"ag\":%d"
+        ",\"fd\":%" PRIu32 ",\"fc\":%" PRIu32
+        ",\"ad\":%" PRIu32 ",\"vd\":%" PRIu32
+        ",\"sd\":%" PRIu32 ",\"pd\":%" PRIu32
+        ",\"gb\":%" PRIu32 ",\"lm\":%" PRIu32
+        ",\"nd\":%" PRIu32 ",\"sf\":%" PRIu32
+        ",\"tro\":%" PRIu32 ",\"tbc\":%" PRIu32
+        ",\"tbv\":%" PRIu32 ",\"tbl\":%" PRIu32
+        ",\"tbs\":%" PRIu32 ",\"tst\":%" PRIu32
+        ",\"tri\":%" PRIu32 ",\"tbi\":%" PRIu32,
+        s->ts,
+        s->cpu_u, s->cpu_s,
+        s->rss, s->mem_avail,
+        s->adsb_msg, s->adsb_trk,
+        s->adsb_noise, s->adsb_signal, (int32_t)s->adsb_gain,
+        s->flarm_det, s->flarm_dec,
+        s->acars_dec, s->vdl2_dec,
+        s->sonde_dec, s->pocsag_dec,
+        s->gsm_bcch, s->lte_mib,
+        s->fanet_dec, s->sarsat_frm,
+        s->raw_out_kb, s->beast_cooked_out_kb,
+        s->beast_verbatim_out_kb, s->beast_verbatim_local_out_kb,
+        s->basestation_out_kb, s->stratux_out_kb,
+        s->raw_in_kb, s->beast_in_kb);
+    if (s->rx_count > 0) {
+        *pos += snprintf(buf + *pos, buf_cap - (size_t)*pos, ",\"rs\":[");
+        for (int32_t r = 0; r < s->rx_count && r < 8; r++) {
+            if (r > 0) buf[(*pos)++] = ',';
+            *pos += snprintf(buf + *pos, buf_cap - (size_t)*pos, "%" PRIu64, s->rx_samples[r]);
+        }
+        buf[(*pos)++] = ']';
+    }
+    buf[(*pos)++] = '}';
+}
+
+static void avg_snapshots(struct stats_snapshot *out, struct stats_snapshot *arr, int32_t n)
+{
+    if (n <= 0) return;
+    memset(out, 0, sizeof(*out));
+    out->ts = arr[n - 1].ts;
+    double cu = 0, cs = 0, an = 0, as_ = 0;
+    uint64_t rss = 0, ma = 0, am = 0, at = 0, fd = 0, fc = 0;
+    uint64_t ad = 0, vd = 0, sd = 0, pd = 0, gb = 0, lm = 0, nd = 0, sf = 0;
+    uint64_t tro = 0, tbc = 0, tbv = 0, tbl = 0, tbs = 0, tst = 0, tri = 0, tbi = 0;
+    int32_t ag_sum = 0;
+    double rx_sum[8] = {0};
+    int32_t max_rx = 0;
+    for (int32_t i = 0; i < n; i++) {
+        cu += arr[i].cpu_u; cs += arr[i].cpu_s;
+        rss += arr[i].rss; ma += arr[i].mem_avail;
+        am += arr[i].adsb_msg; at += arr[i].adsb_trk;
+        an += arr[i].adsb_noise; as_ += arr[i].adsb_signal;
+        ag_sum += arr[i].adsb_gain;
+        fd += arr[i].flarm_det; fc += arr[i].flarm_dec;
+        ad += arr[i].acars_dec; vd += arr[i].vdl2_dec;
+        sd += arr[i].sonde_dec; pd += arr[i].pocsag_dec;
+        gb += arr[i].gsm_bcch; lm += arr[i].lte_mib;
+        nd += arr[i].fanet_dec; sf += arr[i].sarsat_frm;
+        tro += arr[i].raw_out_kb; tbc += arr[i].beast_cooked_out_kb;
+        tbv += arr[i].beast_verbatim_out_kb; tbl += arr[i].beast_verbatim_local_out_kb;
+        tbs += arr[i].basestation_out_kb; tst += arr[i].stratux_out_kb;
+        tri += arr[i].raw_in_kb; tbi += arr[i].beast_in_kb;
+        if (arr[i].rx_count > max_rx) max_rx = arr[i].rx_count;
+        for (int32_t r = 0; r < arr[i].rx_count && r < 8; r++)
+            rx_sum[r] += (double)arr[i].rx_samples[r];
+    }
+    // For cumulative counters (used for rate computation), take last value
+    out->cpu_u = arr[n - 1].cpu_u; out->cpu_s = arr[n - 1].cpu_s;
+    out->adsb_msg = arr[n - 1].adsb_msg;
+    out->flarm_det = arr[n - 1].flarm_det; out->flarm_dec = arr[n - 1].flarm_dec;
+    out->acars_dec = arr[n - 1].acars_dec; out->vdl2_dec = arr[n - 1].vdl2_dec;
+    out->sonde_dec = arr[n - 1].sonde_dec; out->pocsag_dec = arr[n - 1].pocsag_dec;
+    out->gsm_bcch = arr[n - 1].gsm_bcch; out->lte_mib = arr[n - 1].lte_mib;
+    out->fanet_dec = arr[n - 1].fanet_dec; out->sarsat_frm = arr[n - 1].sarsat_frm;
+    out->raw_out_kb = arr[n - 1].raw_out_kb; out->beast_cooked_out_kb = arr[n - 1].beast_cooked_out_kb;
+    out->beast_verbatim_out_kb = arr[n - 1].beast_verbatim_out_kb;
+    out->beast_verbatim_local_out_kb = arr[n - 1].beast_verbatim_local_out_kb;
+    out->basestation_out_kb = arr[n - 1].basestation_out_kb; out->stratux_out_kb = arr[n - 1].stratux_out_kb;
+    out->raw_in_kb = arr[n - 1].raw_in_kb; out->beast_in_kb = arr[n - 1].beast_in_kb;
+    // For instantaneous values, take average
+    out->rss = (uint32_t)(rss / n); out->mem_avail = (uint32_t)(ma / n);
+    out->adsb_trk = (uint32_t)(at / n);
+    out->adsb_noise = (float)(an / n); out->adsb_signal = (float)(as_ / n);
+    out->adsb_gain = (int16_t)(ag_sum / n);
+    // Per-receiver samples: take last value (cumulative)
+    out->rx_count = (uint8_t)max_rx;
+    for (int32_t r = 0; r < max_rx && r < 8; r++)
+        out->rx_samples[r] = arr[n - 1].rx_samples[r];
+}
+
+static void api_get_stats_history(int32_t fd, const char *full_path)
+{
+    // Parse query string parameters: from, to, max_points
+    const char *query = strchr(full_path, '?');
+    int64_t q_from = parse_query_int64(query, "from", 0);
+    int64_t q_to = parse_query_int64(query, "to", 0);
+    int32_t q_max_points = (int32_t)parse_query_int64(query, "max_points", 0);
+
     statsHistoryTakeSnapshot();
 
     pthread_mutex_lock(&StatsHistory.mutex);
 
     int32_t count = StatsHistory.count;
     int32_t max_e = StatsHistory.max_entries;
+    int32_t ring_start = (count < max_e) ? 0 : StatsHistory.head;
 
-    // Pre-calculate buffer size for serialized snapshots.
-    size_t buf_cap = (size_t)count * 480 + 1024;
+    // Determine time range: sliding window from now
+    uint64_t now_ms = StatsHistory.last_sample_ms;
+    if (now_ms == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+    }
+    uint64_t range_from = q_from > 0 ? (uint64_t)q_from : (now_ms - (uint64_t)StatsHistory.retention_hours * 3600000ULL);
+    uint64_t range_to = q_to > 0 ? (uint64_t)q_to : now_ms;
+
+    // Count entries in range
+    int32_t range_count = 0;
+    int32_t first_in_range = -1;
+    for (int32_t i = 0; i < count; i++) {
+        int32_t idx = (ring_start + i) % max_e;
+        uint64_t t = StatsHistory.ring[idx].ts;
+        if (t >= range_from && t <= range_to) {
+            if (first_in_range < 0) first_in_range = i;
+            range_count++;
+        }
+    }
+
+    // Determine downsampling
+    int32_t max_pts = (q_max_points > 0 && q_max_points < range_count) ? q_max_points : range_count;
+    int32_t bucket_size = (max_pts > 0) ? (range_count + max_pts - 1) / max_pts : 1;
+    if (bucket_size < 1) bucket_size = 1;
+    int32_t out_count = (range_count > 0 && bucket_size > 0) ? (range_count + bucket_size - 1) / bucket_size : 0;
+
+    size_t buf_cap = (size_t)out_count * 480 + 1024;
     char *buf = (char *)malloc(buf_cap);
     if (!buf) {
         pthread_mutex_unlock(&StatsHistory.mutex);
@@ -442,15 +586,18 @@ static void api_get_stats_history(int32_t fd)
         return;
     }
 
+    int32_t effective_interval = StatsHistory.interval_s * bucket_size;
+
     int32_t pos = 0;
     pos += snprintf(buf + pos, buf_cap - (size_t)pos,
-        "{\"config\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_s\":%d,\"entries\":%d}",
+        "{\"config\":{\"enabled\":%s,\"retention_hours\":%d,\"interval_s\":%d,\"effective_interval_s\":%d,\"entries\":%d}",
         StatsHistory.enabled ? "true" : "false",
         StatsHistory.retention_hours,
         StatsHistory.interval_s,
-        count);
+        effective_interval,
+        out_count);
 
-    // Receiver metadata for chart labeling
+    // Receiver metadata
     pos += snprintf(buf + pos, buf_cap - (size_t)pos, ",\"receivers\":[");
     for (int32_t r = 0; r < SdrManager.count && r < 8; r++) {
         sdr_receiver_t *rx = &SdrManager.receivers[r];
@@ -464,51 +611,31 @@ static void api_get_stats_history(int32_t fd)
 
     pos += snprintf(buf + pos, buf_cap - (size_t)pos, ",\"snapshots\":[");
 
-    // Read ring buffer in chronological order
-    int32_t start = (count < max_e) ? 0 : StatsHistory.head;
-    for (int32_t i = 0; i < count && (size_t)pos < buf_cap - 256; i++) {
-        int32_t idx = (start + i) % max_e;
-        struct stats_snapshot *s = &StatsHistory.ring[idx];
-        if (i > 0) buf[pos++] = ',';
-        pos += snprintf(buf + pos, buf_cap - (size_t)pos,
-            "{\"t\":%" PRIu64
-            ",\"cu\":%.1f,\"cs\":%.1f"
-            ",\"rss\":%" PRIu32 ",\"ma\":%" PRIu32
-            ",\"am\":%" PRIu32 ",\"at\":%" PRIu32
-            ",\"an\":%.1f,\"as\":%.1f,\"ag\":%d"
-            ",\"fd\":%" PRIu32 ",\"fc\":%" PRIu32
-            ",\"ad\":%" PRIu32 ",\"vd\":%" PRIu32
-            ",\"sd\":%" PRIu32 ",\"pd\":%" PRIu32
-            ",\"gb\":%" PRIu32 ",\"lm\":%" PRIu32
-            ",\"nd\":%" PRIu32 ",\"sf\":%" PRIu32
-            ",\"tro\":%" PRIu32 ",\"tbc\":%" PRIu32
-            ",\"tbv\":%" PRIu32 ",\"tbl\":%" PRIu32
-            ",\"tbs\":%" PRIu32 ",\"tst\":%" PRIu32
-            ",\"tri\":%" PRIu32 ",\"tbi\":%" PRIu32,
-            s->ts,
-            s->cpu_u, s->cpu_s,
-            s->rss, s->mem_avail,
-            s->adsb_msg, s->adsb_trk,
-            s->adsb_noise, s->adsb_signal, (int32_t)s->adsb_gain,
-            s->flarm_det, s->flarm_dec,
-            s->acars_dec, s->vdl2_dec,
-            s->sonde_dec, s->pocsag_dec,
-            s->gsm_bcch, s->lte_mib,
-            s->fanet_dec, s->sarsat_frm,
-            s->raw_out_kb, s->beast_cooked_out_kb,
-            s->beast_verbatim_out_kb, s->beast_verbatim_local_out_kb,
-            s->basestation_out_kb, s->stratux_out_kb,
-            s->raw_in_kb, s->beast_in_kb);
-        // Per-receiver samples array
-        if (s->rx_count > 0) {
-            pos += snprintf(buf + pos, buf_cap - (size_t)pos, ",\"rs\":[");
-            for (int32_t r = 0; r < s->rx_count && r < 8; r++) {
-                if (r > 0) buf[pos++] = ',';
-                pos += snprintf(buf + pos, buf_cap - (size_t)pos, "%" PRIu64, s->rx_samples[r]);
+    if (range_count > 0 && first_in_range >= 0) {
+        struct stats_snapshot *bucket = (struct stats_snapshot *)malloc((size_t)bucket_size * sizeof(struct stats_snapshot));
+        int32_t emitted = 0;
+        int32_t in_bucket = 0;
+
+        for (int32_t i = 0; i < range_count && (size_t)pos < buf_cap - 512; i++) {
+            int32_t idx = (ring_start + first_in_range + i) % max_e;
+            if (bucket) {
+                bucket[in_bucket++] = StatsHistory.ring[idx];
             }
-            buf[pos++] = ']';
+            if (in_bucket >= bucket_size || i == range_count - 1) {
+                struct stats_snapshot avg;
+                if (bucket_size == 1 || !bucket) {
+                    if (emitted > 0) buf[pos++] = ',';
+                    serialize_snapshot(buf, buf_cap, &pos, &StatsHistory.ring[idx]);
+                } else {
+                    avg_snapshots(&avg, bucket, in_bucket);
+                    if (emitted > 0) buf[pos++] = ',';
+                    serialize_snapshot(buf, buf_cap, &pos, &avg);
+                }
+                in_bucket = 0;
+                emitted++;
+            }
         }
-        buf[pos++] = '}';
+        free(bucket);
     }
 
     pos += snprintf(buf + pos, buf_cap - (size_t)pos, "]}");
@@ -4411,6 +4538,7 @@ static void serve_gsm_page(int32_t fd)
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
+        "<a href='/sharing.html'>&#x1f517; Sharing</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4591,6 +4719,7 @@ static void serve_lte_page(int32_t fd)
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
+        "<a href='/sharing.html'>&#x1f517; Sharing</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4779,6 +4908,7 @@ static void serve_iot868_page(int32_t fd)
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
+        "<a href='/sharing.html'>&#x1f517; Sharing</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -4956,6 +5086,7 @@ static void serve_fanet_page(int32_t fd)
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
+        "<a href='/sharing.html'>&#x1f517; Sharing</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -5218,6 +5349,7 @@ static void serve_devices_page(int32_t fd)
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
+        "<a href='/sharing.html'>&#x1f517; Sharing</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -5608,6 +5740,7 @@ static void serve_diagnostics_page(int32_t fd)
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
         "<a href='/feeders.html'>&#x1f4e1; Feeders</a>"
+        "<a href='/sharing.html'>&#x1f517; Sharing</a>"
         "<a href='/status.html'>&#x1f4e1; Status</a>"
         "<a href='/connections.html'>&#x1f50c; Connections</a>"
         "<a href='/logs.html'>&#x1f4cb; Logs</a>"
@@ -6003,6 +6136,478 @@ static void api_post_calibrate_ppm(int32_t fd, const char *body)
     }
 }
 
+// ============================= Sharing Programs ============================
+
+#define SHARING_CONFIG_PATH "/etc/dump1090-gg/sharing.json"
+#define SHARING_MAX_PROGRAMS 16
+
+struct sharing_program_t {
+    const char *id;
+    const char *name;
+    const char *binary;
+    const char *config_file;
+    const char *service;
+    const char *protocol;
+    bool detected;
+    bool running;
+    bool enabled;
+    bool excluded;
+    bool monitor;
+    char version[64];
+    char connection_host[128];
+    int32_t connection_port;
+};
+
+static sharing_program_t SharingPrograms[] = {
+    {"fr24feed",      "FlightRadar24",    "/usr/bin/fr24feed",                         "/etc/fr24feed.ini",              "fr24feed",          "beast", false,false,false,false,false, {0},{0},30005},
+    {"pfclient",      "PlaneFinder",      "/usr/bin/pfclient",                         "/etc/pfclient-config.json",      "pfclient",          "beast", false,false,false,false,false, {0},{0},30005},
+    {"rbfeeder",      "RadarBox",         "/usr/bin/rbfeeder",                         "/etc/rbfeeder.ini",              "rbfeeder",          "beast", false,false,false,false,false, {0},{0},30005},
+    {"piaware",       "FlightAware",      "/usr/bin/piaware",                          "/etc/piaware.conf",              "piaware",           "beast", false,false,false,false,false, {0},{0},30005},
+    {"adsbx-feed",    "ADS-B Exchange",   "/usr/local/share/adsbexchange/feed-adsbx",  "/etc/default/adsbexchange",      "adsbexchange-feed", "beast", false,false,false,false,false, {0},{0},30005},
+    {"adsbfi-feed",   "adsb.fi",          "/usr/local/share/adsbfi/readsb",            "/etc/default/adsbfi",            "adsbfi-feed",       "beast", false,false,false,false,false, {0},{0},30005},
+    {"adsblol-feed",  "adsb.lol",         "/usr/local/share/adsblol/readsb",           "/etc/default/adsblol",           "adsblol-feed",      "beast", false,false,false,false,false, {0},{0},30005},
+    {"opensky",       "OpenSky Network",  "/usr/lib/openskyd/openskyd-dump1090",       "/etc/openskyd/conf.d/10-dump1090.conf", "openskyd",   "beast", false,false,false,false,false, {0},{0},30005},
+    {"mlat-client",   "MLAT Client",      "/usr/bin/mlat-client",                      "",                               "mlat-client",       "beast", false,false,false,false,false, {0},{0},30005},
+    {"acarsdec",      "ACARS Decoder",    "/usr/local/bin/acarsdec",                   "/etc/default/acarsdec",          "acarsdec",          "rtlsdr",false,false,false,false,false, {0},{0},0},
+    {"dumpvdl2",      "VDL2 Decoder",     "/usr/local/bin/dumpvdl2",                   "/etc/default/dumpvdl2",          "dumpvdl2",          "rtlsdr",false,false,false,false,false, {0},{0},0},
+    {"dumphfdl",      "HFDL Decoder",     "/usr/local/bin/dumphfdl",                   "/etc/default/dumphfdl",          "dumphfdl",          "rtlsdr",false,false,false,false,false, {0},{0},0},
+    {"auto_rx",       "Radiosonde",       "/home/pi/radiosonde_auto_rx/auto_rx/auto_rx.py", "",                          "auto_rx",           "rtlsdr",false,false,false,false,false, {0},{0},0},
+    {"ais-catcher",   "AIS Marine",       "/usr/local/bin/AIS-catcher",                "",                               "ais-catcher",       "rtlsdr",false,false,false,false,false, {0},{0},0},
+    {"rtl-ais",       "AIS (rtl-ais)",    "/usr/bin/rtl_ais",                          "",                               "rtl-ais",           "rtlsdr",false,false,false,false,false, {0},{0},0},
+    {"ogn-rf",        "OGN/FLARM",        "/home/pi/ogn/ogn-rf",                       "",                               "ogn-rf",            "rtlsdr",false,false,false,false,false, {0},{0},0},
+};
+
+static const int32_t SharingProgramCount = sizeof(SharingPrograms) / sizeof(SharingPrograms[0]);
+static pthread_mutex_t sharing_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool sharing_loaded = false;
+
+static bool sharing_file_exists(const char *path) {
+    struct stat st;
+    return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
+}
+
+static void sharing_run_cmd(const char *cmd, char *out, int32_t outsz) {
+    out[0] = '\0';
+    FILE *f = popen(cmd, "r");
+    if (!f) return;
+    if (fgets(out, outsz, f)) {
+        int32_t len = (int32_t)strlen(out);
+        while (len > 0 && (out[len-1] == '\n' || out[len-1] == '\r')) out[--len] = '\0';
+    }
+    pclose(f);
+}
+
+static void sharing_load_config(void) {
+    if (sharing_loaded) return;
+    sharing_loaded = true;
+
+    FILE *f = fopen(SHARING_CONFIG_PATH, "r");
+    if (!f) return;
+
+    fseek(f, 0, SEEK_END);
+    int64_t sz = ftell(f);
+    if (sz <= 0 || sz > 65536) { fclose(f); return; }
+    rewind(f);
+
+    char *data = static_cast<char*>(malloc((size_t)sz + 1));
+    if (!data) { fclose(f); return; }
+    size_t rd = fread(data, 1, (size_t)sz, f);
+    fclose(f);
+    data[rd] = '\0';
+
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        char search[128];
+        snprintf(search, sizeof(search), "\"%s\"", SharingPrograms[i].id);
+        const char *entry = strstr(data, search);
+        if (!entry) continue;
+
+        const char *en = strstr(entry, "\"enabled\"");
+        if (en) {
+            const char *v = en + 9;
+            while (*v == ' ' || *v == ':') v++;
+            SharingPrograms[i].enabled = (strncmp(v, "true", 4) == 0);
+        }
+        const char *ex = strstr(entry, "\"excluded\"");
+        if (ex) {
+            const char *v = ex + 10;
+            while (*v == ' ' || *v == ':') v++;
+            SharingPrograms[i].excluded = (strncmp(v, "true", 4) == 0);
+        }
+        const char *mo = strstr(entry, "\"monitor\"");
+        if (mo) {
+            const char *v = mo + 9;
+            while (*v == ' ' || *v == ':') v++;
+            SharingPrograms[i].monitor = (strncmp(v, "true", 4) == 0);
+        }
+    }
+    free(data);
+}
+
+static bool sharing_save_config(void) {
+    // Build JSON in memory
+    std::string json;
+    json += "{\"programs\":[\n";
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        char line[256];
+        snprintf(line, sizeof(line), "%s  {\"%s\":{\"enabled\":%s,\"excluded\":%s,\"monitor\":%s}}",
+                 i > 0 ? ",\n" : "",
+                 SharingPrograms[i].id,
+                 SharingPrograms[i].enabled ? "true" : "false",
+                 SharingPrograms[i].excluded ? "true" : "false",
+                 SharingPrograms[i].monitor ? "true" : "false");
+        json += line;
+    }
+    json += "\n]}\n";
+
+    // Write via sudo tee (config dir is root-owned)
+    FILE *p = popen("sudo -n tee " SHARING_CONFIG_PATH " >/dev/null 2>&1", "w");
+    if (!p) return false;
+    fwrite(json.c_str(), 1, json.size(), p);
+    int rc = pclose(p);
+    return (rc == 0);
+}
+
+static void sharing_scan_system(void) {
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        sharing_program_t *p = &SharingPrograms[i];
+
+        p->detected = sharing_file_exists(p->binary);
+
+        p->running = false;
+        if (p->detected && p->service[0]) {
+            char cmd[256], out[64];
+            snprintf(cmd, sizeof(cmd), "systemctl is-active %s 2>/dev/null", p->service);
+            sharing_run_cmd(cmd, out, sizeof(out));
+            p->running = (strcmp(out, "active") == 0);
+        }
+
+        p->version[0] = '\0';
+        if (p->detected) {
+            char cmd[512], out[64];
+            if (strcmp(p->id, "fr24feed") == 0) {
+                snprintf(cmd, sizeof(cmd), "%s --version 2>&1 | head -1", p->binary);
+            } else if (strcmp(p->id, "pfclient") == 0) {
+                snprintf(cmd, sizeof(cmd), "dpkg -s pfclient 2>/dev/null | grep Version | cut -d' ' -f2");
+            } else if (strcmp(p->id, "rbfeeder") == 0) {
+                snprintf(cmd, sizeof(cmd), "dpkg -s rbfeeder 2>/dev/null | grep Version | cut -d' ' -f2");
+            } else if (strcmp(p->id, "piaware") == 0) {
+                snprintf(cmd, sizeof(cmd), "piaware -v 2>&1 | head -1");
+            } else {
+                snprintf(cmd, sizeof(cmd), "%s --version 2>&1 | head -1", p->binary);
+            }
+            sharing_run_cmd(cmd, out, sizeof(out));
+            snprintf(p->version, sizeof(p->version), "%.63s", out);
+        }
+
+        p->connection_host[0] = '\0';
+        p->connection_port = 0;
+        if (p->detected && p->config_file[0] && sharing_file_exists(p->config_file)) {
+            char cmd[512], out[128];
+            if (strcmp(p->id, "fr24feed") == 0) {
+                snprintf(cmd, sizeof(cmd), "grep -i 'host=' %s 2>/dev/null | head -1 | cut -d'=' -f2", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) snprintf(p->connection_host, sizeof(p->connection_host), "%.127s", out);
+                snprintf(cmd, sizeof(cmd), "grep -i 'port=' %s 2>/dev/null | head -1 | cut -d'=' -f2", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) p->connection_port = atoi(out);
+            } else if (strcmp(p->id, "rbfeeder") == 0) {
+                snprintf(cmd, sizeof(cmd), "grep -i 'host=' %s 2>/dev/null | head -1 | cut -d'=' -f2", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) snprintf(p->connection_host, sizeof(p->connection_host), "%.127s", out);
+                snprintf(cmd, sizeof(cmd), "grep -i 'port=' %s 2>/dev/null | head -1 | cut -d'=' -f2", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) p->connection_port = atoi(out);
+            } else if (strcmp(p->id, "pfclient") == 0) {
+                snprintf(cmd, sizeof(cmd), "grep -o '\"address\":\"[^\"]*\"' %s 2>/dev/null | head -1 | cut -d'\"' -f4", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) snprintf(p->connection_host, sizeof(p->connection_host), "%.127s", out);
+                snprintf(cmd, sizeof(cmd), "grep -o '\"port\":[0-9]*' %s 2>/dev/null | head -1 | cut -d':' -f2", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) p->connection_port = atoi(out);
+            } else if (strcmp(p->id, "piaware") == 0) {
+                snprintf(cmd, sizeof(cmd), "grep -i 'receiver_host' %s 2>/dev/null | awk '{print $2}'", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) snprintf(p->connection_host, sizeof(p->connection_host), "%.127s", out);
+                snprintf(cmd, sizeof(cmd), "grep -i 'receiver_port' %s 2>/dev/null | awk '{print $2}'", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) p->connection_port = atoi(out);
+            } else if (strstr(p->config_file, "/etc/default/")) {
+                snprintf(cmd, sizeof(cmd), "grep -i 'INPUT=' %s 2>/dev/null | head -1 | cut -d'=' -f2 | tr -d '\"'", p->config_file);
+                sharing_run_cmd(cmd, out, sizeof(out));
+                if (out[0]) {
+                    char *colon = strchr(out, ':');
+                    if (colon) {
+                        *colon = '\0';
+                        snprintf(p->connection_host, sizeof(p->connection_host), "%.127s", out);
+                        p->connection_port = atoi(colon + 1);
+                    } else {
+                        snprintf(p->connection_host, sizeof(p->connection_host), "%.127s", out);
+                    }
+                }
+            }
+        }
+        if (!p->connection_host[0] && p->detected && strcmp(p->protocol, "beast") == 0) {
+            snprintf(p->connection_host, sizeof(p->connection_host), "127.0.0.1");
+            p->connection_port = 30005;
+        }
+    }
+}
+
+// ---- Periodic sharing monitor (hourly) ----
+
+static uint64_t sharing_last_monitor_ms = 0;
+#define SHARING_MONITOR_INTERVAL_MS  3600000ULL  // 1 hour
+
+static void sharing_monitor_check(void) {
+    pthread_mutex_lock(&sharing_mutex);
+    sharing_load_config();
+    sharing_scan_system();
+
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        sharing_program_t *p = &SharingPrograms[i];
+        if (!p->monitor || !p->detected || p->excluded) continue;
+        if (p->running) continue;
+
+        // Program is monitored, detected, not excluded, and not running — restart it
+        char cmd[256], out[64];
+        snprintf(cmd, sizeof(cmd), "sudo -n systemctl restart %s 2>&1", p->service);
+        sharing_run_cmd(cmd, out, sizeof(out));
+
+        // Verify it actually started
+        snprintf(cmd, sizeof(cmd), "systemctl is-active %s 2>/dev/null", p->service);
+        sharing_run_cmd(cmd, out, sizeof(out));
+        p->running = (strcmp(out, "active") == 0);
+
+        if (p->running) {
+            panelLog("Sharing monitor: restarted %s (%s)", p->name, p->service);
+        } else {
+            panelLog("Sharing monitor: FAILED to restart %s (%s)", p->name, p->service);
+        }
+    }
+    pthread_mutex_unlock(&sharing_mutex);
+}
+
+static void api_get_sharing(int32_t fd) {
+    pthread_mutex_lock(&sharing_mutex);
+    sharing_load_config();
+    sharing_scan_system();
+
+    std::string buf;
+    buf.reserve(4096);
+    buf += "{\"programs\":[";
+
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        sharing_program_t *p = &SharingPrograms[i];
+        if (i > 0) buf += ",";
+        char e1[256], e2[256], e3[256], e4[256];
+        buf += sfmt(
+            "{\"id\":\"%s\",\"name\":\"%s\",\"binary\":\"%s\","
+            "\"config_file\":\"%s\",\"service\":\"%s\",\"protocol\":\"%s\","
+            "\"detected\":%s,\"running\":%s,\"enabled\":%s,"
+            "\"excluded\":%s,\"monitor\":%s,"
+            "\"version\":\"%s\",\"connection_host\":\"%s\",\"connection_port\":%d}",
+            p->id, p->name,
+            json_escape(e1, sizeof(e1), p->binary),
+            json_escape(e2, sizeof(e2), p->config_file),
+            p->service, p->protocol,
+            p->detected ? "true" : "false",
+            p->running ? "true" : "false",
+            p->enabled ? "true" : "false",
+            p->excluded ? "true" : "false",
+            p->monitor ? "true" : "false",
+            json_escape(e3, sizeof(e3), p->version),
+            json_escape(e4, sizeof(e4), p->connection_host),
+            p->connection_port);
+    }
+
+    buf += "]}";
+    pthread_mutex_unlock(&sharing_mutex);
+    http_send_json(fd, buf.c_str(), (int32_t)buf.size());
+}
+
+static void api_post_sharing_scan(int32_t fd) {
+    pthread_mutex_lock(&sharing_mutex);
+    sharing_scan_system();
+    pthread_mutex_unlock(&sharing_mutex);
+    http_send_json(fd, "{\"ok\":true}", 11);
+}
+
+static void api_post_sharing_config(int32_t fd, const char *body) {
+    pthread_mutex_lock(&sharing_mutex);
+
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        char key[128];
+        snprintf(key, sizeof(key), "\"%s\"", SharingPrograms[i].id);
+        const char *entry = strstr(body, key);
+        if (!entry) continue;
+
+        const char *en = strstr(entry, "\"enabled\"");
+        if (en) {
+            const char *v = en + 9;
+            while (*v == ' ' || *v == ':') v++;
+            SharingPrograms[i].enabled = (strncmp(v, "true", 4) == 0);
+        }
+        const char *ex = strstr(entry, "\"excluded\"");
+        if (ex) {
+            const char *v = ex + 10;
+            while (*v == ' ' || *v == ':') v++;
+            SharingPrograms[i].excluded = (strncmp(v, "true", 4) == 0);
+        }
+        const char *mo = strstr(entry, "\"monitor\"");
+        if (mo) {
+            const char *v = mo + 9;
+            while (*v == ' ' || *v == ':') v++;
+            SharingPrograms[i].monitor = (strncmp(v, "true", 4) == 0);
+        }
+    }
+
+    bool saved = sharing_save_config();
+    pthread_mutex_unlock(&sharing_mutex);
+    if (saved)
+        http_send_json(fd, "{\"ok\":true}", 11);
+    else
+        http_send_json(fd, "{\"ok\":false,\"error\":\"save failed (permissions?)\"}", 52);
+}
+
+static void api_post_sharing_apply(int32_t fd, const char *body) {
+    const char *id_key = strstr(body, "\"id\"");
+    if (!id_key) {
+        http_send(fd, 400, "application/json", "{\"error\":\"missing id\"}", 21);
+        return;
+    }
+    const char *v = strchr(id_key + 4, '"');
+    if (!v) { http_send(fd, 400, "application/json", "{\"error\":\"bad id\"}", 17); return; }
+    v++;
+    const char *e = strchr(v, '"');
+    if (!e || (e - v) > 63) { http_send(fd, 400, "application/json", "{\"error\":\"bad id\"}", 17); return; }
+
+    char id[64] = {0};
+    memcpy(id, v, e - v);
+
+    pthread_mutex_lock(&sharing_mutex);
+    sharing_program_t *prog = NULL;
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        if (strcmp(SharingPrograms[i].id, id) == 0) { prog = &SharingPrograms[i]; break; }
+    }
+
+    if (!prog || !prog->detected) {
+        pthread_mutex_unlock(&sharing_mutex);
+        http_send(fd, 404, "application/json", "{\"error\":\"not found\"}", 20);
+        return;
+    }
+
+    char cmd[512];
+    bool ok = false;
+
+    if (strcmp(id, "fr24feed") == 0) {
+        snprintf(cmd, sizeof(cmd),
+            "sudo -n sed -i 's/^host=.*/host=\"127.0.0.1\"/' %s 2>/dev/null && "
+            "sudo -n sed -i 's/^bs=.*/bs=127.0.0.1:30005/' %s 2>/dev/null && echo OK",
+            prog->config_file, prog->config_file);
+    } else if (strcmp(id, "rbfeeder") == 0) {
+        snprintf(cmd, sizeof(cmd),
+            "sudo -n sed -i 's/^host=.*/host=127.0.0.1/' %s 2>/dev/null && "
+            "sudo -n sed -i 's/^port=.*/port=30005/' %s 2>/dev/null && echo OK",
+            prog->config_file, prog->config_file);
+    } else if (strcmp(id, "pfclient") == 0) {
+        snprintf(cmd, sizeof(cmd),
+            "sudo -n sed -i 's/\"address\":\"[^\"]*\"/\"address\":\"127.0.0.1\"/' %s 2>/dev/null && "
+            "sudo -n sed -i 's/\"port\":[0-9]*/\"port\":30005/' %s 2>/dev/null && echo OK",
+            prog->config_file, prog->config_file);
+    } else if (strcmp(id, "piaware") == 0) {
+        snprintf(cmd, sizeof(cmd),
+            "sudo -n sed -i '/receiver_host/d' %s 2>/dev/null && echo 'receiver_host 127.0.0.1' | sudo -n tee -a %s >/dev/null && "
+            "sudo -n sed -i '/receiver_port/d' %s 2>/dev/null && echo 'receiver_port 30005' | sudo -n tee -a %s >/dev/null && echo OK",
+            prog->config_file, prog->config_file, prog->config_file, prog->config_file);
+    } else if (strstr(prog->config_file, "/etc/default/")) {
+        snprintf(cmd, sizeof(cmd),
+            "sudo -n sed -i 's/^INPUT=.*/INPUT=\"127.0.0.1:30005\"/' %s 2>/dev/null && echo OK",
+            prog->config_file);
+    } else {
+        pthread_mutex_unlock(&sharing_mutex);
+        http_send_json(fd, "{\"ok\":false,\"error\":\"no config to modify\"}", 41);
+        return;
+    }
+
+    char out[64];
+    sharing_run_cmd(cmd, out, sizeof(out));
+    ok = (strstr(out, "OK") != NULL);
+
+    if (ok) {
+        snprintf(prog->connection_host, sizeof(prog->connection_host), "127.0.0.1");
+        prog->connection_port = 30005;
+    }
+
+    pthread_mutex_unlock(&sharing_mutex);
+    if (ok) {
+        http_send_json(fd, "{\"ok\":true}", 11);
+    } else {
+        http_send_json(fd, "{\"ok\":false,\"error\":\"sed failed\"}", 32);
+    }
+}
+
+static void api_post_sharing_service(int32_t fd, const char *body) {
+    const char *id_key = strstr(body, "\"id\"");
+    const char *action_key = strstr(body, "\"action\"");
+    if (!id_key || !action_key) {
+        http_send(fd, 400, "application/json", "{\"error\":\"missing params\"}", 25);
+        return;
+    }
+
+    char id[64] = {0}, action[16] = {0};
+    const char *v;
+    const char *e2;
+
+    v = strchr(id_key + 4, '"'); if (!v) goto bad;
+    v++; e2 = strchr(v, '"'); if (!e2 || (e2-v)>63) goto bad;
+    memcpy(id, v, e2-v);
+
+    v = strchr(action_key + 8, '"'); if (!v) goto bad;
+    v++; e2 = strchr(v, '"'); if (!e2 || (e2-v)>15) goto bad;
+    memcpy(action, v, e2-v);
+
+    if (strcmp(action, "start") != 0 && strcmp(action, "stop") != 0 && strcmp(action, "restart") != 0)
+        goto bad;
+
+    {
+        pthread_mutex_lock(&sharing_mutex);
+        sharing_program_t *prog = NULL;
+        for (int32_t i = 0; i < SharingProgramCount; i++) {
+            if (strcmp(SharingPrograms[i].id, id) == 0) { prog = &SharingPrograms[i]; break; }
+        }
+        if (!prog || !prog->detected) {
+            pthread_mutex_unlock(&sharing_mutex);
+            http_send(fd, 404, "application/json", "{\"error\":\"not found\"}", 20);
+            return;
+        }
+
+        char cmd[256], out[64];
+        snprintf(cmd, sizeof(cmd), "sudo -n systemctl %s %s 2>&1", action, prog->service);
+        sharing_run_cmd(cmd, out, sizeof(out));
+
+        // Verify actual state after the action
+        char chk[256], chk_out[64];
+        snprintf(chk, sizeof(chk), "systemctl is-active %s 2>/dev/null", prog->service);
+        sharing_run_cmd(chk, chk_out, sizeof(chk_out));
+        prog->running = (strcmp(chk_out, "active") == 0);
+
+        bool ok;
+        if (strcmp(action, "start") == 0 || strcmp(action, "restart") == 0)
+            ok = prog->running;
+        else
+            ok = !prog->running;
+
+        pthread_mutex_unlock(&sharing_mutex);
+        if (ok)
+            http_send_json(fd, "{\"ok\":true}", 11);
+        else
+            http_send_json(fd, "{\"ok\":false,\"error\":\"systemctl failed\"}", 40);
+        return;
+    }
+bad:
+    http_send(fd, 400, "application/json", "{\"error\":\"bad params\"}", 21);
+}
+
 // ============================= Request Router ============================
 
 static void handle_request(int32_t fd, const char *request, int32_t reqlen)
@@ -6079,10 +6684,12 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             api_get_system_stats(fd);
         } else if (path_sv == "/api/decoder-stats") {
             api_get_decoder_stats(fd);
-        } else if (path_sv == "/api/stats-history") {
-            api_get_stats_history(fd);
+        } else if (path_sv == "/api/stats-history" || (path_sv.length() > 18 && path_sv.substr(0, 19) == "/api/stats-history?")) {
+            api_get_stats_history(fd, path);
         } else if (path_sv == "/api/warnings") {
             api_get_warnings(fd);
+        } else if (path_sv == "/api/sharing") {
+            api_get_sharing(fd);
         } else if (path[0] == '/') {
             serve_file(fd, path + 1);
         } else {
@@ -6140,6 +6747,32 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }
+        } else if (path_sv == "/api/sharing/scan") {
+            api_post_sharing_scan(fd);
+        } else if (path_sv == "/api/sharing/config") {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_sharing_config(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
+        } else if (path_sv == "/api/sharing/apply") {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_sharing_apply(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
+        } else if (path_sv == "/api/sharing/service") {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_sharing_service(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
         } else {
             http_send(fd, 404, "text/plain", "Not found", 9);
         }
@@ -6190,6 +6823,14 @@ static void *panel_thread_entry(void *arg)
         int pret = poll(fds, poll_count, poll_timeout);
         if (pret <= 0) {
             statsHistoryTakeSnapshot();
+            // Periodic sharing monitor (hourly)
+            {
+                uint64_t now_ms = mstime();
+                if (now_ms - sharing_last_monitor_ms >= SHARING_MONITOR_INTERVAL_MS) {
+                    sharing_last_monitor_ms = now_ms;
+                    sharing_monitor_check();
+                }
+            }
             // Process waterfall frames even on timeout
             if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();
             continue;

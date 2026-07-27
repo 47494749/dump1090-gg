@@ -1113,6 +1113,7 @@ restarts for most settings.
   | `/api/warnings` | GET | Active system warnings (DVB driver, etc.) |
   | `/api/diagnostics` | GET | Runtime diagnostics (per-dongle signal metrics) |
   | `/api/diagnostics/start` | POST | Trigger a diagnostic frequency sweep |
+  | `/api/sharing` | GET | Installed third-party feed programs (status, systemd control) |
   | `/ws/waterfall` | WebSocket | Real-time FFT spectrum stream (binary frames) |
 - **Waterfall spectrum analyzer** (`panel/waterfall.html`):
   - Live FFT-based spectrum display and scrolling waterfall plot via WebSocket
@@ -1123,6 +1124,9 @@ restarts for most settings.
 - **Statistics dashboard** (`panel/stats.html`):
   - Chart.js time-series graphs for message rates, signal levels, decoder counters
   - Persistent history engine: snapshots saved to disk, survives restarts
+- **Sharing programs** (`panel/sharing.html`):
+  - Manage third-party ADS-B feed programs (ADSBexchange, adsb.fi, adsb.lol, etc.)
+  - Detect installed feeders, show running/stopped status, start/stop via systemd
 - **System warnings** (`panel/warnings.js`):
   - Full-screen popup alerts for critical system issues (loaded on all pages)
   - DVB kernel module conflict detection (`dvb_usb_rtl28xxu`) with fix instructions

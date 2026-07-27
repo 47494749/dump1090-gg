@@ -37,8 +37,8 @@
 #define SARSAT_BCH2_LEN         12        // BCH-2 parity bits
 
 // Frame sync patterns (9 bits after preamble)
-#define SARSAT_SYNC_NORMAL      0x0D0     // 011010000 = normal/distress
-#define SARSAT_SYNC_TEST        0x02F     // 000101111 = self-test
+#define SARSAT_SYNC_NORMAL      0x02F     // 000101111 = normal/distress
+#define SARSAT_SYNC_TEST        0x0D0     // 011010000 = self-test
 
 // ======================== Beacon types ========================
 

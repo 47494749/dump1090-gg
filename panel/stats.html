@@ -64,6 +64,7 @@ tr:hover td{background:var(--hover)}
 <a href="/">&#x1f5fa;&#xfe0f; Map</a>
 <a href="/config.html">&#x2699;&#xfe0f; Config</a>
 <a href="/feeders.html">&#x1f4e1; Feeders</a>
+<a href="/sharing.html">&#x1f517; Sharing</a>
 <a href="/status.html">&#x1f4e1; Status</a>
 <a href="/connections.html">&#x1f50c; Connections</a>
 <a href="/logs.html">&#x1f4cb; Logs</a>
@@ -432,7 +433,7 @@ function buildCharts(hist){
     notice.style.display='none';
     section.style.display='block';
     snaps=hist.snapshots;
-    setHistoryBounds(snaps,hist.config.interval_s);
+    setHistoryBounds(snaps,hist.config.effective_interval_s||hist.config.interval_s);
 
     // Store receiver metadata for chart labels
     if(hist.receivers)receiverMeta=hist.receivers;
@@ -602,13 +603,14 @@ function updateChartsData(hist){
 
 // ===== Config bar =====
 function loadHistConfig(){
-    fetch('/api/stats-history').then(function(r){return r.json();}).then(function(hist){
+    fetch('/api/stats-history?max_points=1').then(function(r){return r.json();}).then(function(hist){
         if(hist.config){
             document.getElementById('hist-enabled').checked=hist.config.enabled;
             document.getElementById('hist-interval').value=String(Math.max(1,Math.round((hist.config.interval_s||60)/60)));
             document.getElementById('hist-retention').value=String(Math.max(1,Math.round((hist.config.retention_hours||24)/24)));
         }
-    }).catch(function(){});
+        refreshHistory();
+    }).catch(function(){ refreshHistory(); });
 }
 
 document.getElementById('hist-save').addEventListener('click',function(){
@@ -706,8 +708,10 @@ function renderDecoders(d){
 }
 
 // ===== Refresh loop =====
+var HISTORY_MAX_POINTS=600;
+
 function refreshHistory(){
-    fetch('/api/stats-history').then(function(r){return r.json();}).then(function(hist){
+    fetch('/api/stats-history?max_points='+HISTORY_MAX_POINTS).then(function(r){return r.json();}).then(function(hist){
         document.getElementById('hist-enabled').checked=hist.config.enabled;
         document.getElementById('hist-interval').value=String(Math.max(1,Math.round((hist.config.interval_s||60)/60)));
         document.getElementById('hist-retention').value=String(Math.max(1,Math.round((hist.config.retention_hours||24)/24)));
@@ -735,7 +739,6 @@ async function refresh(){
 loadHistConfig();
 loadTrafficConnections();
 refresh();
-refreshHistory();
 
 // Periodic refresh
 setInterval(refresh,5000);

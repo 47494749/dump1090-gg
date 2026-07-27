@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — Sharing</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
+.card h3{color:var(--accent);margin-bottom:12px;font-size:15px;border-bottom:1px solid var(--border);padding-bottom:6px}
+.field{display:grid;grid-template-columns:200px 1fr;gap:8px;align-items:center;margin-bottom:8px}
+.field label{color:var(--dim);font-size:13px;text-align:right}
+.field label[title]{cursor:help;border-bottom:1px dotted var(--dim)}
+.field input,.field select,.field textarea{background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);outline:none}
+.field input[type=checkbox]{width:18px;height:18px;justify-self:start}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:0;z-index:10}
+td{padding:6px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--hover)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.ok{background:#003322;color:var(--ok)}
+.badge.warn{background:#332200;color:var(--warn)}
+.badge.err{background:#330000;color:var(--danger)}
+.badge.info{background:#002244;color:var(--link)}
+.badge.gray{background:#222;color:var(--dim)}
+.btn{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+.btn-primary{background:var(--accent);color:#000}.btn-primary:hover{filter:brightness(1.2)}
+.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{filter:brightness(1.2)}
+.toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+.section-toggle{cursor:pointer;user-select:none}
+.section-toggle::before{content:'\25B6 ';font-size:11px}
+.section-toggle.open::before{content:'\25BC '}
+@media(max-width:768px){.field{grid-template-columns:1fr}.field label{text-align:left}}
+.prog-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
+.prog-card.disabled{opacity:0.45;pointer-events:none}
+.prog-card .prog-header{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.prog-card .prog-name{font-size:15px;font-weight:600;color:var(--accent)}
+.prog-card .prog-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.prog-card .prog-info{display:grid;grid-template-columns:140px 1fr;gap:4px 12px;font-size:13px;margin:8px 0}
+.prog-card .prog-info .lbl{color:var(--dim);text-align:right}
+.prog-card .prog-info .val{color:var(--text);font-family:monospace;font-size:12px}
+.btn-sm{padding:4px 12px;font-size:12px;border:none;border-radius:4px;cursor:pointer;font-weight:600}
+.btn-apply{background:#335;color:var(--accent)}.btn-apply:hover{background:#446}
+.btn-start{background:#143;color:var(--ok)}.btn-start:hover{background:#254}
+.btn-stop{background:#311;color:var(--danger)}.btn-stop:hover{background:#422}
+</style>
+</head>
+<body>
+<nav>
+<h1>&#9992; dump1090-gg-light</h1>
+<div class="tabs">
+<a href="/">&#128506;&#65039; Map</a>
+<a href="/config.html">&#9881;&#65039; Config</a>
+<a href="/feeders.html">&#128225; Feeders</a>
+<a class="active" href="/sharing.html">&#128279; Sharing</a>
+<a href="/status.html">&#128225; Status</a>
+<a href="/connections.html">&#128268; Connections</a>
+<a href="/logs.html">&#128203; Logs</a>
+<a href="/messages.html">&#128232; Messages</a>
+<a href="/aircraft.html">&#9992;&#65039; Aircraft</a>
+<a href="/devices.html">&#128251; Devices</a>
+<a href="/gsm.html">&#128246; GSM</a>
+<a href="/lte.html">&#128246; LTE</a>
+<a href="/iot868.html">&#127777;&#65039; IoT 868</a>
+<a href="/fanet.html">&#128681; FANET</a>
+<a href="/stats.html">&#128202; Stats</a>
+<a href="/waterfall.html">&#127754; Waterfall</a>
+<a href="/diagnostics.html" style="margin-left:auto">&#128295; Diagnostics</a>
+</div>
+<span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v&hellip;</span>
+</nav>
+
+<div class="main">
+<div class="toolbar">
+<button class="btn btn-primary" onclick="scanSystem()">&#128269; Scan System</button>
+<button class="btn btn-primary" onclick="saveConfig()">&#128190; Save</button>
+<span id="status-text" style="color:var(--dim)"></span>
+</div>
+<div id="programs-container"></div>
+</div>
+
+<script>
+var programs=[];
+
+var PROGRAM_DEFS=[
+{id:'fr24feed',name:'FlightRadar24',icon:'&#128752;'},
+{id:'pfclient',name:'PlaneFinder',icon:'&#9992;'},
+{id:'rbfeeder',name:'RadarBox',icon:'&#128225;'},
+{id:'piaware',name:'FlightAware',icon:'&#128225;'},
+{id:'adsbx-feed',name:'ADS-B Exchange',icon:'&#127760;'},
+{id:'adsbfi-feed',name:'adsb.fi',icon:'&#127757;'},
+{id:'adsblol-feed',name:'adsb.lol',icon:'&#127758;'},
+{id:'opensky',name:'OpenSky Network',icon:'&#128300;'},
+{id:'mlat-client',name:'MLAT',icon:'&#128225;'},
+{id:'acarsdec',name:'ACARS',icon:'&#9992;'},
+{id:'dumpvdl2',name:'VDL2',icon:'&#9992;'},
+{id:'dumphfdl',name:'HFDL',icon:'&#9992;'},
+{id:'auto_rx',name:'Radiosonde',icon:'&#127752;'},
+{id:'ais-catcher',name:'AIS Marine',icon:'&#128674;'},
+{id:'rtl-ais',name:'AIS',icon:'&#9875;'},
+{id:'ogn-rf',name:'OGN/FLARM',icon:'&#129666;'}
+];
+
+function setStatus(msg,color){
+    var el=document.getElementById('status-text');
+    el.textContent=msg;
+    el.style.color=color||'var(--dim)';
+}
+
+function renderPrograms(){
+    var html='';
+    for(var i=0;i<PROGRAM_DEFS.length;i++){
+        var def=PROGRAM_DEFS[i];
+        var prog=null;
+        for(var j=0;j<programs.length;j++){
+            if(programs[j].id===def.id){prog=programs[j];break;}
+        }
+        var detected=prog&&prog.detected;
+        var running=prog&&prog.running;
+        var cardClass='prog-card'+(detected?'':' disabled');
+        html+='<div class="'+cardClass+'" data-prog-id="'+def.id+'">';
+        html+='<div class="prog-header">';
+        html+='<span style="font-size:20px">'+def.icon+'</span>';
+        html+='<span class="prog-name">'+def.name+'</span>';
+        if(!detected){
+            html+='<span class="badge gray">Not Installed</span>';
+        }else if(running){
+            html+='<span class="badge ok">Running</span>';
+        }else{
+            html+='<span class="badge err">Stopped</span>';
+        }
+        html+='</div>';
+        html+='<div class="prog-info">';
+        html+='<span class="lbl">Binary</span><span class="val">'+(prog&&prog.binary||'—')+'</span>';
+        html+='<span class="lbl">Version</span><span class="val">'+(prog&&prog.version||'—')+'</span>';
+        html+='<span class="lbl">Config</span><span class="val">'+(prog&&prog.config_file||'—')+'</span>';
+        html+='<span class="lbl">Connection</span><span class="val">'+(prog&&prog.connection_host?prog.connection_host+':'+prog.connection_port:'—')+'</span>';
+        if(prog&&prog.protocol){
+            html+='<span class="lbl">Protocol</span><span class="val">'+prog.protocol+'</span>';
+        }
+        html+='</div>';
+        if(detected){
+            html+='<div style="display:flex;gap:16px;align-items:center;margin:8px 0">';
+            html+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);cursor:pointer">';
+            html+='<input type="checkbox" data-id="monitor" data-prog="'+def.id+'" '+(prog&&prog.monitor?'checked':'')+' style="width:16px;height:16px">';
+            html+='Monitor (hourly restart)</label>';
+            html+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);cursor:pointer">';
+            html+='<input type="checkbox" data-id="excluded" data-prog="'+def.id+'" '+(prog&&prog.excluded?'checked':'')+' style="width:16px;height:16px">';
+            html+='Exclude from dump1090-gg control</label>';
+            html+='</div>';
+            html+='<div class="prog-actions">';
+            html+='<button class="btn-sm btn-apply" onclick="applyConfig(\''+def.id+'\')">&#9881;&#65039; Apply dump1090-gg</button>';
+            if(running){
+                html+='<button class="btn-sm btn-stop" onclick="serviceAction(\''+def.id+'\',\'stop\')">&#9209; Stop</button>';
+            }else{
+                html+='<button class="btn-sm btn-start" onclick="serviceAction(\''+def.id+'\',\'start\')">&#9654; Start</button>';
+            }
+            html+='</div>';
+        }
+        html+='</div>';
+    }
+    document.getElementById('programs-container').innerHTML=html;
+}
+
+async function loadSharing(){
+    try{
+        setStatus('Loading...','var(--dim)');
+        var r=await fetch('/api/sharing');
+        var data=await r.json();
+        programs=data.programs||[];
+        renderPrograms();
+        setStatus('','var(--dim)');
+    }catch(e){
+        setStatus('Error loading: '+e,'var(--danger)');
+    }
+}
+
+async function scanSystem(){
+    try{
+        setStatus('Scanning...','var(--warn)');
+        var r=await fetch('/api/sharing/scan',{method:'POST'});
+        var data=await r.json();
+        if(data.error){setStatus('Scan error: '+data.error,'var(--danger)');return;}
+        setStatus('Scan complete','var(--ok)');
+        await loadSharing();
+    }catch(e){
+        setStatus('Scan error: '+e,'var(--danger)');
+    }
+}
+
+function saveConfig(){
+    var configs=[];
+    var checkboxes=document.querySelectorAll('[data-prog]');
+    var map={};
+    for(var i=0;i<checkboxes.length;i++){
+        var cb=checkboxes[i];
+        var pid=cb.dataset.prog;
+        var field=cb.dataset.id;
+        if(!map[pid])map[pid]={id:pid};
+        map[pid][field]=cb.checked;
+    }
+    for(var k in map)configs.push(map[k]);
+    setStatus('Saving...','var(--dim)');
+    fetch('/api/sharing/config',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({programs:configs})
+    }).then(function(r){return r.json();}).then(function(data){
+        if(data.error){setStatus('Save error: '+data.error,'var(--danger)');return;}
+        setStatus('Saved','var(--ok)');
+        setTimeout(function(){setStatus('','var(--dim)');},3000);
+    }).catch(function(e){
+        setStatus('Save error: '+e,'var(--danger)');
+    });
+}
+
+async function applyConfig(id){
+    try{
+        setStatus('Applying config for '+id+'...','var(--warn)');
+        var r=await fetch('/api/sharing/apply',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({id:id})
+        });
+        var data=await r.json();
+        if(data.error){setStatus('Apply error: '+data.error,'var(--danger)');return;}
+        setStatus('Config applied to '+id,'var(--ok)');
+        setTimeout(function(){setStatus('','var(--dim)');},3000);
+    }catch(e){
+        setStatus('Apply error: '+e,'var(--danger)');
+    }
+}
+
+async function serviceAction(id,action){
+    try{
+        setStatus((action==='start'?'Starting':'Stopping')+' '+id+'...','var(--warn)');
+        var r=await fetch('/api/sharing/service',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({id:id,action:action})
+        });
+        var data=await r.json();
+        if(data.error){setStatus('Service error: '+data.error,'var(--danger)');return;}
+        setStatus(id+' '+(action==='start'?'started':'stopped'),'var(--ok)');
+        await loadSharing();
+    }catch(e){
+        setStatus('Service error: '+e,'var(--danger)');
+    }
+}
+
+loadSharing();
+fetch('/api/status').then(function(r){return r.json();}).then(function(d){var b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(function(){});
+</script>
+<script src="/warnings.js"></script>
+</body>
+</html>

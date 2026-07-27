@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <cstring>
 #include <ctype.h>
+#include <ctime>
 #include "cpdlc_decode.h"
 #include "gg_format.h"
 #include <string>
@@ -67,6 +68,7 @@ static int32_t uper_read_constrained(uper_t *u, int32_t lower, int32_t upper) {
     if (nbits == 0) return lower;
     int32_t v = uper_read(u, nbits);
     if (v < 0) return -1;
+    if (v >= range) return -1;
     return v + lower;
 }
 
@@ -448,8 +450,8 @@ static int32_t decode_altitude(uper_t *u, char *buf, int32_t sz) {
     case 1: v=uper_read_constrained(u,0,25000); if(v<0) return -1; snprintf(buf, sz, "%dm", v); break;
     case 2: v=uper_read_constrained(u,0,2500); if(v<0) return -1; snprintf(buf, sz, "%dft(QFE)", v*10); break;
     case 3: v=uper_read_constrained(u,0,25000); if(v<0) return -1; snprintf(buf, sz, "%dm(QFE)", v); break;
-    case 4: v=uper_read_constrained(u,-1000,100000); if(v==-1) return -1; snprintf(buf, sz, "%dft(GNSS)", v); break;
-    case 5: v=uper_read_constrained(u,-300,30000); if(v==-1) return -1; snprintf(buf, sz, "%dm(GNSS)", v); break;
+    case 4: v=uper_read_constrained(u,-1000,100000); if(v<-1000) return -1; snprintf(buf, sz, "%dft(GNSS)", v); break;
+    case 5: v=uper_read_constrained(u,-300,30000); if(v<-300) return -1; snprintf(buf, sz, "%dm(GNSS)", v); break;
     case 6: v=uper_read_constrained(u,30,600); if(v<0) return -1; snprintf(buf, sz, "FL%d", v); break;
     case 7: v=uper_read_constrained(u,30,2000); if(v<0) return -1; snprintf(buf, sz, "FL%dM", v); break;
     default: return -1;
@@ -663,8 +665,8 @@ static int32_t decode_distance(uper_t *u, char *buf, int32_t sz) {
 
 static int32_t decode_temperature(uper_t *u, char *buf, int32_t sz) {
     int32_t c = uper_read(u,1); if(c<0) return -1;
-    if (c==0) { int32_t v=uper_read_constrained(u,-80,47); if(v==-81) return -1; snprintf(buf, sz, "%dC", v); }
-    else { int32_t v=uper_read_constrained(u,-105,150); if(v==-106) return -1; snprintf(buf, sz, "%dF", v); }
+    if (c==0) { int32_t v=uper_read_constrained(u,-80,47); if(v<-80) return -1; snprintf(buf, sz, "%dC", v); }
+    else { int32_t v=uper_read_constrained(u,-105,150); if(v<-105) return -1; snprintf(buf, sz, "%dF", v); }
     return 0;
 }
 
@@ -1022,8 +1024,18 @@ static int32_t decode_param(uper_t *u, param_type_t ptype, const char *fmt, char
 
 // ========== Top-Level Message Decoder ==========
 
+// Structural validation: a valid FANS-1/A CPDLC PDU must satisfy ALL of:
+// 1. All constrained integers decode within their PER range (handled by uper_read_constrained)
+// 2. If timestamp present: date/time must be plausible (within 12h of now)
+// 3. Element count 1..5 and each element index must be within the table
+// 4. Each element's parameters must decode completely without error
+// 5. No element may be a "reserved" slot (reserved slots have no real encoding)
+// 6. After all elements are consumed, remaining bits must ALL be zero (UPER padding)
+// 7. Padding must not exceed 79 bits (one ELM segment minus 1 bit; segment granularity)
+// 8. The message must consume at least 16 bits (avoids trivially short coincidental matches)
+
 static int32_t try_decode_message(uint32_t addr, const uint8_t *data, int32_t len,
-                              int32_t is_uplink) {
+                              int32_t is_uplink, int32_t *out_score) {
     uper_t u;
     uper_init(&u, data, len);
 
@@ -1032,6 +1044,9 @@ static int32_t try_decode_message(uint32_t addr, const uint8_t *data, int32_t le
     const msg_element_t *table = is_uplink ? um_table : dm_table;
     int32_t table_size = is_uplink ? (int32_t)UM_TABLE_SIZE : (int32_t)DM_TABLE_SIZE;
 
+    int32_t total_bits = len * 8;
+
+    // --- PDU Header ---
     int32_t opt_bitmap = uper_read(&u, 2);
     if (opt_bitmap < 0) return 0;
     int32_t has_msgref = (opt_bitmap >> 1) & 1;
@@ -1046,6 +1061,7 @@ static int32_t try_decode_message(uint32_t addr, const uint8_t *data, int32_t le
         if (msg_ref < 0) return 0;
     }
 
+    // --- Timestamp validation ---
     int32_t ts_year=-1, ts_month=-1, ts_day=-1, ts_hour=-1, ts_min=-1;
     if (has_timestamp) {
         ts_year = uper_read_constrained(&u, 0, 99);
@@ -1055,63 +1071,115 @@ static int32_t try_decode_message(uint32_t addr, const uint8_t *data, int32_t le
         ts_min = uper_read_constrained(&u, 0, 59);
         if (ts_year<0 || ts_month<0 || ts_day<0 || ts_hour<0 || ts_min<0)
             return 0;
+        struct tm tm_ts;
+        memset(&tm_ts, 0, sizeof(tm_ts));
+        tm_ts.tm_year = 2000 + ts_year - 1900;
+        tm_ts.tm_mon  = ts_month - 1;
+        tm_ts.tm_mday = ts_day;
+        tm_ts.tm_hour = ts_hour;
+        tm_ts.tm_min  = ts_min;
+        time_t t_ts = timegm(&tm_ts);
+        double dd = difftime(t_ts, time(NULL));
+        if (t_ts == (time_t)-1 || dd > 12*3600 || dd < -12*3600)
+            return 0;
     }
 
+    // --- Element count ---
     int32_t elem_count = uper_read_constrained(&u, 0, 4);
     if (elem_count < 0) return 0;
     elem_count += 1;
     if (elem_count > 5) return 0;
-    if (uper_bits_left(&u) < elem_count * 8) return 0;
 
-    gg::print("CPDLC %s %06X MID=%d", dir, addr, msg_id);
-    if (msg_ref >= 0) gg::print(" REF=%d", msg_ref);
+    // Minimum bits: each element needs at least the choice field
+    int32_t choice_bits = 0;
+    { int32_t tmp = max_choice; while (tmp > 0) { choice_bits++; tmp >>= 1; } }
+    if (uper_bits_left(&u) < elem_count * choice_bits) return 0;
+
+    // --- Decode elements ---
+    std::string out = gg::format("CPDLC %s %06X MID=%d", dir, addr, msg_id);
+    if (msg_ref >= 0) out += gg::format(" REF=%d", msg_ref);
     if (has_timestamp)
-        printf(" TS=%02d-%02d-%02d %02d:%02dZ",
-               2000+ts_year, ts_month, ts_day, ts_hour, ts_min);
-    gg::print(": ");
+        out += gg::format(" TS=%02d-%02d-%02d %02d:%02dZ",
+                          2000+ts_year, ts_month, ts_day, ts_hour, ts_min);
+    out += ": ";
 
     for (int32_t i = 0; i < elem_count; i++) {
-        if (i > 0) gg::print("; ");
+        if (i > 0) out += "; ";
 
         int32_t elem_idx = uper_read_constrained(&u, 0, max_choice);
-        if (elem_idx < 0) { gg::print("(decode error at element %d)", i); break; }
+        if (elem_idx < 0)
+            return 0;
+
+        // Reject if element index is outside the defined table
+        if (elem_idx >= table_size)
+            return 0;
+
+        const msg_element_t *elem = &table[elem_idx];
+
+        // Reject reserved elements: they have no defined PER encoding in the
+        // standard, so any "successful" decode is coincidental bit matching
+        if (strncmp(elem->text, "(reserved", 9) == 0)
+            return 0;
 
         const char *pfx = is_uplink ? "UM" : "DM";
-        if (elem_idx < table_size && table[elem_idx].text) {
-            const msg_element_t *elem = &table[elem_idx];
-            char param_buf[512];
-            if (decode_param(&u, elem->ptype, elem->text, param_buf, sizeof(param_buf)) < 0)
-                gg::print("%s%d %s (?)", pfx, elem_idx, elem->text);
-            else
-                gg::print("%s%d %s", pfx, elem_idx, param_buf);
-        } else {
-            gg::print("%s%d", pfx, elem_idx);
-        }
+        char param_buf[512];
+        if (decode_param(&u, elem->ptype, elem->text, param_buf, sizeof(param_buf)) < 0)
+            return 0;
+        out += gg::format("%s%d %s", pfx, elem_idx, param_buf);
     }
 
-    gg::print("\n");
+    // --- UPER padding: all remaining bits must be zero ---
+    int32_t padding_bits = uper_bits_left(&u);
+
+    // ELM payloads are always multiples of 10 bytes (segment granularity).
+    // The CPDLC PDU may not fill the last segment, so trailing zeros up to
+    // 79 bits (one segment minus one bit) are normal. Beyond that, the PDU
+    // consumed too little of the payload -- likely a short coincidental match.
+    if (padding_bits > 79)
+        return 0;
+
+    while (uper_bits_left(&u) > 0) {
+        if (uper_read(&u, 1) != 0)
+            return 0;
+    }
+
+    // The PDU must use a meaningful portion of the payload.
+    int32_t bits_consumed = total_bits - padding_bits;
+    if (bits_consumed < 16)
+        return 0;
+
+    if (out_score)
+        *out_score = bits_consumed;
+
+    printf("%s\n", out.c_str());
     return 1;
 }
 
 // ========== Public API ==========
 
 int32_t cpdlc_try_decode(uint32_t addr, const uint8_t *data, int32_t len) {
-    if (!data || len < 3) return 0;
+    if (!data || len < 5) return 0;
 
-    int32_t decoded = try_decode_message(addr, data, len, 0);
+    int32_t score = 0;
+    int32_t decoded = try_decode_message(addr, data, len, 0, &score);
     if (!decoded)
-        decoded = try_decode_message(addr, data, len, 1);
+        decoded = try_decode_message(addr, data, len, 1, &score);
 
     return decoded;
 }
 
 int32_t cpdlc_try_decode_dir(uint32_t addr, const uint8_t *data, int32_t len, int32_t dir) {
-    if (!data || len < 3) return 0;
+    if (!data || len < 5) return 0;
 
-    if (dir == 0)
-        return try_decode_message(addr, data, len, 0);
-    else if (dir == 1)
-        return try_decode_message(addr, data, len, 1);
-    else
+    int32_t score = 0;
+    if (dir == 0) {
+        // DF24 is strictly a downlink frame -- only decode as DM.
+        // Do NOT fallback to UM: that would invent uplink messages from
+        // random bits that happen to pass the UM parser.
+        return try_decode_message(addr, data, len, 0, &score);
+    } else if (dir == 1) {
+        return try_decode_message(addr, data, len, 1, &score);
+    } else {
         return cpdlc_try_decode(addr, data, len);
+    }
 }

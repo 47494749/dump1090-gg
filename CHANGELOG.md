@@ -10,6 +10,54 @@ actually present here.
 
 ---
 
+### v1.0.8 (2026-07-27)
+
+**Sharing programs page (new):**
+- New `/sharing.html` panel page for managing third-party ADS-B feed programs
+  (ADSBexchange, adsb.fi, adsb.lol, etc.)
+- Backend API (`/api/sharing`) to detect installed feed programs, show their
+  status, and control them via systemd
+- Navigation bar updated across all panel pages to include the Sharing link
+
+**ELM / Comm-D decoder hardening:**
+- ACARS framing validation now enforces ARINC 622 structural rules: explicit
+  ETX/ETB terminator required, minimum header length, printable address field
+  check — prevents false-positive ACARS detection from random SOH bytes
+- ELM RAW output label changed from `ELM` to `ELM RAW` for clarity when
+  neither ACARS nor CPDLC decoding succeeds
+- KE=1 (uplink acknowledgement) frames now correctly rejected from downlink
+  reassembly — these carry TAS data, not downlink segments
+- Stale sequence restart: a new segment 0 arriving after a gap now correctly
+  starts a fresh message instead of appending to an expired entry
+- Completion logic simplified: messages flush only when all 16 segments are
+  present (full ELM); shorter messages rely on TTL expiry in cleanup
+
+**CPDLC decoder improvements:**
+- New `cpdlc_try_decode_dir()` API with explicit direction parameter,
+  replacing undirected `cpdlc_try_decode()`
+- Structural validation rules: plausible timestamp check, zero-padding
+  verification, minimum message length (16 bits), reserved-slot rejection
+- Scoring system for decode confidence (used by ELM to select best direction)
+- Range-check fix for constrained integers with negative lower bounds
+  (GNSS altitude, temperature) — previously could accept out-of-range values
+
+**COSPAS-SARSAT decoder hardening:**
+- Reject frames with unassigned protocol code (noise passing BCH brute-force)
+- Long-format frames with BCH-1 bit corrections now also require BCH-2 valid
+- Fix position-source bit polarity (0=internal GPS, not 1)
+
+**Statistics dashboard improvements:**
+- Stats history API supports `max_points` query parameter for server-side
+  downsampling — reduces payload size for long retention periods
+- Stats page uses capped point count (600) to avoid browser performance issues
+- Effective snapshot interval reported to client for correct time-axis scaling
+
+**Panel log improvements:**
+- SQUAWK change messages now show the ICAO hex address (e.g. `[4BA90D  ]`)
+  instead of `[?]` when the aircraft callsign has not yet been received
+
+---
+
 ### v1.0.7 (2026-07-06)
 
 **Panel restructure:**

@@ -88,7 +88,6 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int32_t len,
 
     for (i = 0; i < len; i++) {
         if (payload[i] == 0x01) { // SOH - start of ACARS header
-            found_acars = 1;
 
             // Find end of message (ETX=0x03 or ETB=0x17)
             int32_t end = i + 1;
@@ -98,6 +97,28 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int32_t len,
             // Extract the ACARS content between SOH and ETX/ETB
             int32_t msg_start = i + 1;
             int32_t msg_len = end - msg_start;
+
+            // Structural validation (ARINC 622 framing): an explicit ETX/ETB
+            // terminator must be present and the header (mode char, 7-char
+            // address, TAK, 2-char label) must be complete and printable.
+            // A lone SOH byte inside random data is not an ACARS message.
+            if (end >= len || msg_len < 12 ||
+                !isprint(payload[msg_start]) ||
+                !isprint(payload[msg_start + 9]) ||
+                !isprint(payload[msg_start + 10])) {
+                i = end;
+                continue;
+            }
+            int32_t bad_addr = 0;
+            for (int32_t j = 1; j <= 7; j++)
+                if (!isprint(payload[msg_start + j]))
+                    bad_addr = 1;
+            if (bad_addr) {
+                i = end;
+                continue;
+            }
+
+            found_acars = 1;
 
             if (msg_len > 2) {
                 n += snprintf(outbuf + n, outbuf_size - n, "ELM ACARS %06X: ", addr);
@@ -158,19 +179,18 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int32_t len,
     }
 
     if (!found_acars) {
-        // Try CPDLC decode â€” capture output via open_memstream
+        // Try CPDLC decode -- capture output via open_memstream
         char *cpdlc_buf = NULL;
         size_t cpdlc_len = 0;
         FILE *old_stdout = stdout;
         FILE *mem = open_memstream(&cpdlc_buf, &cpdlc_len);
         if (mem) {
             stdout = mem;
-            int32_t decoded = cpdlc_try_decode(addr, payload, len);
+            int32_t decoded = cpdlc_try_decode_dir(addr, payload, len, 0);
             fflush(mem);
             stdout = old_stdout;
             fclose(mem);
             if (decoded && cpdlc_buf && cpdlc_len > 0) {
-                // Remove trailing newline
                 if (cpdlc_len > 0 && cpdlc_buf[cpdlc_len - 1] == '\n')
                     cpdlc_buf[cpdlc_len - 1] = '\0';
                 n += snprintf(outbuf + n, outbuf_size - n, "%s", cpdlc_buf);
@@ -179,37 +199,18 @@ static void elm_decode_acars(uint32_t addr, const uint8_t *payload, int32_t len,
             }
             free(cpdlc_buf);
         } else {
-            // Fallback: just call directly (output goes to stdout)
-            if (cpdlc_try_decode(addr, payload, len)) {
+            if (cpdlc_try_decode_dir(addr, payload, len, 0)) {
                 fflush(stdout);
                 snprintf(outbuf, outbuf_size, "CPDLC %06X (see stdout)", addr);
                 return;
             }
         }
 
-        // No ACARS or CPDLC. Output raw payload as hex + printable ASCII.
-        n += snprintf(outbuf + n, outbuf_size - n, "ELM %06X [%d bytes]: ", addr, len);
-
-        // Hex dump
-        for (i = 0; i < len && i < 40 && n < outbuf_size - 3; i++)
-            n += snprintf(outbuf + n, outbuf_size - n, "%02X", payload[i]);
-        if (len > 40)
-            n += snprintf(outbuf + n, outbuf_size - n, "...");
-
-        // ASCII if there's meaningful text
-        int32_t has_printable = 0;
-        for (i = 0; i < len; i++) {
-            if (isprint(payload[i]) && payload[i] != ' ')
-                has_printable++;
-        }
-        if (has_printable > len / 4) {
-            n += snprintf(outbuf + n, outbuf_size - n, " |");
-            for (i = 0; i < len && n < outbuf_size - 2; i++) {
-                uint8_t c = payload[i];
-                outbuf[n++] = (c >= 0x20 && c < 0x7f) ? c : '.';
-            }
-            outbuf[n] = '\0';
-            n += snprintf(outbuf + n, outbuf_size - n, "|");
+        // CPDLC decode failed. Show as raw candidate so the user can see
+        // that ELM data was received, but mark it clearly as unvalidated.
+        n += snprintf(outbuf + n, outbuf_size - n, "ELM RAW %06X [%d bytes]: ", addr, len);
+        for (int32_t j = 0; j < len && n < outbuf_size - 4; j++) {
+            n += snprintf(outbuf + n, outbuf_size - n, "%02X", payload[j]);
         }
     }
 
@@ -280,43 +281,50 @@ static void *elm_decode_worker(void *arg) {
 // Check if payload looks like valid ACARS or CPDLC content.
 // Returns 1 if content passes validation, 0 if it looks like garbage.
 static int32_t elm_validate_content(const uint8_t *payload, int32_t len) {
-    if (len < 10)
+    if (len < 20)
         return 0;
 
-    // Check 1: ACARS framing â€” SOH (0x01) present
+    // Check 1: ACARS framing -- SOH (0x01) present with proper terminator
     for (int32_t i = 0; i < len; i++) {
         if (payload[i] == 0x01) {
-            // Found SOH â€” likely real ACARS
-            return 1;
+            for (int32_t j = i + 12; j < len; j++) {
+                if (payload[j] == 0x03 || payload[j] == 0x17)
+                    return 1;
+            }
         }
     }
 
-    // Check 2: CPDLC/ASN.1 â€” first byte often has recognizable tag patterns
-    // FANS-1/A CPDLC uses UPER encoding; first bits are typically small tag values
-    // Accept if first byte has high bit clear (tag < 128)
-    if ((payload[0] & 0x80) == 0) {
-        // Could be ASN.1 UPER, accept provisionally if enough printable content
-        int32_t printable = 0;
-        for (int32_t i = 0; i < len; i++) {
-            if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
-                payload[i] == 0x0a || payload[i] == 0x0d)
-                printable++;
-        }
-        if (printable * 3 >= len)  // >= 33% printable
-            return 1;
-    }
+    // Check 2: CPDLC/ASN.1 UPER -- basic noise filter.
+    // The full CPDLC decoder performs strict structural validation (PER range
+    // checks, reserved element rejection, padding <= 7 bits, all-zero tail).
+    // Here we only reject payloads that are obviously not structured data.
 
-    // Check 3: Plain text content â€” at least 40% printable ASCII
-    int32_t printable = 0;
+    // All-identical bytes are never a real message
+    int32_t all_same = 1;
+    for (int32_t i = 1; i < len; i++) {
+        if (payload[i] != payload[0]) { all_same = 0; break; }
+    }
+    if (all_same) return 0;
+
+    // Majority high-bit bytes indicates random noise, not UPER data.
+    // CPDLC UPER encodes small constrained integers; high-bit dominance
+    // means most values exceed their valid ranges.
+    int32_t highbit_count = 0;
     for (int32_t i = 0; i < len; i++) {
-        if ((payload[i] >= 0x20 && payload[i] < 0x7f) ||
-            payload[i] == 0x0a || payload[i] == 0x0d)
-            printable++;
+        if (payload[i] & 0x80) highbit_count++;
     }
-    if (printable * 5 >= len * 2)  // >= 40% printable
-        return 1;
+    if (highbit_count * 2 > len)
+        return 0;
 
-    return 0;
+    // Reject payloads that are all-zero after the first byte (padding artifact)
+    int32_t nonzero_after_first = 0;
+    for (int32_t i = 1; i < len; i++) {
+        if (payload[i] != 0) { nonzero_after_first = 1; break; }
+    }
+    if (!nonzero_after_first)
+        return 0;
+
+    return 1;
 }
 
 // ========== Segment timing validation ==========
@@ -329,7 +337,7 @@ static int32_t elm_validate_timing(struct elm_entry *entry, int32_t num_segments
             return 0;
         uint64_t gap = entry->seg_time[i] - entry->seg_time[i - 1];
         if (gap > ELM_SEG_GAP_MS)
-            return 0;  // gap too large â€” probably unrelated false DF24 frames
+            return 0;  // gap too large -- probably unrelated false DF24 frames
     }
     return 1;
 }
@@ -375,7 +383,7 @@ static void elm_queue_complete(struct elm_state *state, struct elm_entry *entry,
         memcpy(payload + i * ELM_SEGMENT_SIZE, entry->data[i], ELM_SEGMENT_SIZE);
     }
 
-    // Validate content â€” must look like ACARS, CPDLC, or structured text
+    // Validate content -- must look like ACARS, CPDLC, or structured text
     if (!elm_validate_content(payload, payload_len)) {
         state->messages_rejected++;
         fprintf(stderr, "ELM reject %06X: content validation failed (%d bytes, no ACARS/CPDLC/text)\n",
@@ -453,6 +461,13 @@ void elmCleanup(struct elm_state *state) {
 
 void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
                    uint32_t ke, const uint8_t *md, uint64_t timestamp) {
+    // KE=1 marks an uplink ELM acknowledgement (Annex 10 Vol IV, 3.1.2.7.3):
+    // the MD field then carries a TAS (Transmission Acknowledgement Summary),
+    // not downlink data, and ND is not defined. Such frames must never enter
+    // downlink reassembly.
+    if (ke == 1)
+        return;
+
     if (nd >= ELM_MAX_SEGMENTS)
         return;
 
@@ -460,9 +475,17 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
 
     if (!entry) {
         // First segment for this aircraft: only accept ND=0 to start a sequence.
-        // Real ELM always starts from segment 0. Random ND values are false positives.
         if (nd != 0)
             return;
+        entry = elm_create(state, addr, timestamp);
+        if (!entry)
+            return;
+        state->active_entries++;
+    } else if (nd == 0 && (timestamp - entry->last_seen > ELM_SEG_GAP_MS)) {
+        // New segment 0 arrived after a long gap -- start fresh sequence.
+        // The old entry was likely an incomplete/stale message.
+        elm_remove(state, addr);
+        state->active_entries--;
         entry = elm_create(state, addr, timestamp);
         if (!entry)
             return;
@@ -480,7 +503,7 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
         // Accept only the next expected segment or a re-delivery of one we have.
         // This filters random ND values from misclassified frames.
         if (nd > (uint32_t)next_expected) {
-            // Segment too far ahead â€” not sequential, likely garbage.
+            // Segment too far ahead -- not sequential, likely garbage.
             // If KE=1 on a non-sequential segment, just ignore it.
             return;
         }
@@ -522,31 +545,17 @@ void elmAddSegment(struct elm_state *state, uint32_t addr, uint32_t nd,
             break;
     }
 
-    // Complete if: KE=1 or we have enough consecutive segments.
-    // All validation (min segments, timing, content) happens in elm_queue_complete.
+    // DF24 carries no in-band close-out flag: the downlink ELM segment count
+    // is announced via the DR field (values 16-31) of the surveillance
+    // protocol, which a passive receiver cannot rely on. Complete immediately
+    // only when all 16 segments are present (the message cannot grow further);
+    // shorter messages are flushed by the TTL in elmCleanupStale().
     int32_t complete = 0;
-    if (ke == 1 && consecutive >= ELM_MIN_SEGMENTS) {
+    if (consecutive == ELM_MAX_SEGMENTS)
         complete = 1;
-    } else if (consecutive >= ELM_MIN_SEGMENTS && consecutive == ELM_MAX_SEGMENTS) {
-        complete = 1; // all 16 segments
-    } else if (consecutive >= ELM_MIN_SEGMENTS) {
-        // Check if there's a gap after our consecutive run â€” this means
-        // we likely have everything before the gap
-        int32_t has_later = 0;
-        for (int32_t i = consecutive; i < ELM_MAX_SEGMENTS; i++) {
-            if (entry->segments_mask & (1 << i)) {
-                has_later = 1;
-                break;
-            }
-        }
-        // If we received a segment beyond our consecutive run, that's probably
-        // a new message, so flush the old one
-        if (has_later)
-            complete = 1;
-    }
 
     if (complete) {
-        elm_queue_complete(state, entry, (ke == 1) ? 1 : 0);
+        elm_queue_complete(state, entry, 1);
         elm_remove(state, addr);
         state->messages_completed++;
         state->active_entries--;

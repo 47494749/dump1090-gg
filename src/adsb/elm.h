@@ -18,8 +18,8 @@
 #define ELM_TTL_MS         60000   // 60 seconds TTL for incomplete messages
 #define ELM_TABLE_SIZE     256     // hash table size
 #define ELM_DECODE_QUEUE   64      // max queued complete messages
-#define ELM_MIN_SEGMENTS   3       // minimum consecutive segments to accept a message
-#define ELM_SEG_GAP_MS     15000   // max ms between consecutive segments (real ELM < 5s)
+#define ELM_MIN_SEGMENTS   2       // Require at least 2 segments for reliable decode
+#define ELM_SEG_GAP_MS     8000    // max ms between consecutive segments (real ELM < 5s)
 
 // Reassembly entry (one per aircraft with active ELM)
 struct elm_entry {
@@ -37,7 +37,7 @@ struct elm_complete {
     uint32_t addr;
     int32_t payload_len;               // actual bytes (segments * 10)
     int32_t segments_received;         // number of consecutive segments from 0
-    int32_t complete_ke;               // 1 if completed by KE close-out (= 100% complete)
+    int32_t complete_ke;               // 1 if all 16 segments received (= 100% complete)
     uint8_t payload[ELM_MAX_PAYLOAD];
     uint64_t timestamp;
     struct elm_complete *next;

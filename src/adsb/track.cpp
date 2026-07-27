@@ -1257,7 +1257,14 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
                     int32_t rxid = -1;
                     for (int32_t ri = 0; ri < SdrManager.count; ri++)
                         if (SdrManager.receivers[ri].config.role == SDR_ROLE_ADSB) { rxid = SdrManager.receivers[ri].dev_index; break; }
-                    const char *cs = trackDataValid(&a->callsign_valid) ? a->callsign : "?";
+                    char cs_buf[9];
+                    const char *cs;
+                    if (trackDataValid(&a->callsign_valid)) {
+                        cs = a->callsign;
+                    } else {
+                        snprintf(cs_buf, sizeof(cs_buf), "%06X  ", a->addr);
+                        cs = cs_buf;
+                    }
                     if (mm->squawk == 0x7500 || mm->squawk == 0x7600 || mm->squawk == 0x7700) {
                         const char *desc = mm->squawk == 0x7500 ? "HIJACK" : mm->squawk == 0x7600 ? "NORDO" : "EMERGENCY";
                         panelLogMessage("[ADSB rx%d] \xf0\x9f\x9a\xa8 %06X [%s] \xe2\x86\x92 SQUAWK %04x %s (was %04x)",

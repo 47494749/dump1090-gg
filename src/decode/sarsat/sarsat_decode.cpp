@@ -536,6 +536,14 @@ static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test
     // Decode identification fields from PDF-1
     sarsat_decode_identification(bits, msg);
 
+    // Reject frames with an unassigned protocol code: real beacons always
+    // transmit an assigned protocol, while random noise that slips through
+    // BCH-1 brute-force correction usually does not.
+    if (msg->protocol == SARSAT_PROTO_UNKNOWN) {
+        msg->valid = false;
+        return false;
+    }
+
     // If long format, verify BCH-2 and decode position
     if (msg->long_message && nbits >= 120) {
         uint8_t bch2_block[BCH2_N];
@@ -558,6 +566,15 @@ static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test
 
         // Decode position from PDF-1 coarse + PDF-2 fine
         sarsat_decode_position(bits, msg);
+    }
+
+    // Long-format frames: require BCH-2 valid unless BCH-1 passed clean
+    // (zero corrections). A clean BCH-1 on noise is a ~1-in-2^21 event,
+    // while BCH-1 "passing" only via 1-3 bit corrections happens on ~4%
+    // of random blocks — if BCH-2 also fails, it is almost certainly noise.
+    if (msg->long_message && !msg->bch2_valid && msg->bch1_errors > 0) {
+        msg->valid = false;
+        return false;
     }
 
     // Generate 15-character Hex ID (bits 1-60 → 60 bits → 15 hex chars)
@@ -845,7 +862,7 @@ static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg)
 
         // Bit 4: position source (0=internal, 1=external GPS)
         // Bit 5: 121.5 MHz homing device
-        msg->position_from_gps = (frame[pdf2 + 4] == 1);
+        msg->position_from_gps = (frame[pdf2 + 4] == 0);
         msg->homing_121_5 = (frame[pdf2 + 5] == 1);
 
         // Latitude offset: sign(1) + minutes(5) + seconds/4(4)
