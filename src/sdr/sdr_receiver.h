@@ -391,12 +391,16 @@ typedef struct {
     int16_t  adsb_gain_db;
     uint32_t flarm_detected;
     uint32_t flarm_decoded;
+    uint32_t ogntp_decoded;
+    uint32_t adsl_decoded;
+    uint32_t p3i_decoded;
     uint32_t acars_decoded;
     uint32_t vdl2_decoded;
     uint32_t sonde_decoded;
     uint32_t pocsag_decoded;
     uint32_t gsm_bcch;
     uint32_t lte_mib;
+    uint32_t iot868_decoded;
     uint32_t fanet_decoded;
     uint32_t sarsat_frames;
 } rx_stats_snapshot_t;

@@ -107,9 +107,11 @@ var chartColors={
     adsbMsg:'#42a5f5',
     adsbNoise:'#ff9800', adsbSignal:'#ffee58', adsbGain:'#26a69a',
     flarmDet:'#78909c', flarmDec:'#4fc3f7',
+    ogntpDec:'#ffab40', adslDec:'#69f0ae', p3iDec:'#ea80fc',
     acarsDec:'#ec407a', vdl2Dec:'#7e57c2',
     sondeDec:'#26c6da', pocsagDec:'#d4e157',
     gsmBcch:'#ffa726', lteMib:'#42a5f5',
+    iot868Dec:'#ff8a65',
     fanetDec:'#66bb6a', sarsatFrm:'#ef5350',
     trafficRawOut:'#29b6f6', trafficBeastCooked:'#ab47bc',
     trafficBeastVerbatim:'#ef5350', trafficBeastLocal:'#ffa726',
@@ -411,7 +413,7 @@ function buildCharts(hist){
     var container=document.getElementById('charts-container');
     var section=document.getElementById('charts-section');
     var notice=document.getElementById('history-notice');
-    var snaps,hasAdsb,hasFlarm,hasAcars,hasVdl2,hasSonde,hasPocsag,hasGsm,hasLte,hasFanet,hasSarsat,hash,html,decoders;
+    var snaps,hash,html,decoders;
 
     if(!hist.config.enabled){
         section.style.display='block';
@@ -438,19 +440,9 @@ function buildCharts(hist){
     // Store receiver metadata for chart labels
     if(hist.receivers)receiverMeta=hist.receivers;
 
-    hasAdsb=snaps.some(function(s){return s.am>0;});
-    hasFlarm=snaps.some(function(s){return s.fd>0||s.fc>0;});
-    hasAcars=snaps.some(function(s){return s.ad>0;});
-    hasVdl2=snaps.some(function(s){return s.vd>0;});
-    hasSonde=snaps.some(function(s){return s.sd>0;});
-    hasPocsag=snaps.some(function(s){return s.pd>0;});
-    hasGsm=snaps.some(function(s){return s.gb>0;});
-    hasLte=snaps.some(function(s){return s.lm>0;});
-    hasFanet=snaps.some(function(s){return s.nd>0;});
-    hasSarsat=snaps.some(function(s){return s.sf>0;});
     var hasDongle=snaps.some(function(s){return s.rs&&s.rs.length>0;});
 
-    hash=[hasAdsb,hasFlarm,hasAcars,hasVdl2,hasSonde,hasPocsag,hasGsm,hasLte,hasFanet,hasSarsat,hasDongle].join(',');
+    hash='always';
     if(hash===prevChartHash){
         updateChartsData(hist);
         return;
@@ -464,33 +456,35 @@ function buildCharts(hist){
 
     html='';
     html+=chartContainerHTML('ch-traffic','Port Traffic (KB/s)');
-    if(hasDongle)html+=chartContainerHTML('ch-dongle','Dongle Throughput (Msps)');
+    html+=chartContainerHTML('ch-dongle','Dongle Throughput (Msps)');
     html+='<div class="chart-row">';
     html+=chartContainerHTML('ch-cpu','CPU Usage (rate per minute)');
     html+=chartContainerHTML('ch-mem','Memory');
     html+='</div>';
 
-    if(hasAdsb){
-        html+='<div class="chart-row">';
-        html+=chartContainerHTML('ch-adsb-msg','ADS-B Messages (rate/min)');
-        html+=chartContainerHTML('ch-adsb-rf','ADS-B Signal and Noise (dBFS)');
-        html+='</div>';
-        html+='<div class="chart-row">';
-        html+=chartContainerHTML('ch-adsb-gain','ADS-B Gain (dB)');
-        html+='<div class="chart-container" style="visibility:hidden"></div>';
-        html+='</div>';
-    }
+    html+='<div class="chart-row">';
+    html+=chartContainerHTML('ch-adsb-msg','ADS-B Messages (rate/min)');
+    html+=chartContainerHTML('ch-adsb-rf','ADS-B Signal and Noise (dBFS)');
+    html+='</div>';
+    html+='<div class="chart-row">';
+    html+=chartContainerHTML('ch-adsb-gain','ADS-B Gain (dB)');
+    html+='<div class="chart-container" style="visibility:hidden"></div>';
+    html+='</div>';
 
     decoders=[];
-    if(hasFlarm)decoders.push({id:'ch-flarm',title:'FLARM (rate/min)',multi:true});
-    if(hasAcars)decoders.push({id:'ch-acars',title:'ACARS Decoded (rate/min)',color:chartColors.acarsDec});
-    if(hasVdl2)decoders.push({id:'ch-vdl2',title:'VDL2 Decoded (rate/min)',color:chartColors.vdl2Dec});
-    if(hasSonde)decoders.push({id:'ch-sonde',title:'Radiosonde Decoded (rate/min)',color:chartColors.sondeDec});
-    if(hasPocsag)decoders.push({id:'ch-pocsag',title:'POCSAG Decoded (rate/min)',color:chartColors.pocsagDec});
-    if(hasGsm)decoders.push({id:'ch-gsm',title:'GSM BCCH (rate/min)',color:chartColors.gsmBcch});
-    if(hasLte)decoders.push({id:'ch-lte',title:'LTE MIB (rate/min)',color:chartColors.lteMib});
-    if(hasFanet)decoders.push({id:'ch-fanet',title:'FANET Decoded (rate/min)',color:chartColors.fanetDec});
-    if(hasSarsat)decoders.push({id:'ch-sarsat',title:'SARSAT Frames (rate/min)',color:chartColors.sarsatFrm});
+    decoders.push({id:'ch-flarm',title:'FLARM (rate/min)',multi:true});
+    decoders.push({id:'ch-ogntp',title:'OGNTP Decoded (rate/min)',color:chartColors.ogntpDec});
+    decoders.push({id:'ch-adsl',title:'ADS-L Decoded (rate/min)',color:chartColors.adslDec});
+    decoders.push({id:'ch-p3i',title:'P3I Decoded (rate/min)',color:chartColors.p3iDec});
+    decoders.push({id:'ch-acars',title:'ACARS Decoded (rate/min)',color:chartColors.acarsDec});
+    decoders.push({id:'ch-vdl2',title:'VDL2 Decoded (rate/min)',color:chartColors.vdl2Dec});
+    decoders.push({id:'ch-sonde',title:'Radiosonde Decoded (rate/min)',color:chartColors.sondeDec});
+    decoders.push({id:'ch-pocsag',title:'POCSAG Decoded (rate/min)',color:chartColors.pocsagDec});
+    decoders.push({id:'ch-gsm',title:'GSM BCCH (rate/min)',color:chartColors.gsmBcch});
+    decoders.push({id:'ch-lte',title:'LTE MIB (rate/min)',color:chartColors.lteMib});
+    decoders.push({id:'ch-iot868',title:'IoT 868 Decoded (rate/min)',color:chartColors.iot868Dec});
+    decoders.push({id:'ch-fanet',title:'FANET Decoded (rate/min)',color:chartColors.fanetDec});
+    decoders.push({id:'ch-sarsat',title:'SARSAT Frames (rate/min)',color:chartColors.sarsatFrm});
 
     for(var i=0;i<decoders.length;i+=2){
         html+='<div class="chart-row">';
@@ -507,26 +501,24 @@ function buildCharts(hist){
     bindToolbarEvents();
 
     chartInstances['ch-traffic']=makeChart('ch-traffic',trafficSeries.map(formatTrafficLabel),trafficSeries.map(function(s){return s.color;}),'KB/s',{noZero:true});
-    if(hasDongle){
-        var dlabels=[],dcolors=[];
+    var dlabels=[],dcolors=[];
+    if(receiverMeta.length>0){
         for(var d=0;d<receiverMeta.length;d++){
             var rm=receiverMeta[d];
             dlabels.push('rx['+d+'] '+rm.serial+' ('+rm.role+')');
             dcolors.push(chartColors.dongle[d%chartColors.dongle.length]);
         }
-        chartInstances['ch-dongle']=makeChart('ch-dongle',dlabels,dcolors,'Msps');
+    }else{
+        dlabels.push('(no receivers)');dcolors.push(chartColors.dongle[0]);
     }
+    chartInstances['ch-dongle']=makeChart('ch-dongle',dlabels,dcolors,'Msps');
     chartInstances['ch-cpu']=makeChart('ch-cpu',['User CPU','System CPU'],[chartColors.cpu,chartColors.cpuSys],'CPU s/min');
     chartInstances['ch-mem']=makeChart('ch-mem',['RSS','Available'],[chartColors.rss,chartColors.memAvail],'MB');
 
-    if(hasAdsb){
-        chartInstances['ch-adsb-msg']=makeChart('ch-adsb-msg','Messages',chartColors.adsbMsg,'msg/min');
-        chartInstances['ch-adsb-rf']=makeChart('ch-adsb-rf',['Signal','Noise'],[chartColors.adsbSignal,chartColors.adsbNoise],'dBFS',{noZero:true});
-        chartInstances['ch-adsb-gain']=makeChart('ch-adsb-gain','Gain',chartColors.adsbGain,'dB',{noZero:true});
-    }
-    if(hasFlarm){
-        chartInstances['ch-flarm']=makeChart('ch-flarm',['Detected','Decoded'],[chartColors.flarmDet,chartColors.flarmDec],'pkts/min');
-    }
+    chartInstances['ch-adsb-msg']=makeChart('ch-adsb-msg','Messages',chartColors.adsbMsg,'msg/min');
+    chartInstances['ch-adsb-rf']=makeChart('ch-adsb-rf',['Signal','Noise'],[chartColors.adsbSignal,chartColors.adsbNoise],'dBFS',{noZero:true});
+    chartInstances['ch-adsb-gain']=makeChart('ch-adsb-gain','Gain',chartColors.adsbGain,'dB',{noZero:true});
+    chartInstances['ch-flarm']=makeChart('ch-flarm',['Detected','Decoded'],[chartColors.flarmDet,chartColors.flarmDec],'pkts/min');
     decoders.forEach(function(dec){
         if(!dec.multi&&!chartInstances[dec.id]){
             chartInstances[dec.id]=makeChart(dec.id,'Decoded',dec.color,'/min');
@@ -586,8 +578,9 @@ function updateChartsData(hist){
         chartInstances['ch-flarm'].data.datasets[1].data=computeRates(snaps,'fc');
         chartInstances['ch-flarm'].update(mode);
     }
-    keyMap={'ch-acars':'ad','ch-vdl2':'vd','ch-sonde':'sd','ch-pocsag':'pd',
-            'ch-gsm':'gb','ch-lte':'lm','ch-fanet':'nd','ch-sarsat':'sf'};
+    keyMap={'ch-ogntp':'od','ch-adsl':'al','ch-p3i':'pi',
+            'ch-acars':'ad','ch-vdl2':'vd','ch-sonde':'sd','ch-pocsag':'pd',
+            'ch-gsm':'gb','ch-lte':'lm','ch-iot868':'id','ch-fanet':'nd','ch-sarsat':'sf'};
     Object.keys(keyMap).forEach(function(id){
         if(chartInstances[id]){
             chartInstances[id].data.datasets[0].data=computeRates(snaps,keyMap[id]);

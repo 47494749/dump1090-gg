@@ -3861,6 +3861,9 @@ void rxGetStatsSnapshot(rx_stats_snapshot_t *out)
             if (flarmDecoderGetStats(rx, &fs)) {
                 out->flarm_detected = (uint32_t)fs.packets_detected;
                 out->flarm_decoded  = (uint32_t)fs.packets_decoded;
+                out->ogntp_decoded  = (uint32_t)fs.ogntp_packets_decoded;
+                out->adsl_decoded   = (uint32_t)fs.adsl_packets_decoded;
+                out->p3i_decoded    = (uint32_t)fs.p3i_packets_decoded;
             }
             break;
         }
@@ -3933,6 +3936,13 @@ void rxGetStatsSnapshot(rx_stats_snapshot_t *out)
                 sarsat_stats_t ss;
                 sarsat_get_stats(c->inner, &ss);
                 out->sarsat_frames = (uint32_t)ss.frames_decoded;
+            }
+            break;
+        }
+        case SDR_ROLE_IOT868: {
+            iot_decoder_state_t *c = (iot_decoder_state_t *)rx->decoder_state;
+            if (c) {
+                out->iot868_decoded = (uint32_t)iotDecoderGetPacketsDecoded(c);
             }
             break;
         }

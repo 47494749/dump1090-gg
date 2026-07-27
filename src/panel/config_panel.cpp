@@ -90,8 +90,8 @@ static void http_send_json(int32_t fd, const char *json, int32_t len);
 
 #define STATS_HISTORY_MAX_ENTRIES  129600 // 90 days at 60s interval (~12 MB)
 #define STATS_HISTORY_FILE        "/etc/dump1090-gg/stats_history.dat"
-#define STATS_HISTORY_MAGIC       0x53483032  // "SH02"
-#define STATS_HISTORY_VERSION     2
+#define STATS_HISTORY_MAGIC       0x53483033  // "SH03"
+#define STATS_HISTORY_VERSION     3
 #define STATS_HISTORY_SAVE_INTERVAL 10  // save every N snapshots
 
 struct stats_snapshot {
@@ -110,6 +110,12 @@ struct stats_snapshot {
     // FLARM
     uint32_t flarm_det;    // cumulative detected
     uint32_t flarm_dec;    // cumulative decoded
+    // OGNTP
+    uint32_t ogntp_dec;    // cumulative decoded
+    // ADS-L
+    uint32_t adsl_dec;     // cumulative decoded
+    // P3I
+    uint32_t p3i_dec;      // cumulative decoded
     // ACARS
     uint32_t acars_dec;
     // VDL2
@@ -122,6 +128,8 @@ struct stats_snapshot {
     uint32_t gsm_bcch;
     // LTE
     uint32_t lte_mib;
+    // IoT 868
+    uint32_t iot868_dec;   // cumulative decoded
     // FANET
     uint32_t fanet_dec;
     // SARSAT
@@ -231,6 +239,91 @@ static void statsHistorySave(void)
     pthread_mutex_unlock(&StatsHistory.mutex);
 }
 
+// --- V2 snapshot layout (for migration from version 2) ---
+struct stats_snapshot_v2 {
+    uint64_t ts;
+    float cpu_u, cpu_s;
+    uint32_t rss, mem_avail;
+    uint32_t adsb_msg, adsb_trk;
+    float adsb_noise, adsb_signal;
+    int16_t adsb_gain;
+    uint32_t flarm_det, flarm_dec;
+    uint32_t acars_dec, vdl2_dec, sonde_dec, pocsag_dec;
+    uint32_t gsm_bcch, lte_mib;
+    uint32_t fanet_dec, sarsat_frm;
+    uint32_t raw_out_kb, beast_cooked_out_kb, beast_verbatim_out_kb, beast_verbatim_local_out_kb;
+    uint32_t basestation_out_kb, stratux_out_kb, raw_in_kb, beast_in_kb;
+    uint64_t rx_samples[8];
+    uint8_t  rx_count;
+};
+
+static void migrate_v2_to_v3(struct stats_snapshot *dst, const struct stats_snapshot_v2 *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->ts = src->ts;
+    dst->cpu_u = src->cpu_u; dst->cpu_s = src->cpu_s;
+    dst->rss = src->rss; dst->mem_avail = src->mem_avail;
+    dst->adsb_msg = src->adsb_msg; dst->adsb_trk = src->adsb_trk;
+    dst->adsb_noise = src->adsb_noise; dst->adsb_signal = src->adsb_signal;
+    dst->adsb_gain = src->adsb_gain;
+    dst->flarm_det = src->flarm_det; dst->flarm_dec = src->flarm_dec;
+    dst->ogntp_dec = 0; dst->adsl_dec = 0; dst->p3i_dec = 0;
+    dst->acars_dec = src->acars_dec; dst->vdl2_dec = src->vdl2_dec;
+    dst->sonde_dec = src->sonde_dec; dst->pocsag_dec = src->pocsag_dec;
+    dst->gsm_bcch = src->gsm_bcch; dst->lte_mib = src->lte_mib;
+    dst->iot868_dec = 0;
+    dst->fanet_dec = src->fanet_dec; dst->sarsat_frm = src->sarsat_frm;
+    dst->raw_out_kb = src->raw_out_kb; dst->beast_cooked_out_kb = src->beast_cooked_out_kb;
+    dst->beast_verbatim_out_kb = src->beast_verbatim_out_kb;
+    dst->beast_verbatim_local_out_kb = src->beast_verbatim_local_out_kb;
+    dst->basestation_out_kb = src->basestation_out_kb; dst->stratux_out_kb = src->stratux_out_kb;
+    dst->raw_in_kb = src->raw_in_kb; dst->beast_in_kb = src->beast_in_kb;
+    memcpy(dst->rx_samples, src->rx_samples, sizeof(src->rx_samples));
+    dst->rx_count = src->rx_count;
+}
+
+// Try migrating from an older format. Returns allocated array of converted snapshots, or NULL.
+static struct stats_snapshot *statsHistoryMigrate(const char *path, int32_t *out_count, struct stats_file_header *out_hdr)
+{
+    *out_count = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    struct stats_file_header hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.count <= 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    int32_t file_count = hdr.count;
+    if (file_count > STATS_HISTORY_MAX_ENTRIES) file_count = STATS_HISTORY_MAX_ENTRIES;
+
+    struct stats_snapshot *result = NULL;
+
+    if (hdr.magic == 0x53483032 && hdr.version == 2) {
+        // Migrate from v2
+        struct stats_snapshot_v2 *old = (struct stats_snapshot_v2 *)malloc((size_t)file_count * sizeof(struct stats_snapshot_v2));
+        if (!old) { fclose(f); return NULL; }
+        int32_t n = (int32_t)fread(old, sizeof(struct stats_snapshot_v2), (size_t)file_count, f);
+        fclose(f);
+        if (n <= 0) { free(old); return NULL; }
+        result = (struct stats_snapshot *)malloc((size_t)n * sizeof(struct stats_snapshot));
+        if (!result) { free(old); return NULL; }
+        for (int32_t i = 0; i < n; i++)
+            migrate_v2_to_v3(&result[i], &old[i]);
+        free(old);
+        *out_count = n;
+        *out_hdr = hdr;
+        out_hdr->magic = STATS_HISTORY_MAGIC;
+        out_hdr->version = STATS_HISTORY_VERSION;
+        PANEL_DIAG_STDERR("Panel: Migrated %d stats snapshots from v2 to v3\n", n);
+    } else {
+        fclose(f);
+    }
+
+    return result;
+}
+
 // Load stats history from disk into ring buffer.
 // Must be called AFTER statsHistoryReconfigure() has allocated the ring buffer.
 static void statsHistoryLoad(void)
@@ -239,23 +332,39 @@ static void statsHistoryLoad(void)
     if (!f) return;
 
     struct stats_file_header hdr;
-    if (fread(&hdr, sizeof(hdr), 1, f) != 1 ||
-        hdr.magic != STATS_HISTORY_MAGIC ||
-        hdr.version != STATS_HISTORY_VERSION ||
-        hdr.count <= 0) {
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.count <= 0) {
         fclose(f);
         return;
     }
 
-    // Read all snapshots from file
-    int32_t file_count = hdr.count;
-    if (file_count > STATS_HISTORY_MAX_ENTRIES) file_count = STATS_HISTORY_MAX_ENTRIES;
+    int32_t file_count;
+    struct stats_snapshot *tmp = NULL;
 
-    struct stats_snapshot *tmp = (struct stats_snapshot *)malloc((size_t)file_count * sizeof(struct stats_snapshot));
-    if (!tmp) { fclose(f); return; }
+    if (hdr.magic == STATS_HISTORY_MAGIC && hdr.version == STATS_HISTORY_VERSION) {
+        // Current format — read directly
+        file_count = hdr.count;
+        if (file_count > STATS_HISTORY_MAX_ENTRIES) file_count = STATS_HISTORY_MAX_ENTRIES;
+        tmp = (struct stats_snapshot *)malloc((size_t)file_count * sizeof(struct stats_snapshot));
+        if (!tmp) { fclose(f); return; }
+        file_count = (int32_t)fread(tmp, sizeof(struct stats_snapshot), (size_t)file_count, f);
+        fclose(f);
+    } else {
+        // Unknown or old version — close, backup, attempt migration
+        fclose(f);
+        char oldpath[256];
+        snprintf(oldpath, sizeof(oldpath), "%s.old", STATS_HISTORY_FILE);
+        rename(STATS_HISTORY_FILE, oldpath);
+        PANEL_DIAG_STDERR("Panel: Stats file version mismatch, backed up to %s\n", oldpath);
 
-    int actually_read = (int)fread(tmp, sizeof(struct stats_snapshot), (size_t)file_count, f);
-    fclose(f);
+        struct stats_file_header mig_hdr;
+        tmp = statsHistoryMigrate(oldpath, &file_count, &mig_hdr);
+        if (!tmp || file_count <= 0) {
+            free(tmp);
+            return;
+        }
+    }
+
+    int32_t actually_read = file_count;
 
     if (actually_read <= 0) { free(tmp); return; }
 
@@ -366,12 +475,16 @@ static void statsHistoryTakeSnapshot(void)
         snap.adsb_gain   = ds.adsb_gain_db;
         snap.flarm_det   = ds.flarm_detected;
         snap.flarm_dec   = ds.flarm_decoded;
+        snap.ogntp_dec   = ds.ogntp_decoded;
+        snap.adsl_dec    = ds.adsl_decoded;
+        snap.p3i_dec     = ds.p3i_decoded;
         snap.acars_dec   = ds.acars_decoded;
         snap.vdl2_dec    = ds.vdl2_decoded;
         snap.sonde_dec   = ds.sonde_decoded;
         snap.pocsag_dec  = ds.pocsag_decoded;
         snap.gsm_bcch    = ds.gsm_bcch;
         snap.lte_mib     = ds.lte_mib;
+        snap.iot868_dec  = ds.iot868_decoded;
         snap.fanet_dec   = ds.fanet_decoded;
         snap.sarsat_frm  = ds.sarsat_frames;
     }
@@ -446,9 +559,11 @@ static void serialize_snapshot(char *buf, size_t buf_cap, int32_t *pos, struct s
         ",\"am\":%" PRIu32 ",\"at\":%" PRIu32
         ",\"an\":%.1f,\"as\":%.1f,\"ag\":%d"
         ",\"fd\":%" PRIu32 ",\"fc\":%" PRIu32
+        ",\"od\":%" PRIu32 ",\"al\":%" PRIu32 ",\"pi\":%" PRIu32
         ",\"ad\":%" PRIu32 ",\"vd\":%" PRIu32
         ",\"sd\":%" PRIu32 ",\"pd\":%" PRIu32
         ",\"gb\":%" PRIu32 ",\"lm\":%" PRIu32
+        ",\"id\":%" PRIu32
         ",\"nd\":%" PRIu32 ",\"sf\":%" PRIu32
         ",\"tro\":%" PRIu32 ",\"tbc\":%" PRIu32
         ",\"tbv\":%" PRIu32 ",\"tbl\":%" PRIu32
@@ -460,9 +575,11 @@ static void serialize_snapshot(char *buf, size_t buf_cap, int32_t *pos, struct s
         s->adsb_msg, s->adsb_trk,
         s->adsb_noise, s->adsb_signal, (int32_t)s->adsb_gain,
         s->flarm_det, s->flarm_dec,
+        s->ogntp_dec, s->adsl_dec, s->p3i_dec,
         s->acars_dec, s->vdl2_dec,
         s->sonde_dec, s->pocsag_dec,
         s->gsm_bcch, s->lte_mib,
+        s->iot868_dec,
         s->fanet_dec, s->sarsat_frm,
         s->raw_out_kb, s->beast_cooked_out_kb,
         s->beast_verbatim_out_kb, s->beast_verbatim_local_out_kb,
@@ -486,7 +603,8 @@ static void avg_snapshots(struct stats_snapshot *out, struct stats_snapshot *arr
     out->ts = arr[n - 1].ts;
     double cu = 0, cs = 0, an = 0, as_ = 0;
     uint64_t rss = 0, ma = 0, am = 0, at = 0, fd = 0, fc = 0;
-    uint64_t ad = 0, vd = 0, sd = 0, pd = 0, gb = 0, lm = 0, nd = 0, sf = 0;
+    uint64_t od = 0, al = 0, pi = 0;
+    uint64_t ad = 0, vd = 0, sd = 0, pd = 0, gb = 0, lm = 0, id_ = 0, nd = 0, sf = 0;
     uint64_t tro = 0, tbc = 0, tbv = 0, tbl = 0, tbs = 0, tst = 0, tri = 0, tbi = 0;
     int32_t ag_sum = 0;
     double rx_sum[8] = {0};
@@ -498,9 +616,10 @@ static void avg_snapshots(struct stats_snapshot *out, struct stats_snapshot *arr
         an += arr[i].adsb_noise; as_ += arr[i].adsb_signal;
         ag_sum += arr[i].adsb_gain;
         fd += arr[i].flarm_det; fc += arr[i].flarm_dec;
+        od += arr[i].ogntp_dec; al += arr[i].adsl_dec; pi += arr[i].p3i_dec;
         ad += arr[i].acars_dec; vd += arr[i].vdl2_dec;
         sd += arr[i].sonde_dec; pd += arr[i].pocsag_dec;
-        gb += arr[i].gsm_bcch; lm += arr[i].lte_mib;
+        gb += arr[i].gsm_bcch; lm += arr[i].lte_mib; id_ += arr[i].iot868_dec;
         nd += arr[i].fanet_dec; sf += arr[i].sarsat_frm;
         tro += arr[i].raw_out_kb; tbc += arr[i].beast_cooked_out_kb;
         tbv += arr[i].beast_verbatim_out_kb; tbl += arr[i].beast_verbatim_local_out_kb;
@@ -514,9 +633,11 @@ static void avg_snapshots(struct stats_snapshot *out, struct stats_snapshot *arr
     out->cpu_u = arr[n - 1].cpu_u; out->cpu_s = arr[n - 1].cpu_s;
     out->adsb_msg = arr[n - 1].adsb_msg;
     out->flarm_det = arr[n - 1].flarm_det; out->flarm_dec = arr[n - 1].flarm_dec;
+    out->ogntp_dec = arr[n - 1].ogntp_dec; out->adsl_dec = arr[n - 1].adsl_dec; out->p3i_dec = arr[n - 1].p3i_dec;
     out->acars_dec = arr[n - 1].acars_dec; out->vdl2_dec = arr[n - 1].vdl2_dec;
     out->sonde_dec = arr[n - 1].sonde_dec; out->pocsag_dec = arr[n - 1].pocsag_dec;
     out->gsm_bcch = arr[n - 1].gsm_bcch; out->lte_mib = arr[n - 1].lte_mib;
+    out->iot868_dec = arr[n - 1].iot868_dec;
     out->fanet_dec = arr[n - 1].fanet_dec; out->sarsat_frm = arr[n - 1].sarsat_frm;
     out->raw_out_kb = arr[n - 1].raw_out_kb; out->beast_cooked_out_kb = arr[n - 1].beast_cooked_out_kb;
     out->beast_verbatim_out_kb = arr[n - 1].beast_verbatim_out_kb;

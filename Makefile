@@ -1,6 +1,6 @@
 PROGNAME=dump1090
 
-DUMP1090_VERSION ?= 1.0.8
+DUMP1090_VERSION ?= 1.0.9
 DUMP1090_DIAGNOSTICS ?= no
 
 # ======================== Directory layout ========================

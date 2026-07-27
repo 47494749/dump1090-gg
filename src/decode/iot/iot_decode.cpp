@@ -506,6 +506,11 @@ void iotDecoderDestroy(iot_decoder_state_t *state)
     free(state);
 }
 
+uint64_t iotDecoderGetPacketsDecoded(iot_decoder_state_t *state)
+{
+    return state ? state->packets_decoded : 0;
+}
+
 int32_t iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg)
 {
     if (!state || !state->out_queue) return 0;

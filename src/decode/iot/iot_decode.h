@@ -122,6 +122,9 @@ int32_t iotDecoderDequeue(iot_decoder_state_t *state, iot_device_msg_t *msg);
 // Destroy decoder state.
 void iotDecoderDestroy(iot_decoder_state_t *state);
 
+// Get cumulative decoded packet count.
+uint64_t iotDecoderGetPacketsDecoded(iot_decoder_state_t *state);
+
 // Get protocol name string
 const char *iotProtocolName(iot_protocol_t proto);
 
