@@ -31,7 +31,7 @@ jobs:
             "${VERSION_CODENAME}" "${VERSION_CODENAME}" "${VERSION_CODENAME}" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
           sudo apt-get update || true
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libusb-1.0-0-dev:arm64 libssl-dev:arm64 libncurses-dev:arm64 zlib1g-dev:arm64
+            libusb-1.0-0-dev:arm64 librtlsdr-dev:arm64 libssl-dev:arm64 libncurses-dev:arm64 zlib1g-dev:arm64
 
       - name: Clone and build libsdrgg
         run: |
