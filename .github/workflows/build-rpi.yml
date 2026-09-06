@@ -42,6 +42,9 @@ jobs:
       - name: Patch Makefile for cross-compile warnings
         run: |
           sed -i 's/-Werror//g' Makefile
+          # Fix include order in sdr_backend.cpp for cross-compile
+          sed -i 's/#include <rtl-sdr.h>/#include "gg_format.h"
+#include <rtl-sdr.h>/' src/sdr/sdr_backend.cpp
 
       - name: Build dump1090-gg (aarch64)
         run: |
