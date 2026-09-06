@@ -10,6 +10,37 @@ actually present here.
 
 ---
 
+### v1.0.9 (2026-09-06)
+
+**Multi-decoder stats & charts:**
+- Stats history format upgraded to v3 (`SH03`): new fields for OGNTP, ADS-L,
+  P3I, and IoT 868 decoded packet counters
+- Automatic v2→v3 migration preserves existing history data
+- `stats.html` charts now show all active decoders dynamically instead of
+  hardcoded ADS-B/FLARM only
+- New chart color assignments for OGNTP, ADS-L, P3I, and IoT 868 decoders
+
+**IoT 868 counter API:**
+- Added `iotDecoderGetPacketsDecoded()` to expose IoT 868 decoded packet count
+- Stats snapshot (`rxGetStatsSnapshot`) now includes IoT 868 counters
+
+**FLARM stats granularity:**
+- Stats snapshot now reports OGNTP, ADS-L, and P3I decoded counts separately
+  (previously aggregated under FLARM)
+
+**Sharing monitor improvements:**
+- New `sharing_count_localhost_connections()` helper to detect stale feeders
+  that are running but not connected
+- Two-phase monitor: Phase 1 restarts stopped services, Phase 2 restarts
+  services that are running but have no localhost connections
+- Extracted `sharing_restart_service()` for cleaner restart logic
+
+**Build fix:**
+- Moved `gg_format.h` include outside `#ifdef ENABLE_RTLSDR` in
+  `sdr_backend.cpp` — fixes SDRGG-only cross-compilation builds
+
+---
+
 ### v1.0.8 (2026-07-27)
 
 **Sharing programs page (new):**

@@ -6479,32 +6479,93 @@ static void sharing_scan_system(void) {
 static uint64_t sharing_last_monitor_ms = 0;
 #define SHARING_MONITOR_INTERVAL_MS  3600000ULL  // 1 hour
 
+static int32_t sharing_count_localhost_connections(int32_t port) {
+    int32_t count = 0;
+    for (struct net_service *svc = Modes.services; svc; svc = svc->next) {
+        bool port_match = false;
+        for (int32_t i = 0; i < svc->listener_count; i++) {
+            struct sockaddr_in sa;
+            socklen_t slen = sizeof(sa);
+            if (getsockname(svc->listener_fds[i], (struct sockaddr *)&sa, &slen) == 0) {
+                if (ntohs(sa.sin_port) == port) { port_match = true; break; }
+            }
+        }
+        if (!port_match) continue;
+        for (struct client *c = Modes.clients; c; c = c->next) {
+            if (c->fd < 0 || c->service != svc) continue;
+            struct sockaddr_in peer;
+            socklen_t plen = sizeof(peer);
+            if (getpeername(c->fd, (struct sockaddr *)&peer, &plen) == 0) {
+                if (ntohl(peer.sin_addr.s_addr) == INADDR_LOOPBACK)
+                    count++;
+            }
+        }
+    }
+    return count;
+}
+
+static void sharing_restart_service(sharing_program_t *p) {
+    char cmd[256], out[64];
+    snprintf(cmd, sizeof(cmd), "sudo -n systemctl restart %s 2>&1", p->service);
+    sharing_run_cmd(cmd, out, sizeof(out));
+    snprintf(cmd, sizeof(cmd), "systemctl is-active %s 2>/dev/null", p->service);
+    sharing_run_cmd(cmd, out, sizeof(out));
+    p->running = (strcmp(out, "active") == 0);
+}
+
 static void sharing_monitor_check(void) {
     pthread_mutex_lock(&sharing_mutex);
     sharing_load_config();
     sharing_scan_system();
 
+    // Phase 1: restart programs that are not running at all
     for (int32_t i = 0; i < SharingProgramCount; i++) {
         sharing_program_t *p = &SharingPrograms[i];
         if (!p->monitor || !p->detected || p->excluded) continue;
         if (p->running) continue;
 
-        // Program is monitored, detected, not excluded, and not running — restart it
-        char cmd[256], out[64];
-        snprintf(cmd, sizeof(cmd), "sudo -n systemctl restart %s 2>&1", p->service);
-        sharing_run_cmd(cmd, out, sizeof(out));
-
-        // Verify it actually started
-        snprintf(cmd, sizeof(cmd), "systemctl is-active %s 2>/dev/null", p->service);
-        sharing_run_cmd(cmd, out, sizeof(out));
-        p->running = (strcmp(out, "active") == 0);
-
+        sharing_restart_service(p);
         if (p->running) {
             panelLog("Sharing monitor: restarted %s (%s)", p->name, p->service);
         } else {
             panelLog("Sharing monitor: FAILED to restart %s (%s)", p->name, p->service);
         }
     }
+
+    // Phase 2: detect zombie clients (running but not connected to our port)
+    // Group by port: count expected vs actual localhost connections
+    for (int32_t i = 0; i < SharingProgramCount; i++) {
+        sharing_program_t *p = &SharingPrograms[i];
+        if (!p->monitor || !p->detected || p->excluded) continue;
+        if (!p->running || p->connection_port <= 0) continue;
+
+        // Count how many monitored running clients expect this port
+        int32_t expected_on_port = 0;
+        for (int32_t j = 0; j < SharingProgramCount; j++) {
+            sharing_program_t *q = &SharingPrograms[j];
+            if (q->running && q->connection_port == p->connection_port)
+                expected_on_port++;
+        }
+
+        int32_t actual = sharing_count_localhost_connections(p->connection_port);
+        if (actual >= expected_on_port) continue;
+
+        // Deficit on this port — restart this client and check if connection count grows
+        int32_t before = actual;
+        panelLog("Sharing monitor: %s may be zombie (port %d: %d connections, %d expected), restarting",
+                 p->name, p->connection_port, actual, expected_on_port);
+        sharing_restart_service(p);
+        if (p->running) {
+            usleep(5000000);
+            int32_t after = sharing_count_localhost_connections(p->connection_port);
+            if (after > before) {
+                panelLog("Sharing monitor: %s reconnected after restart", p->name);
+            } else {
+                panelLog("Sharing monitor: %s still not connected after restart", p->name);
+            }
+        }
+    }
+
     pthread_mutex_unlock(&sharing_mutex);
 }
 
