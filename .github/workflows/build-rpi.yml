@@ -1,0 +1,42 @@
+name: Build for Raspberry Pi
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compiler and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            pkg-config libusb-1.0-0-dev libncurses-dev
+
+      - name: Clone and build libsdrgg
+        run: |
+          git clone https://github.com/47494749/libsdrgg.git ../libsdrgg
+          cd ../libsdrgg
+          make static CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar
+
+      - name: Build dump1090-gg (aarch64)
+        run: |
+          make -j$(nproc) \
+            CC=aarch64-linux-gnu-gcc \
+            CXX=aarch64-linux-gnu-g++ \
+            SDRGG=yes \
+            SDRGG_PREFIX=../libsdrgg
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dump1090-gg-arm64
+          path: |
+            dump1090
+            panel/
