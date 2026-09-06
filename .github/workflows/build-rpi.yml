@@ -17,7 +17,6 @@ jobs:
         run: |
           sudo dpkg --add-architecture arm64
           . /etc/os-release
-          sudo rm -f /etc/apt/sources.list.d/arm64-ports.list
           for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             [ -f "$f" ] || continue
             if grep -q '^deb ' "$f" 2>/dev/null; then
@@ -39,12 +38,17 @@ jobs:
           cd ../libsdrgg
           make static CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar
 
-      - name: Patch Makefile for cross-compile warnings
+      - name: Patch sources for cross-compile
         run: |
           sed -i 's/-Werror//g' Makefile
-          # Fix include order in sdr_backend.cpp for cross-compile
-          sed -i 's/#include <rtl-sdr.h>/#include "gg_format.h"
-#include <rtl-sdr.h>/' src/sdr/sdr_backend.cpp
+          python3 -c "
+          import re
+          with open('src/sdr/sdr_backend.cpp') as f: t = f.read()
+          if '#include \"gg_format.h\"' not in t.split('#include <rtl-sdr.h>')[0]:
+              t = t.replace('#include <rtl-sdr.h>', '#include \"gg_format.h\"\n#include <rtl-sdr.h>')
+              with open('src/sdr/sdr_backend.cpp','w') as f: f.write(t)
+              print('Patched sdr_backend.cpp')
+          "
 
       - name: Build dump1090-gg (aarch64)
         run: |
