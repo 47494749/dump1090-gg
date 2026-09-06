@@ -17,10 +17,7 @@ jobs:
         run: |
           sudo dpkg --add-architecture arm64
           . /etc/os-release
-
-          # Replace ALL existing sources with arch-pinned versions
           sudo rm -f /etc/apt/sources.list.d/arm64-ports.list
-          # Pin all existing sources to amd64
           for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             [ -f "$f" ] || continue
             if grep -q '^deb ' "$f" 2>/dev/null; then
@@ -30,11 +27,8 @@ jobs:
               grep -q 'Architectures:' "$f" || sudo sed -i '/^Types:/a Architectures: amd64' "$f"
             fi
           done
-
-          # Add arm64 ports
           printf "deb [arch=arm64] http://ports.ubuntu.com/ %s main restricted universe\ndeb [arch=arm64] http://ports.ubuntu.com/ %s-updates main restricted universe\ndeb [arch=arm64] http://ports.ubuntu.com/ %s-security main restricted universe\n" \
             "${VERSION_CODENAME}" "${VERSION_CODENAME}" "${VERSION_CODENAME}" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-
           sudo apt-get update || true
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libusb-1.0-0-dev:arm64 libssl-dev:arm64 libncurses-dev:arm64 zlib1g-dev:arm64
@@ -45,9 +39,13 @@ jobs:
           cd ../libsdrgg
           make static CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar
 
+      - name: Patch Makefile for cross-compile warnings
+        run: |
+          sed -i 's/-Werror/-Werror -Wno-deprecated-declarations/' Makefile
+
       - name: Build dump1090-gg (aarch64)
         run: |
-          make -j$(nproc) EXTRA_CXXFLAGS="-Wno-deprecated-declarations" EXTRA_CFLAGS="-Wno-deprecated-declarations" \
+          make -j$(nproc) \
             CC=aarch64-linux-gnu-gcc \
             CXX=aarch64-linux-gnu-g++ \
             ARCH=aarch64 \
