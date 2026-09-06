@@ -16,18 +16,26 @@ jobs:
       - name: Setup arm64 cross-compilation
         run: |
           sudo dpkg --add-architecture arm64
-          # Add arm64 sources only for Ubuntu ports (not third-party repos)
           . /etc/os-release
-          cat <<SOURCES | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-          deb [arch=arm64] http://ports.ubuntu.com/ ${VERSION_CODENAME} main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ ${VERSION_CODENAME}-updates main restricted universe
-          SOURCES
-          # Pin existing repos to amd64 only
-          for f in /etc/apt/sources.list.d/*.list; do
-            [ "$f" = "/etc/apt/sources.list.d/arm64-ports.list" ] && continue
-            sudo sed -i '/^\s*deb/ { /\[.*arch=/ !s/deb /deb [arch=amd64] /; }' "$f"
+
+          # Replace ALL existing sources with arch-pinned versions
+          sudo rm -f /etc/apt/sources.list.d/arm64-ports.list
+          # Pin all existing sources to amd64
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            if grep -q '^deb ' "$f" 2>/dev/null; then
+              sudo sed -i '/^\s*deb/ { /\[/! s/deb /deb [arch=amd64] /; /\[/ { /arch=/! s/\[/[arch=amd64 /; } }' "$f"
+            fi
+            if grep -q '^Types:' "$f" 2>/dev/null; then
+              grep -q 'Architectures:' "$f" || sudo sed -i '/^Types:/a Architectures: amd64' "$f"
+            fi
           done
-          sudo apt-get update
+
+          # Add arm64 ports
+          printf "deb [arch=arm64] http://ports.ubuntu.com/ %s main restricted universe\ndeb [arch=arm64] http://ports.ubuntu.com/ %s-updates main restricted universe\ndeb [arch=arm64] http://ports.ubuntu.com/ %s-security main restricted universe\n" \
+            "${VERSION_CODENAME}" "${VERSION_CODENAME}" "${VERSION_CODENAME}" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
+
+          sudo apt-get update || true
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libusb-1.0-0-dev:arm64 libssl-dev:arm64 libncurses-dev:arm64 zlib1g-dev:arm64
 
@@ -44,8 +52,7 @@ jobs:
             CXX=aarch64-linux-gnu-g++ \
             ARCH=aarch64 \
             SDRGG=yes \
-            SDRGG_PREFIX=../libsdrgg \
-            PKG_CONFIG="aarch64-linux-gnu-pkg-config"
+            SDRGG_PREFIX=../libsdrgg
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
