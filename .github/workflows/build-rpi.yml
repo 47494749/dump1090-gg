@@ -47,7 +47,7 @@ jobs:
 
       - name: Build dump1090-gg (aarch64)
         run: |
-          make -j$(nproc) \
+          make -j$(nproc) EXTRA_CXXFLAGS="-Wno-deprecated-declarations" EXTRA_CFLAGS="-Wno-deprecated-declarations" \
             CC=aarch64-linux-gnu-gcc \
             CXX=aarch64-linux-gnu-g++ \
             ARCH=aarch64 \
