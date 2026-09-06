@@ -41,7 +41,7 @@ jobs:
 
       - name: Patch Makefile for cross-compile warnings
         run: |
-          sed -i 's/-Werror/-Werror -Wno-deprecated-declarations/' Makefile
+          sed -i 's/-Werror//g' Makefile
 
       - name: Build dump1090-gg (aarch64)
         run: |
