@@ -38,17 +38,8 @@ jobs:
           cd ../libsdrgg
           make static CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar
 
-      - name: Patch sources for cross-compile
-        run: |
-          sed -i 's/-Werror//g' Makefile
-          python3 -c "
-          import re
-          with open('src/sdr/sdr_backend.cpp') as f: t = f.read()
-          if '#include \"gg_format.h\"' not in t.split('#include <rtl-sdr.h>')[0]:
-              t = t.replace('#include <rtl-sdr.h>', '#include \"gg_format.h\"\n#include <rtl-sdr.h>')
-              with open('src/sdr/sdr_backend.cpp','w') as f: f.write(t)
-              print('Patched sdr_backend.cpp')
-          "
+      - name: Patch Makefile for cross-compile
+        run: sed -i 's/-Werror//g' Makefile
 
       - name: Build dump1090-gg (aarch64)
         run: |

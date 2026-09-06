@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include "gg_format.h"
 
 #ifndef MAX_SDR_RECEIVERS
 #define MAX_SDR_RECEIVERS 8
@@ -19,7 +20,6 @@
 
 #ifdef ENABLE_RTLSDR
 #include <rtl-sdr.h>
-#include "gg_format.h"
 #include <string>
 #endif
 
