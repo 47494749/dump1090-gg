@@ -901,6 +901,74 @@ void rxDiagHealthCheck(void)
         // For FLARM: use sample_counter growth without decoded frames
         // (FLARM is sparse, so use longer timeout — handled by FLARM decoder stats)
     }
+
+    // ---- USB hotplug recovery: resurrect receivers in ERROR state ----
+    // When a dongle is physically disconnected and reconnected, the reader
+    // thread exits and the receiver enters RX_STATE_ERROR permanently.
+    // This watchdog polls for the serial number to reappear on the USB bus
+    // and reopens the receiver automatically — no service restart needed.
+    {
+        static uint64_t last_recovery_scan = 0;
+        if (now - last_recovery_scan >= 5000) {  // scan every 5 seconds
+            last_recovery_scan = now;
+
+            bool have_dead_rx = false;
+            for (int32_t i = 0; i < SdrManager.count; i++) {
+                sdr_receiver_t *r = &SdrManager.receivers[i];
+                // Catch both ERROR state and OPEN-but-not-streaming (thread died)
+                if (r->state == RX_STATE_ERROR ||
+                    (r->state == RX_STATE_OPEN && !r->thread_started && r->config.role != SDR_ROLE_NONE))
+                    have_dead_rx = true;
+            }
+
+            if (have_dead_rx) {
+                // Enumerate current USB devices to see which serials are present
+                sdr_dev_info_t usb_devs[MAX_SDR_RECEIVERS];
+                int32_t usb_count = sdrBackendEnumerateAll(usb_devs, MAX_SDR_RECEIVERS);
+
+                for (int32_t i = 0; i < SdrManager.count; i++) {
+                    sdr_receiver_t *rx = &SdrManager.receivers[i];
+                    if (rx->state != RX_STATE_ERROR &&
+                        !(rx->state == RX_STATE_OPEN && !rx->thread_started && rx->config.role != SDR_ROLE_NONE))
+                        continue;
+                    if (rx->config.ifile_path[0] != '\0') continue;  // skip virtual
+
+                    // Check if this serial is back on USB
+                    bool found = false;
+                    for (int32_t d = 0; d < usb_count; d++) {
+                        if (!strcmp(rx->config.serial, usb_devs[d].serial)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) continue;
+
+                    gg::eprint("rx[%d]: USB hotplug recovery — serial %s reappeared (state=%s), reopening\n",
+                               rx->id, rx->config.serial, rxStateName(rx->state));
+
+                    // Join dead reader thread if still hanging
+                    if (rx->thread_started) {
+                        pthread_join(rx->thread, NULL);
+                        rx->thread_started = false;
+                    }
+
+                    // Close stale handle (sets state to IDLE)
+                    rxClose(rx);
+
+                    // Reopen + start
+                    if (rxOpen(rx)) {
+                        if (rxStart(rx)) {
+                            gg::eprint("rx[%d]: USB hotplug recovery — successfully reopened and streaming\n", rx->id);
+                        } else {
+                            gg::eprint("rx[%d]: USB hotplug recovery — open OK but start failed\n", rx->id);
+                        }
+                    } else {
+                        gg::eprint("rx[%d]: USB hotplug recovery — reopen failed, will retry in 5s\n", rx->id);
+                    }
+                }
+            }
+        }
+    }
 }
 
 int32_t rxGetMaxGain(sdr_receiver_t *rx)
