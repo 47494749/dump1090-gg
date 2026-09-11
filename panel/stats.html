@@ -113,7 +113,7 @@ var chartColors={
     sondeDec:'#26c6da', pocsagDec:'#d4e157',
     gsmBcch:'#ffa726', lteMib:'#42a5f5',
     iot868Dec:'#ff8a65',
-    fanetDec:'#66bb6a', sarsatFrm:'#ef5350',
+    fanetDec:'#66bb6a', sarsatFrm:'#ef5350', gravesTgt:'#7e57c2',
     trafficRawOut:'#29b6f6', trafficBeastCooked:'#ab47bc',
     trafficBeastVerbatim:'#ef5350', trafficBeastLocal:'#ffa726',
     trafficBasestation:'#66bb6a', trafficStratux:'#8d6e63',
@@ -486,6 +486,7 @@ function buildCharts(hist){
     decoders.push({id:'ch-iot868',title:'IoT 868 Decoded (rate/min)',color:chartColors.iot868Dec});
     decoders.push({id:'ch-fanet',title:'FANET Decoded (rate/min)',color:chartColors.fanetDec});
     decoders.push({id:'ch-sarsat',title:'SARSAT Frames (rate/min)',color:chartColors.sarsatFrm});
+    decoders.push({id:'ch-graves',title:'GRAVES Targets (count)',color:chartColors.gravesTgt});
 
     for(var i=0;i<decoders.length;i+=2){
         html+='<div class="chart-row">';
@@ -581,7 +582,7 @@ function updateChartsData(hist){
     }
     keyMap={'ch-ogntp':'od','ch-adsl':'al','ch-p3i':'pi',
             'ch-acars':'ad','ch-vdl2':'vd','ch-sonde':'sd','ch-pocsag':'pd',
-            'ch-gsm':'gb','ch-lte':'lm','ch-iot868':'id','ch-fanet':'nd','ch-sarsat':'sf'};
+            'ch-gsm':'gb','ch-lte':'lm','ch-iot868':'id','ch-fanet':'nd','ch-sarsat':'sf','ch-graves':'gt'};
     Object.keys(keyMap).forEach(function(id){
         if(chartInstances[id]){
             chartInstances[id].data.datasets[0].data=computeRates(snaps,keyMap[id]);
@@ -683,7 +684,8 @@ function renderDecoders(d){
         {key:'gsm',name:'GSM',msg:'bcch_decoded'},
         {key:'lte',name:'LTE',msg:'mib_decoded'},
         {key:'fanet',name:'FANET',msg:'decoded'},
-        {key:'sarsat',name:'SARSAT',msg:'frames'}
+        {key:'sarsat',name:'SARSAT',msg:'frames'},
+        {key:'graves',name:'GRAVES',msg:'active'}
     ];
     decoders.forEach(function(dec){
         var v=d[dec.key];

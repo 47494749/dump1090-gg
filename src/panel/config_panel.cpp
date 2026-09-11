@@ -5238,6 +5238,7 @@ static void serve_fanet_page(int32_t fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a class='active' href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
