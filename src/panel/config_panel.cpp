@@ -2405,12 +2405,12 @@ static int32_t panelAddBeastFeed(const char *name, const char *host, int32_t por
 void panelEnsureDefaultBeastFeeds(void)
 {
     static const struct { const char *name; const char *host; int32_t port; int32_t format; } defaults[] = {
-        { "ADSBx",          "feed.adsbexchange.com",   30005, FEED_FORMAT_BEAST_REDUCE },
+        { "ADSBx",          "feed1.adsbexchange.com",  30004, FEED_FORMAT_BEAST_REDUCE },
         { "adsb.fi",        "feed.adsb.fi",            30004, FEED_FORMAT_BEAST_REDUCE },
         { "FlyItaly",       "dati.flyitalyadsb.com",   4905,  FEED_FORMAT_BEAST_REDUCE },
-        { "PlaneWatch",     "atc.plane.watch",         30004, FEED_FORMAT_BEAST_REDUCE },
+        { "ADSBItalia",     "feed.adsbitalia.it",      31108, FEED_FORMAT_BEAST_REDUCE },
         { "adsb.one",       "feed.adsb.one",           64004, FEED_FORMAT_BEAST_REDUCE },
-        { "adsb.lol",       "feed.adsb.lol",           30004, FEED_FORMAT_BEAST_REDUCE },
+        { "adsb.lol",       "in.adsb.lol",             30004, FEED_FORMAT_BEAST_REDUCE },
         { "airplanes.live", "feed.airplanes.live",     30004, FEED_FORMAT_BEAST_REDUCE },
         { "Planespotters",  "feed.planespotters.net",  30004, FEED_FORMAT_BEAST_REDUCE },
         { "TheAirTraffic",  "feed.theairtraffic.com",  30004, FEED_FORMAT_BEAST_REDUCE },
