@@ -197,7 +197,7 @@ static const uint8_t rs41_whitening[] = {
 
 static uint8_t gf_exp[512];  // Double-sized for modular reduction
 static uint8_t gf_log[256];
-static int32_t gf_initialized = 0;
+static volatile int32_t gf_initialized = 0;
 
 static void gf_init(void)
 {
@@ -212,6 +212,7 @@ static void gf_init(void)
     for (int32_t i = 255; i < 512; i++)
         gf_exp[i] = gf_exp[i - 255];
     gf_log[0] = 0;
+    __sync_synchronize();
     gf_initialized = 1;
 }
 
@@ -448,7 +449,7 @@ static int32_t rs41_rs_correct(uint8_t *frame, int32_t len)
 // Used to verify each RS41 sub-block
 
 static uint16_t crc16_table[256];
-static int32_t crc16_init_done = 0;
+static volatile int32_t crc16_init_done = 0;
 
 static void crc16_init(void)
 {
@@ -463,6 +464,7 @@ static void crc16_init(void)
         }
         crc16_table[i] = crc;
     }
+    __sync_synchronize();
     crc16_init_done = 1;
 }
 
@@ -476,13 +478,14 @@ static uint16_t crc16_ccitt(const uint8_t *data, int32_t len)
 
 // Verify CRC of an RS41 subblock
 // Format: ID(1) + LEN(1) + data(LEN) + CRC(2)
-// CRC covers ID + LEN + data (everything except the 2-byte CRC itself), stored little-endian
+// CRC covers data only (not ID+LEN), stored little-endian
 static bool __attribute__((unused)) rs41_check_block_crc(const uint8_t *block, int32_t block_total_len)
 {
     if (block_total_len < 4) return false;
+    int32_t data_len = block_total_len - 4;  // subtract ID(1) + LEN(1) + CRC(2)
     uint16_t stored_crc = (uint16_t)(block[block_total_len - 2] |
                                      (block[block_total_len - 1] << 8));
-    uint16_t calc_crc = crc16_ccitt(block, block_total_len - 2);
+    uint16_t calc_crc = crc16_ccitt(block + 2, data_len);
     return (stored_crc == calc_crc);
 }
 
@@ -1039,8 +1042,8 @@ static void sonde_parse_frame(struct sonde_state *state)
     for (int32_t i = 0; i < len; i++)
         dw[i] = frame[i] ^ rs41_whitening[(i + 8) % RS41_WHITENING_LEN];
 
-    fprintf(stderr, "Sonde: frame #%lu len=%d rs=%d\n",
-            (uint64_t)state->stats.frames_detected, len, rs_errors);
+    fprintf(stderr, "Sonde: frame #%llu len=%d rs=%d\n",
+            (unsigned long long)state->stats.frames_detected, len, rs_errors);
 
     if (rs_errors < 0) {
         state->stats.rs_uncorrectable++;
@@ -1431,19 +1434,19 @@ static void m10_parse_frame(struct sonde_state *state)
         // Trimble GPS: big-endian 32-bit fields
         double B60B60 = (double)(1<<30) / 90.0; // 2^32/360
 
-        int32_t tow_ms = ((int32_t)f[M10_POS_TOW]<<24) | ((int32_t)f[M10_POS_TOW+1]<<16) |
-                         ((int32_t)f[M10_POS_TOW+2]<<8) | f[M10_POS_TOW+3];
+        int32_t tow_ms = (int32_t)(((uint32_t)f[M10_POS_TOW]<<24) | ((uint32_t)f[M10_POS_TOW+1]<<16) |
+                         ((uint32_t)f[M10_POS_TOW+2]<<8) | f[M10_POS_TOW+3]);
 
-        int32_t lat_raw = ((int32_t)f[M10_POS_LAT]<<24) | ((int32_t)f[M10_POS_LAT+1]<<16) |
-                          ((int32_t)f[M10_POS_LAT+2]<<8) | f[M10_POS_LAT+3];
+        int32_t lat_raw = (int32_t)(((uint32_t)f[M10_POS_LAT]<<24) | ((uint32_t)f[M10_POS_LAT+1]<<16) |
+                          ((uint32_t)f[M10_POS_LAT+2]<<8) | f[M10_POS_LAT+3]);
         msg.lat = lat_raw / B60B60;
 
-        int32_t lon_raw = ((int32_t)f[M10_POS_LON]<<24) | ((int32_t)f[M10_POS_LON+1]<<16) |
-                          ((int32_t)f[M10_POS_LON+2]<<8) | f[M10_POS_LON+3];
+        int32_t lon_raw = (int32_t)(((uint32_t)f[M10_POS_LON]<<24) | ((uint32_t)f[M10_POS_LON+1]<<16) |
+                          ((uint32_t)f[M10_POS_LON+2]<<8) | f[M10_POS_LON+3]);
         msg.lon = lon_raw / B60B60;
 
-        int32_t alt_raw = ((int32_t)f[M10_POS_ALT]<<24) | ((int32_t)f[M10_POS_ALT+1]<<16) |
-                          ((int32_t)f[M10_POS_ALT+2]<<8) | f[M10_POS_ALT+3];
+        int32_t alt_raw = (int32_t)(((uint32_t)f[M10_POS_ALT]<<24) | ((uint32_t)f[M10_POS_ALT+1]<<16) |
+                          ((uint32_t)f[M10_POS_ALT+2]<<8) | f[M10_POS_ALT+3]);
         msg.alt = alt_raw / 1000.0;
 
         // Velocity (0.005 m/s = 1/200 per count)
@@ -1471,16 +1474,16 @@ static void m10_parse_frame(struct sonde_state *state)
         snprintf(msg.type, sizeof(msg.type), "M10+");
 
         // Gtop GPS
-        int32_t lat_raw = ((int32_t)f[M10P_POS_LAT]<<24) | ((int32_t)f[M10P_POS_LAT+1]<<16) |
-                          ((int32_t)f[M10P_POS_LAT+2]<<8) | f[M10P_POS_LAT+3];
+        int32_t lat_raw = (int32_t)(((uint32_t)f[M10P_POS_LAT]<<24) | ((uint32_t)f[M10P_POS_LAT+1]<<16) |
+                          ((uint32_t)f[M10P_POS_LAT+2]<<8) | f[M10P_POS_LAT+3]);
         msg.lat = lat_raw / 1e6;
 
-        int32_t lon_raw = ((int32_t)f[M10P_POS_LON]<<24) | ((int32_t)f[M10P_POS_LON+1]<<16) |
-                          ((int32_t)f[M10P_POS_LON+2]<<8) | f[M10P_POS_LON+3];
+        int32_t lon_raw = (int32_t)(((uint32_t)f[M10P_POS_LON]<<24) | ((uint32_t)f[M10P_POS_LON+1]<<16) |
+                          ((uint32_t)f[M10P_POS_LON+2]<<8) | f[M10P_POS_LON+3]);
         msg.lon = lon_raw / 1e6;
 
-        int32_t alt_raw = ((int32_t)f[M10P_POS_ALT]<<16) | ((int32_t)f[M10P_POS_ALT+1]<<8) |
-                          f[M10P_POS_ALT+2];
+        int32_t alt_raw = (int32_t)(((uint32_t)f[M10P_POS_ALT]<<16) | ((uint32_t)f[M10P_POS_ALT+1]<<8) |
+                          f[M10P_POS_ALT+2]);
         if (alt_raw & 0x800000) alt_raw -= 0x1000000;
         msg.alt = alt_raw / 1e2;
 
@@ -1499,7 +1502,7 @@ static void m10_parse_frame(struct sonde_state *state)
     {
         uint32_t sn34 = (uint32_t)f[M10_POS_SN+3] | ((uint32_t)f[M10_POS_SN+4] << 8);
         snprintf(msg.serial, sizeof(msg.serial), "%1X%02u%1X%1u%04u",
-                 (uint32_t)((f[M10_POS_SN+2]>>4)&0xF), (uint32_t)(f[M10_POS_SN+2]&0xFF),
+                 (uint32_t)((f[M10_POS_SN+2]>>4)&0xF), (uint32_t)(f[M10_POS_SN+2]&0x0F),
                  (uint32_t)(f[M10_POS_SN]&0xF),
                  (sn34>>13)&0x7, sn34&0x1FFF);
     }

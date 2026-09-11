@@ -41,7 +41,7 @@ static int32_t uper_bits_left(const uper_t *u) {
 }
 
 static int32_t uper_read(uper_t *u, int nbits) {
-    if (nbits <= 0 || nbits > 32 || uper_bits_left(u) < nbits)
+    if (nbits <= 0 || nbits > 31 || uper_bits_left(u) < nbits)
         return -1;
     uint32_t val = 0;
     for (int32_t i = 0; i < nbits; i++) {
@@ -80,14 +80,16 @@ static int32_t uper_read_ia5string(uper_t *u, char *buf, int32_t bufsize, int32_
         slen = uper_read_constrained(u, lmin, lmax);
         if (slen < 0) return -1;
     }
-    if (slen >= bufsize) slen = bufsize - 1;
+    int32_t actual_len = slen;
+    if (actual_len >= bufsize) actual_len = bufsize - 1;
     for (int32_t i = 0; i < slen; i++) {
         int32_t ch = uper_read(u, 7);
         if (ch < 0) return -1;
-        buf[i] = (char)(ch & 0x7f);
+        if (i < actual_len)
+            buf[i] = (char)(ch & 0x7f);
     }
-    buf[slen] = '\0';
-    return slen;
+    buf[actual_len] = '\0';
+    return actual_len;
 }
 
 // ========== Parameter Types ==========
@@ -95,7 +97,7 @@ static int32_t uper_read_ia5string(uper_t *u, char *buf, int32_t bufsize, int32_
 typedef enum {
     PT_NULL = 0,
     PT_ALT, PT_SPD, PT_TIME, PT_POS, PT_FREETEXT, PT_FREQ, PT_DEG,
-    PT_ALT_ALT, PT_SPD_SPD, PT_ALT_TIME, PT_POS_ALT, PT_POS_SPD,
+    PT_ALT_ALT, PT_SPD_SPD, PT_ALT_TIME, PT_TIME_ALT, PT_POS_ALT, PT_POS_SPD,
     PT_POS_TIME, PT_POS_TIME_ALT,
     PT_VERSION, PT_ERROR, PT_ATIS,
     PT_BEACON, PT_OFFSET, PT_PROCNAME, PT_ROUTECLR, PT_UNITFREQ,
@@ -269,16 +271,16 @@ static const msg_element_t um_table[] = {
     /* UM13  */ {"AT %s EXPECT CLIMB TO %s", PT_POS_ALT},
     /* UM14  */ {"AT %s EXPECT DESCENT TO %s", PT_POS_ALT},
     /* UM15  */ {"AT %s EXPECT CRUISE CLIMB TO %s", PT_POS_ALT},
-    /* UM16  */ {"AT %s EXPECT CLIMB TO %s", PT_ALT_TIME},
-    /* UM17  */ {"AT %s EXPECT DESCENT TO %s", PT_ALT_TIME},
-    /* UM18  */ {"AT %s EXPECT CRUISE CLIMB TO %s", PT_ALT_TIME},
+    /* UM16  */ {"AT %s EXPECT CLIMB TO %s", PT_TIME_ALT},
+    /* UM17  */ {"AT %s EXPECT DESCENT TO %s", PT_TIME_ALT},
+    /* UM18  */ {"AT %s EXPECT CRUISE CLIMB TO %s", PT_TIME_ALT},
     /* UM19  */ {"MAINTAIN %s", PT_ALT},
     /* UM20  */ {"CLIMB TO AND MAINTAIN %s", PT_ALT},
     /* UM21  */ {"AT %s CLIMB TO AND MAINTAIN %s", PT_POS_ALT},
-    /* UM22  */ {"AT %s CLIMB TO AND MAINTAIN %s", PT_ALT_TIME},
+    /* UM22  */ {"AT %s CLIMB TO AND MAINTAIN %s", PT_TIME_ALT},
     /* UM23  */ {"DESCEND TO AND MAINTAIN %s", PT_ALT},
     /* UM24  */ {"AT %s DESCEND TO AND MAINTAIN %s", PT_POS_ALT},
-    /* UM25  */ {"AT %s DESCEND TO AND MAINTAIN %s", PT_ALT_TIME},
+    /* UM25  */ {"AT %s DESCEND TO AND MAINTAIN %s", PT_TIME_ALT},
     /* UM26  */ {"CLIMB TO REACH %s BY %s", PT_ALT_TIME},
     /* UM27  */ {"CLIMB TO REACH %s BY %s", PT_POS_ALT},
     /* UM28  */ {"DESCEND TO REACH %s BY %s", PT_ALT_TIME},
@@ -820,6 +822,7 @@ static int32_t decode_hold_at_waypoint(uper_t *u, char *buf, int32_t sz) {
     if (opt & (1<<1)) { char t[16]; if(decode_time(u,t,sizeof(t))==0&&n<sz) n+=snprintf(buf+n, sz-n, " EFC:%s", t); }
     if (opt & (1<<0)) {
         int32_t lc = uper_read(u,1);
+        if (lc < 0) return -1;
         if (lc==0) { int32_t dc=uper_read(u,1); int32_t dv;
             if(dc==0){dv=uper_read_constrained(u,1,999);if(dv>=0&&n<sz) n+=snprintf(buf+n, sz-n, " LEG:%dNM", dv);}
             else{dv=uper_read_constrained(u,1,128);if(dv>=0&&n<sz) n+=snprintf(buf+n, sz-n, " LEG:%dKM", dv);}
@@ -915,6 +918,10 @@ static int32_t decode_param(uper_t *u, param_type_t ptype, const char *fmt, char
         if(decode_speed(u,t2,sizeof(t2))<0) return -1;
         snprintf(buf, bufsize, fmt, t1, t2); return 0;
     case PT_ALT_TIME:
+        if(decode_altitude(u,t1,sizeof(t1))<0) return -1;
+        if(decode_time(u,t2,sizeof(t2))<0) return -1;
+        snprintf(buf, bufsize, fmt, t1, t2); return 0;
+    case PT_TIME_ALT:
         if(decode_time(u,t1,sizeof(t1))<0) return -1;
         if(decode_altitude(u,t2,sizeof(t2))<0) return -1;
         snprintf(buf, bufsize, fmt, t1, t2); return 0;

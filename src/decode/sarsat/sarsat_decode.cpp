@@ -12,7 +12,7 @@
 //   - FM deviation: ±3.5 kHz
 //   - Biphase-L encoding at 400 baud (800 half-symbols/s)
 //   - Preamble: 15 bits of unmodulated carrier (all 1s after Biphase-L)
-//   - Frame sync: 9 bits (011010000 = normal, 000101111 = test)
+//   - Frame sync: 9 bits (000101111 = normal, 011010000 = test)
 //   - PDF-1: 61 data bits → BCH(82,61) t=3
 //   - PDF-2: 26 data bits → BCH(38,26) t=2 (long format only)
 //
@@ -193,7 +193,7 @@ static void sarsat_init_lpf(struct sarsat_state *st);
 static float sarsat_apply_lpf(struct sarsat_state *st, float sample);
 static void sarsat_process_half_symbol(struct sarsat_state *st, int32_t level);
 static void sarsat_try_decode(struct sarsat_state *st);
-static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test,
+static bool sarsat_decode_frame(uint8_t *bits, int32_t nbits, bool is_test,
                                 sarsat_msg_t *msg);
 static uint32_t bch_syndrome(const uint8_t *bits, int32_t n, uint32_t poly, int32_t deg);
 static bool bch_correct(uint8_t *bits, int32_t n, uint32_t poly, int32_t deg,
@@ -498,7 +498,7 @@ static void sarsat_try_decode(struct sarsat_state *st)
 
 // ======================== Frame decode + BCH ========================
 
-static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test,
+static bool sarsat_decode_frame(uint8_t *bits, int32_t nbits, bool is_test,
                                 sarsat_msg_t *msg)
 {
     memset(msg, 0, sizeof(*msg));
@@ -525,7 +525,7 @@ static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test
             msg->bch1_valid = true;
             msg->bch1_errors = corrected;
             // Copy corrected bits back
-            memcpy((uint8_t *)bits, bch1_block, BCH1_N);
+            memcpy(bits, bch1_block, BCH1_N);
         } else {
             msg->bch1_valid = false;
             msg->valid = false;
@@ -558,7 +558,7 @@ static bool sarsat_decode_frame(const uint8_t *bits, int32_t nbits, bool is_test
             if (bch_correct(bch2_block, BCH2_N, BCH2_POLY, BCH2_DEG, BCH2_T, &corrected)) {
                 msg->bch2_valid = true;
                 msg->bch2_errors = corrected;
-                memcpy((uint8_t *)(bits + BCH1_N), bch2_block, BCH2_N);
+                memcpy(bits + BCH1_N, bch2_block, BCH2_N);
             } else {
                 msg->bch2_valid = false;
             }
@@ -862,7 +862,7 @@ static void sarsat_decode_position(const uint8_t *frame, sarsat_msg_t *msg)
 
         // Bit 4: position source (0=internal, 1=external GPS)
         // Bit 5: 121.5 MHz homing device
-        msg->position_from_gps = (frame[pdf2 + 4] == 0);
+        msg->position_from_gps = (frame[pdf2 + 4] == 1);
         msg->homing_121_5 = (frame[pdf2 + 5] == 1);
 
         // Latitude offset: sign(1) + minutes(5) + seconds/4(4)

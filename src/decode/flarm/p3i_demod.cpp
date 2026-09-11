@@ -136,7 +136,11 @@ static void p3i_init_templates(uint32_t sample_rate)
     p3i_sync_template_len = 16 * p3i_samples_per_bit;
 
     p3i_sync_template = static_cast<decltype(p3i_sync_template)>(malloc(p3i_sync_template_len * sizeof(float)));
-    if (!p3i_sync_template) return;
+    if (!p3i_sync_template) {
+        p3i_sync_template_len = 0;
+        p3i_samples_per_bit = 0;
+        return;
+    }
 
     for (int32_t bit = 0; bit < 16; bit++) {
         float val = ((pattern >> (15 - bit)) & 1) ? 1.0f : -1.0f;
@@ -391,7 +395,7 @@ try_decode:
     uint8_t received_crc = frame[30];
     uint8_t computed_crc = p3i_crc8(payload, P3I_PAYLOAD_SIZE);
     if (computed_crc != received_crc) {
-        // Don't return false — try decoding anyway for diagnostics
+        return false;
     }
 
     // Decode (de-whitens internally)

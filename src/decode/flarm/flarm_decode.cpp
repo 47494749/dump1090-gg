@@ -29,7 +29,7 @@
 #define ROUNDS 6
 #define MX (((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum ^ y) + (key[(p & 3) ^ e] ^ z)))
 
-static void btea(uint32_t *v, int8_t n, const uint32_t key[4])
+static void btea(uint32_t *v, int32_t n, const uint32_t key[4])
 {
     uint32_t y, z, sum;
     uint32_t p, rounds, e;
@@ -306,7 +306,9 @@ bool flarm_load_keys(const char *path)
 
     while (fgets(line, sizeof(line), f)) {
         // Strip trailing whitespace
-        char *end = line + strlen(line) - 1;
+        size_t slen = strlen(line);
+        if (slen == 0) continue;
+        char *end = line + slen - 1;
         while (end >= line && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
 
         if (line[0] == '#' || line[0] == '\0') continue;
@@ -409,7 +411,7 @@ static bool decode_v6(const uint8_t *payload, double ref_lat, double ref_lon,
     // Vertical speed
     uint16_t vs_u16 = pkt.vs;
     int16_t vs_i16 = (int16_t)(vs_u16 | (vs_u16 & (1 << 9) ? 0xFC00U : 0));
-    int16_t vs10 = vs_i16 << pkt.smult;
+    int16_t vs10 = (int16_t)((uint16_t)vs_i16 << pkt.smult);
 
     // Altitude (relative to WGS84 ellipsoid)
     int16_t alt = (int16_t)pkt.alt;

@@ -522,7 +522,9 @@ static bool ogntp_decode_ogn2_packet(const uint8_t *data, double ref_lat, double
     uint8_t turn_code = (uint8_t)((d1 >> 24) & 0xFF);
     float vs_ms = (climb_code == 0x0100) ? 0.0f : (sr2v6_decode((int8_t)(climb_code & 0xFF)) * 0.1f);
     float turn_dps = (turn_code == 0x80) ? 0.0f : (sr2v5_decode((int8_t)turn_code) * 0.1f);
-    uint8_t dop = unsvr_decode_4((uint8_t)gray_decode_u32((d3 >> 25) & 0x3F));
+    uint8_t dop_code = (uint8_t)gray_decode_u32((d3 >> 25) & 0x3F);
+    if (dop_code > 15) dop_code = 15;  // clamp to 4-bit range for unsvr_decode_4
+    uint8_t dop = unsvr_decode_4(dop_code);
 
     if (dop > 80)
         return false;

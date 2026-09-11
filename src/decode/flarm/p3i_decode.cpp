@@ -81,7 +81,7 @@ bool p3i_decode_packet(const uint8_t *payload, p3i_message_t *msg)
     for (int32_t i = 0; i < P3I_PAYLOAD_SIZE; i++)
         cs ^= pkt[i];
     if (cs != 0) {
-        // Continue — extract fields anyway
+        return false;
     }
 
     // Extract fields (all little-endian)

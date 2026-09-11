@@ -152,19 +152,20 @@ static uint8_t crc8(const uint8_t *data, int32_t len, uint8_t poly, uint8_t init
     return crc;
 }
 
-static uint16_t crc16_ccitt(const uint8_t *data, int32_t len, uint16_t init)
+// CRC-16/EN-13757 for wMBus (poly 0x3D65, init 0x0000, final XOR 0xFFFF)
+static uint16_t crc16_wmbus(const uint8_t *data, int32_t len)
 {
-    uint16_t crc = init;
+    uint16_t crc = 0x0000;
     for (int32_t i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
         for (int32_t b = 0; b < 8; b++) {
             if (crc & 0x8000)
-                crc = (crc << 1) ^ 0x1021;
+                crc = (crc << 1) ^ 0x3D65;
             else
                 crc <<= 1;
         }
     }
-    return crc;
+    return crc ^ 0xFFFF;
 }
 
 // ======================== OOK Protocol decoders ========================
@@ -177,7 +178,7 @@ static bool decode_lacrosse_tx(const pulse_t *pulses, int32_t count, iot_device_
 
     // Find preamble: pulses ~500µs, gaps alternating ~1000/2000µs
     int32_t start = -1;
-    for (int32_t i = 0; i < count - 40; i++) {
+    for (int32_t i = 0; i <= count - 40; i++) {
         if (pulses[i].pulse_us >= 400 && pulses[i].pulse_us <= 600 &&
             pulses[i].gap_us >= 1800 && pulses[i].gap_us <= 2200) {
             // Possible '0' preamble bit
@@ -257,7 +258,7 @@ static bool decode_bresser_5in1(const pulse_t *pulses, int32_t count, iot_device
 
     // Look for consistent short pulses (~125µs)
     int32_t start = -1;
-    for (int32_t i = 0; i < count - 136; i++) {
+    for (int32_t i = 0; i <= count - 136; i++) {
         if (pulses[i].pulse_us >= 80 && pulses[i].pulse_us <= 180) {
             int32_t good = 0;
             for (int32_t j = 0; j < 8 && (i+j) < count; j++) {
@@ -321,7 +322,7 @@ static bool decode_wmbus(const uint8_t *bits, int32_t bit_count, iot_device_msg_
     // Also require at least 8 bits of alternating preamble before sync
     int32_t start = -1;
     iot_protocol_t proto = IOT_PROTO_WMBUS_C;
-    for (int32_t i = 8; i < bit_count - 120; i++) {
+    for (int32_t i = 8; i <= bit_count - 120; i++) {
         uint16_t word = 0;
         for (int32_t b = 0; b < 16; b++)
             word = (word << 1) | (bits[i + b] & 1);
@@ -361,18 +362,18 @@ static bool decode_wmbus(const uint8_t *bits, int32_t bit_count, iot_device_msg_
             byte = (byte << 1) | (bits[i + b] & 1);
         bytes[byte_count++] = byte;
     }
-    if (byte_count < 10) return false;  // too int16_t
+    if (byte_count < 10) return false;  // too short
 
     // wMBus header: L-field (length), C-field, M-field(2), A-field(6)
     uint8_t l_field = bytes[0];
     if (l_field < 9 || l_field > 60) return false;
     // uint8_t c_field = bytes[1];
     uint16_t m_field = (bytes[3] << 8) | bytes[2];  // manufacturer (little-endian)
-    uint32_t a_field = (bytes[7] << 24) | (bytes[6] << 16) | (bytes[5] << 8) | bytes[4];
+    uint32_t a_field = ((uint32_t)bytes[7] << 24) | ((uint32_t)bytes[6] << 16) | ((uint32_t)bytes[5] << 8) | bytes[4];
 
     // CRC-16 check of first block (first 10 bytes, CRC at 10-11) — MANDATORY
     if (byte_count < 12) return false;
-    uint16_t crc_calc = crc16_ccitt(bytes, 10, 0x0000);
+    uint16_t crc_calc = crc16_wmbus(bytes, 10);
     uint16_t crc_recv = (bytes[10] << 8) | bytes[11];
     if (crc_calc != crc_recv) return false;  // strict CRC — reject noise
 
@@ -405,7 +406,7 @@ static bool decode_honeywell_cm(const uint8_t *bits, int32_t bit_count, iot_devi
 
     // Sync pattern: 0xFF 0x00 0x33 (preamble 1010... then sync word)
     int32_t start = -1;
-    for (int32_t i = 0; i < bit_count - 120; i += 8) {
+    for (int32_t i = 0; i <= bit_count - 120; i += 8) {
         uint8_t b0 = 0, b1 = 0, b2 = 0;
         for (int32_t b = 0; b < 8 && (i+b) < bit_count; b++)
             b0 = (b0 << 1) | (bits[i+b] & 1);
@@ -570,6 +571,8 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
                         msg.power_w = NAN;
                         msg.energy_kwh = NAN;
                         msg.battery_v = NAN;
+                        msg.rssi_db = NAN;
+                        msg.freq_offset_hz = NAN;
 
                         bool decoded = false;
                         if (!decoded) decoded = decode_lacrosse_tx(state->pulses, state->pulse_count, &msg);
@@ -657,6 +660,8 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
             msg.power_w = NAN;
             msg.energy_kwh = NAN;
             msg.battery_v = NAN;
+            msg.rssi_db = NAN;
+            msg.freq_offset_hz = NAN;
 
             bool decoded = false;
             if (!decoded) decoded = decode_wmbus(fsk_bits_local, fsk_bit_count, &msg);
