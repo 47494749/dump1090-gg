@@ -105,12 +105,20 @@ typedef struct {
 // Max plausible doppler rate for an aircraft (Hz/s)
 #define GRAVES_MAX_DOPPLER_RATE 60.0f
 
+// Decimation: SDR rate (1 MHz) → analysis rate (250 kHz)
+#define GRAVES_DECIM_FACTOR     4
+#define GRAVES_ANALYSIS_RATE    (GRAVES_SAMPLE_RATE / GRAVES_DECIM_FACTOR)  // 250 kHz
+
 // ======================== State ========================
 
 struct graves_state {
     graves_config_t config;
 
-    // IQ accumulation buffer (for overlapping FFT)
+    // Decimation accumulator (integrate-and-dump, factor 4)
+    float   decim_acc_i, decim_acc_q;
+    int32_t decim_count;
+
+    // IQ accumulation buffer (for overlapping FFT, at decimated rate)
     float   *iq_buf_i;      // I channel ring buffer
     float   *iq_buf_q;      // Q channel ring buffer
     int32_t  iq_wr;         // write position
@@ -120,7 +128,7 @@ struct graves_state {
     cplx_t  *fft_buf;
     float   *power_spectrum; // |FFT|^2 in dB
 
-    // DC removal
+    // DC removal (applied before decimation)
     float dc_i, dc_q;
 
     // Noise floor estimation
@@ -176,7 +184,7 @@ struct graves_state *graves_create(const graves_config_t *config)
         return NULL;
     }
 
-    s->bin_hz = (float)config->sample_rate / GRAVES_FFT_SIZE;
+    s->bin_hz = (float)GRAVES_ANALYSIS_RATE / GRAVES_FFT_SIZE;
     s->next_track_id = 1;
     s->noise_floor_db = -40.0f;
 
@@ -491,10 +499,22 @@ void graves_process(struct graves_state *state, const uint8_t *iq_data, uint32_t
         si -= state->dc_i;
         sq -= state->dc_q;
 
-        // Store in ring buffer
+        // Decimate: integrate-and-dump (1 MHz → 250 kHz)
+        state->decim_acc_i += si;
+        state->decim_acc_q += sq;
+        state->decim_count++;
+        if (state->decim_count < GRAVES_DECIM_FACTOR) continue;
+
+        float dec_i = state->decim_acc_i * (1.0f / GRAVES_DECIM_FACTOR);
+        float dec_q = state->decim_acc_q * (1.0f / GRAVES_DECIM_FACTOR);
+        state->decim_acc_i = 0;
+        state->decim_acc_q = 0;
+        state->decim_count = 0;
+
+        // Store decimated sample in ring buffer
         int32_t pos = state->iq_wr;
-        state->iq_buf_i[pos] = si;
-        state->iq_buf_q[pos] = sq;
+        state->iq_buf_i[pos] = dec_i;
+        state->iq_buf_q[pos] = dec_q;
         state->iq_wr = (pos + 1) % (GRAVES_FFT_SIZE * 2);
         state->iq_count++;
 
