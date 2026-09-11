@@ -1530,10 +1530,14 @@ restart_async:
         // Reconfigure device
         /*
          * IMPORTANT: same rule as initial open.
-         * Do NOT reintroduce set_direct_sampling(dev, 0) here as a reopen/reset step.
-         * For R820T dongles that "reset" caused the same bad direct-sampling toggle
-         * seen during initial open and does not match stock rtl_sdr behaviour.
+         * Do NOT call set_direct_sampling(dev, 0) for R820T — it triggers PLL-not-locked.
+         * But FC0012 NEEDS it to enable both ADC channels (I+Q), otherwise the
+         * tuner appears to work but gain/freq changes have no effect on IQ data.
          */
+        if (!rx->config.direct_sampling && sdev->tuner_type == SDR_TUNER_FC0012) {
+            ops->set_direct_sampling(sdev, 0);
+            gg::eprint("rx[%d]: FC0012 ADC fix applied during USB recovery\n", rx->id);
+        }
         if (!rx->config.digital_agc) {
             ops->set_agc(sdev, 0);
         }
@@ -1755,6 +1759,12 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
             }
         }
         rxSetGain(rx, selected);
+    }
+
+    // FC0012 ADC fix: re-enable both I+Q channels after reconfigure.
+    // Without this, the FC0012 tuner goes deaf (gain/freq changes ignored).
+    if (!rx->config.direct_sampling && sdev->tuner_type == SDR_TUNER_FC0012) {
+        ops->set_direct_sampling(sdev, 0);
     }
 
     ops->set_freq_correction(sdev, rx->config.ppm_error);
