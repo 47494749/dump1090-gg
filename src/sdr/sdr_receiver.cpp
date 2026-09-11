@@ -3122,8 +3122,15 @@ static bool gravesDecoderDrain(sdr_receiver_t *rx) {
                         rx->id, t->track_id, (double)t->doppler_hz, (double)t->velocity_ms,
                         (double)t->amplitude_db, t->matched_icao, t->matched_callsign,
                         (double)(t->match_score * 100));
+                panelLogMessage("[GRAVES rx%d] #%u Doppler=%+.0fHz vel=%+.0fm/s SNR=%.1fdB → ADS-B %06X %s (match %.0f%%)",
+                        rx->id, t->track_id, (double)t->doppler_hz, (double)t->velocity_ms,
+                        (double)t->amplitude_db, t->matched_icao, t->matched_callsign,
+                        (double)(t->match_score * 100));
             } else {
                 fprintf(stderr, "[GRAVES rx%d] #%u Doppler=%+.0fHz vel=%+.0fm/s SNR=%.1fdB UNMATCHED (%ds)\n",
+                        rx->id, t->track_id, (double)t->doppler_hz, (double)t->velocity_ms,
+                        (double)t->amplitude_db, (int32_t)((now_t - t->first_seen_ms) / 1000));
+                panelLogMessage("[GRAVES rx%d] #%u Doppler=%+.0fHz vel=%+.0fm/s SNR=%.1fdB ⚠ UNMATCHED (%ds)",
                         rx->id, t->track_id, (double)t->doppler_hz, (double)t->velocity_ms,
                         (double)t->amplitude_db, (int32_t)((now_t - t->first_seen_ms) / 1000));
             }
