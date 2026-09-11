@@ -4169,6 +4169,7 @@ static void api_post_receiver_assign(int32_t fd, const char *body)
     else if (!strcasecmp(role_str, "iot868")) role = SDR_ROLE_IOT868;
     else if (!strcasecmp(role_str, "fanet")) role = SDR_ROLE_FANET;
     else if (!strcasecmp(role_str, "sarsat")) role = SDR_ROLE_SARSAT;
+    else if (!strcasecmp(role_str, "graves")) role = SDR_ROLE_GRAVES;
 
     // Check if this serial is already managed
     int32_t idx = sdrManagerFindBySerial(serial);
@@ -4463,6 +4464,7 @@ static void api_get_decoders(int32_t fd)
             case SDR_ROLE_IOT868: role_str = "iot868"; break;
             case SDR_ROLE_FANET: role_str = "fanet"; break;
             case SDR_ROLE_SARSAT: role_str = "sarsat"; break;
+            case SDR_ROLE_GRAVES: role_str = "graves"; break;
             default: role_str = "none"; break;
         }
         buf += sfmt(

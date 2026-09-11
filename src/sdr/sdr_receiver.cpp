@@ -35,6 +35,7 @@
 #include "airframes_feed.h"
 #include "fanet_decode.h"
 #include "sarsat_decode.h"
+#include "graves_decode.h"
 #include "gg_format.h"
 
 // sdr_receiver.c no longer needs direct rtlsdr include — all access through sdr_backend
@@ -332,13 +333,14 @@ const char *sdrRoleName(sdr_role_t role)
         case SDR_ROLE_IOT868:     return "iot868";
         case SDR_ROLE_FANET:      return "fanet";
         case SDR_ROLE_SARSAT:     return "sarsat";
+        case SDR_ROLE_GRAVES:     return "graves";
         default:                  return "none";
     }
 }
 
 bool rxRoleIsDecoder(sdr_role_t role)
 {
-    return (role == SDR_ROLE_ACARS || role == SDR_ROLE_VDL2 || role == SDR_ROLE_RADIOSONDE || role == SDR_ROLE_POCSAG || role == SDR_ROLE_GSM || role == SDR_ROLE_LTE || role == SDR_ROLE_FANET || role == SDR_ROLE_SARSAT);
+    return (role == SDR_ROLE_ACARS || role == SDR_ROLE_VDL2 || role == SDR_ROLE_RADIOSONDE || role == SDR_ROLE_POCSAG || role == SDR_ROLE_GSM || role == SDR_ROLE_LTE || role == SDR_ROLE_FANET || role == SDR_ROLE_SARSAT || role == SDR_ROLE_GRAVES);
 }
 
 const char *rxStateName(rx_state_t state)
@@ -424,8 +426,12 @@ bool rxParseConfig(const char *arg, rx_config_t *config)
         config->role = SDR_ROLE_SARSAT;
         config->freq = SARSAT_CENTER_FREQ;
         config->sample_rate = SARSAT_SAMPLE_RATE;
+    } else if (!strcasecmp(token, "graves")) {
+        config->role = SDR_ROLE_GRAVES;
+        config->freq = GRAVES_FREQ;
+        config->sample_rate = GRAVES_SAMPLE_RATE;
     } else {
-        gg::eprint("sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte/iot868/fanet/sarsat)\n", token);
+        gg::eprint("sdr_receiver: unknown role '%s' (use adsb/flarm/acars/vdl2/radiosonde/pocsag/gsm/lte/iot868/fanet/sarsat/graves)\n", token);
         return false;
     }
 
@@ -1808,6 +1814,11 @@ typedef struct {
     sdr_receiver_t      *rx;
 } sarsat_ctx_t;
 
+typedef struct {
+    struct graves_state *inner;
+    sdr_receiver_t      *rx;
+} graves_ctx_t;
+
 static void acars_queue_cb(const acars_msg_t *msg, void *ctx) {
     acars_ctx_t *c = (acars_ctx_t *)ctx;
     msg_queue_push(c->queue, msg);
@@ -2075,6 +2086,25 @@ bool rxDecoderCreate(sdr_receiver_t *rx)
                 rx->id, cfg.center_freq / 1e6);
         return true;
     }
+    case SDR_ROLE_GRAVES: {
+        graves_ctx_t *ctx = static_cast<graves_ctx_t*>(calloc(1, sizeof(*ctx)));
+        if (!ctx) return false;
+        ctx->rx = rx;
+
+        graves_config_t cfg = {};
+        cfg.center_freq = rx->config.freq;
+        cfg.sample_rate = rx->config.sample_rate;
+        cfg.rx_lat = Modes.fUserLat;
+        cfg.rx_lon = Modes.fUserLon;
+        cfg.adsb_correlate = 1;
+
+        ctx->inner = graves_create(&cfg);
+        if (!ctx->inner) { free(ctx); return false; }
+        rx->decoder_state = ctx;
+        fprintf(stderr, "rx[%d]: GRAVES passive radar decoder created, freq=%.3f MHz\n",
+                rx->id, cfg.center_freq / 1e6);
+        return true;
+    }
     default:
         return false;
     }
@@ -2141,6 +2171,12 @@ void rxDecoderDestroy(sdr_receiver_t *rx)
         free(ctx);
         break;
     }
+    case SDR_ROLE_GRAVES: {
+        graves_ctx_t *ctx = (graves_ctx_t *)rx->decoder_state;
+        graves_destroy(ctx->inner);
+        free(ctx);
+        break;
+    }
     default:
         break;
     }
@@ -2193,6 +2229,9 @@ void rxDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq_data, uint32_t len)
         break;
     case SDR_ROLE_SARSAT:
         sarsat_process(((sarsat_ctx_t *)rx->decoder_state)->inner, iq_data, len);
+        break;
+    case SDR_ROLE_GRAVES:
+        graves_process(((graves_ctx_t *)rx->decoder_state)->inner, iq_data, len);
         break;
     default:
         break;
@@ -2989,6 +3028,51 @@ static const decoder_ops_t sarsat_decoder_ops = {
     .stop    = sarsatDecoderStop,
 };
 
+// ---- GRAVES decoder_ops ----
+
+static bool gravesDecoderInit(sdr_receiver_t *rx)    { return rxDecoderCreate(rx); }
+static void gravesDecoderProcess(sdr_receiver_t *rx, const uint8_t *iq, uint32_t len) { rxDecoderProcess(rx, iq, len); }
+static bool gravesDecoderDrain(sdr_receiver_t *rx) {
+    graves_ctx_t *ctx = (graves_ctx_t *)rx->decoder_state;
+    if (!ctx || !ctx->inner) return false;
+
+    graves_stats_t stats;
+    graves_get_stats(ctx->inner, &stats);
+
+    // Log active targets periodically (every ~10 seconds based on drain rate)
+    static uint64_t last_log = 0;
+    uint64_t now_t;
+    { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); now_t = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; }
+    if (now_t - last_log > 10000 && stats.active_targets > 0) {
+        last_log = now_t;
+        graves_target_t targets[GRAVES_MAX_TARGETS];
+        int32_t n = graves_get_targets(ctx->inner, targets, GRAVES_MAX_TARGETS);
+        for (int32_t i = 0; i < n; i++) {
+            const graves_target_t *t = &targets[i];
+            if (t->matched_icao) {
+                fprintf(stderr, "[GRAVES rx%d] #%u Doppler=%+.0fHz vel=%+.0fm/s SNR=%.1fdB → %06X %s (%.0f%%)\n",
+                        rx->id, t->track_id, (double)t->doppler_hz, (double)t->velocity_ms,
+                        (double)t->amplitude_db, t->matched_icao, t->matched_callsign,
+                        (double)(t->match_score * 100));
+            } else {
+                fprintf(stderr, "[GRAVES rx%d] #%u Doppler=%+.0fHz vel=%+.0fm/s SNR=%.1fdB UNMATCHED (%ds)\n",
+                        rx->id, t->track_id, (double)t->doppler_hz, (double)t->velocity_ms,
+                        (double)t->amplitude_db, (int32_t)((now_t - t->first_seen_ms) / 1000));
+            }
+        }
+    }
+    return false;
+}
+static void gravesDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
+
+static const decoder_ops_t graves_decoder_ops = {
+    .name    = "graves",
+    .init    = gravesDecoderInit,
+    .process = gravesDecoderProcess,
+    .drain   = gravesDecoderDrain,
+    .stop    = gravesDecoderStop,
+};
+
 // ---- ADS-B decoder_ops ----
 // init:    creates IQ→magnitude converter + rx FIFO
 // process: converts IQ block to magnitude, enqueues to FIFO (from callback thread)
@@ -3136,6 +3220,7 @@ const decoder_ops_t *decoderOpsForRole(sdr_role_t role)
     case SDR_ROLE_IOT868:     return &iot868_decoder_ops;
     case SDR_ROLE_FANET:      return &fanet_decoder_ops;
     case SDR_ROLE_SARSAT:     return &sarsat_decoder_ops;
+    case SDR_ROLE_GRAVES:     return &graves_decoder_ops;
     default:                  return NULL;
     }
 }
@@ -3551,6 +3636,7 @@ int32_t sdrManagerLoad(void)
         else if (!strcmp(role_str, "iot868")) role = SDR_ROLE_IOT868;
         else if (!strcmp(role_str, "fanet")) role = SDR_ROLE_FANET;
         else if (!strcmp(role_str, "sarsat")) role = SDR_ROLE_SARSAT;
+        else if (!strcmp(role_str, "graves")) role = SDR_ROLE_GRAVES;
 
         if (role != SDR_ROLE_NONE && serial[0]) {
             // Skip FILE (virtual) entries — they are only valid via --receiver FILE:...
@@ -3593,6 +3679,7 @@ int32_t sdrManagerLoad(void)
                     case SDR_ROLE_IOT868:     cfg.freq = IOT_CENTER_FREQ;  cfg.sample_rate = IOT_SAMPLE_RATE; break;
                     case SDR_ROLE_FANET:      cfg.freq = FANET_CENTER_FREQ; cfg.sample_rate = FANET_SAMPLE_RATE; break;
                     case SDR_ROLE_SARSAT:     cfg.freq = SARSAT_CENTER_FREQ; cfg.sample_rate = SARSAT_SAMPLE_RATE; break;
+                    case SDR_ROLE_GRAVES:     cfg.freq = GRAVES_FREQ; cfg.sample_rate = GRAVES_SAMPLE_RATE; break;
                     default: break;
                 }
                 if (sdrManagerAddReceiver(&cfg) >= 0) {
@@ -3835,6 +3922,22 @@ char *rxGetDecoderStatsJSON(void)
                     ",\"bch2_corrected\":%" PRIu64 ",\"bch2_failed\":%" PRIu64 "}",
                     rx->id, s.samples_processed, s.bursts_detected, s.frames_decoded,
                     s.bch1_corrected, s.bch1_failed, s.bch2_corrected, s.bch2_failed);
+            }
+            break;
+        }
+        case SDR_ROLE_GRAVES: {
+            graves_ctx_t *c = (graves_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                graves_stats_t s;
+                graves_get_stats(c->inner, &s);
+                if (!first_top) APPEND(","); first_top = 0;
+                APPEND("\"graves\":{\"rx\":%d,\"samples\":%" PRIu64
+                    ",\"fft_frames\":%" PRIu64 ",\"peaks\":%" PRIu64
+                    ",\"active\":%d,\"matched\":%d,\"unmatched\":%d"
+                    ",\"noise_floor\":%.1f,\"direct_signal\":%.1f}",
+                    rx->id, s.samples_processed, s.fft_frames, s.peaks_detected,
+                    s.active_targets, s.matched_targets, s.unmatched_targets,
+                    (double)s.noise_floor_db, (double)s.direct_signal_db);
             }
             break;
         }

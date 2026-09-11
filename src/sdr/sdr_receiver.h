@@ -43,6 +43,7 @@ typedef enum {
     SDR_ROLE_IOT868,        // ~868 MHz ISM band IoT device monitor (OOK/FSK)
     SDR_ROLE_FANET,         // ~868.2 MHz FANET+ LoRa (SF7/BW250)
     SDR_ROLE_SARSAT,        // ~406 MHz Cospas-Sarsat ELT/EPIRB/PLB beacon
+    SDR_ROLE_GRAVES,        // 143.050 MHz GRAVES passive radar (aircraft reflections)
 
 } sdr_role_t;
 

@@ -22,13 +22,14 @@ SRCDIR_LTE     := src/decode/lte
 SRCDIR_IOT     := src/decode/iot
 SRCDIR_FANET   := src/decode/fanet
 SRCDIR_SARSAT  := src/decode/sarsat
+SRCDIR_GRAVES  := src/decode/graves
 SRCDIR_DISPATCH := src/dispatch
 INCLUDEDIR     := include
 
 OBJDIR         := obj
 
 # VPATH: where make looks for source files
-VPATH := $(SRCDIR_MAIN):$(SRCDIR_ADSB):$(SRCDIR_UTIL):$(SRCDIR_NET):$(SRCDIR_SDR):$(SRCDIR_PANEL):$(SRCDIR_STUBS):$(SRCDIR_FLARM):$(SRCDIR_ACARS):$(SRCDIR_VDL2):$(SRCDIR_SONDE):$(SRCDIR_POCSAG):$(SRCDIR_GSM):$(SRCDIR_LTE):$(SRCDIR_IOT):$(SRCDIR_FANET):$(SRCDIR_SARSAT):$(SRCDIR_DISPATCH)
+VPATH := $(SRCDIR_MAIN):$(SRCDIR_ADSB):$(SRCDIR_UTIL):$(SRCDIR_NET):$(SRCDIR_SDR):$(SRCDIR_PANEL):$(SRCDIR_STUBS):$(SRCDIR_FLARM):$(SRCDIR_ACARS):$(SRCDIR_VDL2):$(SRCDIR_SONDE):$(SRCDIR_POCSAG):$(SRCDIR_GSM):$(SRCDIR_LTE):$(SRCDIR_IOT):$(SRCDIR_FANET):$(SRCDIR_SARSAT):$(SRCDIR_GRAVES):$(SRCDIR_DISPATCH)
 
 # ======================== Compiler flags ========================
 
@@ -39,7 +40,7 @@ DUMP1090_CFLAGS := -std=c11 -fno-common -Wall -Wmissing-declarations -Werror -Wf
 CXXFLAGS_ALL = -std=c++17 -O3 -g -Wall -Werror -Wno-write-strings
 
 # Include paths: all source directories + include/ so #include "foo.h" works from anywhere
-INCLUDE_DIRS := -I. -I$(INCLUDEDIR) -I$(SRCDIR_MAIN) -I$(SRCDIR_ADSB) -I$(SRCDIR_UTIL) -I$(SRCDIR_NET) -I$(SRCDIR_SDR) -I$(SRCDIR_PANEL) -I$(SRCDIR_STUBS) -I$(SRCDIR_FLARM) -I$(SRCDIR_ACARS) -I$(SRCDIR_VDL2) -I$(SRCDIR_SONDE) -I$(SRCDIR_POCSAG) -I$(SRCDIR_GSM) -I$(SRCDIR_LTE) -I$(SRCDIR_IOT) -I$(SRCDIR_FANET) -I$(SRCDIR_SARSAT) -I$(SRCDIR_DISPATCH)
+INCLUDE_DIRS := -I. -I$(INCLUDEDIR) -I$(SRCDIR_MAIN) -I$(SRCDIR_ADSB) -I$(SRCDIR_UTIL) -I$(SRCDIR_NET) -I$(SRCDIR_SDR) -I$(SRCDIR_PANEL) -I$(SRCDIR_STUBS) -I$(SRCDIR_FLARM) -I$(SRCDIR_ACARS) -I$(SRCDIR_VDL2) -I$(SRCDIR_SONDE) -I$(SRCDIR_POCSAG) -I$(SRCDIR_GSM) -I$(SRCDIR_LTE) -I$(SRCDIR_IOT) -I$(SRCDIR_FANET) -I$(SRCDIR_SARSAT) -I$(SRCDIR_GRAVES) -I$(SRCDIR_DISPATCH)
 
 DUMP1090_CPPFLAGS := $(INCLUDE_DIRS) -D_POSIX_C_SOURCE=200112L -DMODES_DUMP1090_VERSION=\"$(DUMP1090_VERSION)\" -DMODES_DUMP1090_VARIANT=\"dump1090-gg-light\"
 
@@ -370,6 +371,7 @@ DUMP1090_OBJS := \
 	$(OBJDIR)/iot_tracker.o \
 	$(OBJDIR)/fanet_decode.o \
 	$(OBJDIR)/sarsat_decode.o \
+	$(OBJDIR)/graves_decode.o \
 	$(OBJDIR)/config_panel.o \
 	$(OBJDIR)/decoder_config.o \
 	$(OBJDIR)/sdr_receiver.o \
