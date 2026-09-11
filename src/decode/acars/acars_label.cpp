@@ -14,7 +14,7 @@
 #include "acars_label.h"
 
 // ======================== Label table ========================
-// Sorted by label for binary search
+// Label table (linear search, ~150 entries)
 
 typedef struct {
     char              label[3];
@@ -246,7 +246,7 @@ const acars_label_info_t *acars_label_lookup(const char label[2])
     for (uint32_t i = 0; i < LABEL_TABLE_SIZE; i++) {
         if (label[0] == label_table[i].label[0] &&
             label[1] == label_table[i].label[1]) {
-            static acars_label_info_t result;
+            static thread_local acars_label_info_t result;
             result.description = label_table[i].description;
             result.category = label_table[i].category;
             return &result;

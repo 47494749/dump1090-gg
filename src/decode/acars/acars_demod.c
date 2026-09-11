@@ -375,12 +375,12 @@ static void acars_output_message(struct acars_state *state, acars_channel_t *ch)
 
     msg.channel = ch->chn;
     msg.freq = ch->freq;
-    msg.level = (ch->MskBitCount > 0)
+    msg.level = (ch->MskBitCount > 0 && ch->MskLvlSum > 0)
         ? 10.0f * log10f((float)(ch->MskLvlSum / ch->MskBitCount))
         : -99.0f;
     msg.errors = ch->msg_err;
 
-    if (ch->msg_len < 13) return;  // Too int16_t
+    if (ch->msg_len < 13) return;  // Too short
 
     // Parse ACARS fields from message buffer
     // Byte 0: mode, 1-7: reg, 8: ack, 9-10: label, 11: block_id, 12: STX/ETX
@@ -564,11 +564,6 @@ static void acars_decode_byte(struct acars_state *state, acars_channel_t *ch)
                 ch->nbits = 8;
                 return;
             }
-
-            // Force STX/ETX markers (after CRC, as this modifies the buffer)
-            if (ch->msg_len >= 13)
-                ch->msg_buf[12] = (ch->msg_buf[12] & (ETX_CHAR | STX_CHAR)) |
-                                  (ETX_CHAR & STX_CHAR);
 
             // Strip parity bits
             for (int32_t i = 0; i < ch->msg_len; i++)

@@ -8,7 +8,7 @@
 //   → AVLC deframing (flag detection, bit unstuffing, FCS)
 //   → ACARS message extraction
 //
-// VDL2 uses Differential 8-PSK at 31500 symbols/sec, 3 bits per symbol.
+// VDL2 uses Differential 8-PSK at 10500 symbols/sec, 3 bits per symbol (31500 bps).
 // AVLC framing is HDLC-like with 0x7E flags and bit stuffing.
 //
 // This file is free software: you may copy, redistribute and/or modify it
@@ -58,7 +58,7 @@ static const uint8_t dpsk_gray[8] = { 0, 1, 3, 2, 6, 7, 5, 4 };
 // ======================== FCS (CRC-16 CCITT) ========================
 
 static uint16_t fcs_table[256];
-static int32_t fcs_table_init = 0;
+static volatile int32_t fcs_table_init = 0;
 
 static void init_fcs_table(void)
 {
@@ -72,6 +72,7 @@ static void init_fcs_table(void)
         }
         fcs_table[i] = crc;
     }
+    __sync_synchronize();
     fcs_table_init = 1;
 }
 
@@ -83,7 +84,7 @@ static uint16_t fcs_update(uint16_t fcs, uint8_t byte)
 // ======================== Decimation lowpass filter ========================
 
 static float vdl2_lpf[VDL2_LPF_TAPS];
-static int32_t vdl2_lpf_init = 0;
+static volatile int32_t vdl2_lpf_init = 0;
 
 static void init_vdl2_lpf(void)
 {
@@ -108,6 +109,7 @@ static void init_vdl2_lpf(void)
     for (int32_t i = 0; i < VDL2_LPF_TAPS; i++)
         vdl2_lpf[i] /= (float)sum;
 
+    __sync_synchronize();
     vdl2_lpf_init = 1;
 }
 
@@ -352,7 +354,7 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
     // Bytes 5+: Information field (may contain ACARS)
     // Last 2 bytes: FCS (already verified)
 
-    if (len < 8) return;  // Too int16_t for meaningful content
+    if (len < 8) return;  // Too short for meaningful content
 
     int32_t info_start = 4;  // Skip address + control
     // Check for extended address
@@ -378,7 +380,7 @@ static void vdl2_extract_acars(struct vdl2_state *state, const uint8_t *frame, i
                        ((uint32_t)frame[2] << 1) |
                        ((uint32_t)(frame[3] >> 7));
         // For extended address, source is in bytes 4-6
-        if (info_start == 5 && len >= 7) {
+        if (info_start == 5 && len >= 8) {
             msg.src.addr = ((uint32_t)(frame[4] & 0xFE) << 16) |
                            ((uint32_t)frame[5] << 9) |
                            ((uint32_t)frame[6] << 1) |
