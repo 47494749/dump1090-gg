@@ -100,8 +100,8 @@ typedef struct {
 } track_slot_t;
 
 // Confirmation: need MIN_HITS updates within CONFIRM_WINDOW frames
-#define GRAVES_CONFIRM_WINDOW   8
-#define GRAVES_MIN_HITS         4
+#define GRAVES_CONFIRM_WINDOW   12
+#define GRAVES_MIN_HITS         6
 // Max plausible doppler rate for an aircraft (Hz/s)
 #define GRAVES_MAX_DOPPLER_RATE 60.0f
 
@@ -160,7 +160,7 @@ struct graves_state *graves_create(const graves_config_t *config)
     if (!s) return NULL;
 
     s->config = *config;
-    if (s->config.min_snr_db <= 0) s->config.min_snr_db = 14.0f;
+    if (s->config.min_snr_db <= 0) s->config.min_snr_db = 18.0f;
     if (s->config.min_doppler_hz <= 0) s->config.min_doppler_hz = 400.0f;
     if (s->config.max_doppler_hz <= 0) s->config.max_doppler_hz = 8000.0f;
     if (s->config.track_timeout_sec <= 0) s->config.track_timeout_sec = 10;
@@ -534,11 +534,18 @@ void graves_process(struct graves_state *state, const uint8_t *iq_data, uint32_t
             }
             state->stats.direct_signal_db = state->direct_signal_db - state->noise_floor_db;
 
-            // Detect peaks
+            // Gate: only search for targets if the direct GRAVES signal
+            // is clearly present (at least 15 dB above noise floor).
+            // Without the direct signal, any peaks are local VHF noise.
+            float direct_snr = state->direct_signal_db - state->noise_floor_db;
+
             peak_t peaks[GRAVES_MAX_PEAKS];
-            int32_t npk = detect_peaks(state->power_spectrum, state->noise_floor_db,
-                                       state->bin_hz, &state->config,
-                                       peaks, GRAVES_MAX_PEAKS);
+            int32_t npk = 0;
+            if (direct_snr >= 15.0f) {
+                npk = detect_peaks(state->power_spectrum, state->noise_floor_db,
+                                   state->bin_hz, &state->config,
+                                   peaks, GRAVES_MAX_PEAKS);
+            }
             state->stats.peaks_detected += npk;
 
             // Update tracker
