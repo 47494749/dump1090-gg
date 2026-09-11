@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dump1090-gg — GRAVES Passive Radar</title>
+<style>
+:root{--bg:#0a0a1a;--card:#141428;--border:#2a2a4a;--text:#d0d0d0;--dim:#888;
+--accent:#4fc3f7;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;
+--head:#1a1a2e;--input-bg:#0e0e22;--hover:#1e1e3a}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+nav{background:var(--head);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;flex:1}
+.tabs a{padding:6px 14px;border-radius:6px;cursor:pointer;color:var(--dim);transition:.2s;font-size:13px;user-select:none;text-decoration:none}
+.tabs a:hover{background:var(--hover);color:var(--text)}
+.tabs a.active{background:var(--accent);color:#000;font-weight:600}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
+.card h3{color:var(--accent);margin-bottom:12px;font-size:15px;border-bottom:1px solid var(--border);padding-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--head);color:var(--accent);padding:8px;text-align:left;position:sticky;top:0;z-index:10}
+td{padding:6px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--hover)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.ok{background:#003322;color:var(--ok)}
+.badge.warn{background:#332200;color:var(--warn)}
+.badge.err{background:#330000;color:var(--danger)}
+.badge.info{background:#002244;color:var(--link)}
+.main{padding:16px;max-width:1600px;margin:0 auto}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+.stat-box{background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}
+.stat-box .value{font-size:28px;font-weight:700;color:var(--accent)}
+.stat-box .label{font-size:11px;color:var(--dim);margin-top:4px}
+.unmatched{color:var(--warn);font-weight:600}
+.matched{color:var(--ok)}
+@media(max-width:768px){.stat-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<nav>
+<h1>✈ dump1090-gg-light</h1>
+<div class="tabs">
+<a href="/">🗺️ Map</a>
+<a href="/config.html">⚙️ Config</a>
+<a href="/feeders.html">📡 Feeders</a>
+<a href="/sharing.html">🔗 Sharing</a>
+<a href="/status.html">📡 Status</a>
+<a href="/connections.html">🔌 Connections</a>
+<a href="/logs.html">📋 Logs</a>
+<a href="/messages.html">📨 Messages</a>
+<a href="/aircraft.html">✈️ Aircraft</a>
+<a href="/devices.html">📻 Devices</a>
+<a href="/gsm.html">📶 GSM</a>
+<a href="/lte.html">📶 LTE</a>
+<a href="/iot868.html">🌡️ IoT 868</a>
+<a href="/fanet.html">🚩 FANET</a>
+<a class="active" href="/graves.html">📡 GRAVES</a>
+<a href="/stats.html">📊 Stats</a>
+<a href="/waterfall.html">🌊 Waterfall</a>
+<a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
+</div>
+<span id="ver-badge" style="margin-left:auto;font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px" title="dump1090-gg version">v…</span>
+</nav>
+
+<div class="main">
+<h2 style="color:var(--accent);margin-bottom:16px">📡 GRAVES Passive Radar — 143.050 MHz</h2>
+<p style="color:var(--dim);font-size:12px;margin-bottom:16px">
+Detects aircraft via reflections of the French GRAVES space surveillance radar (Apt, France).
+Doppler-shifted reflections are extracted via FFT and tracked. Targets are correlated with known ADS-B aircraft.
+<strong class="unmatched">Unmatched targets</strong> may be military or non-transponder aircraft.
+</p>
+
+<div id="stats-area" class="stat-grid"></div>
+
+<div class="card">
+<h3>🎯 Active Targets</h3>
+<div id="no-data" style="display:none;color:var(--dim);padding:16px;text-align:center">
+No GRAVES receiver active. Assign a dongle with role <strong>graves</strong> from the <a href="/devices.html" style="color:var(--accent)">Devices</a> page.
+</div>
+<table id="target-table" style="display:none">
+<thead><tr>
+<th>#</th>
+<th>Doppler (Hz)</th>
+<th>Velocity (m/s)</th>
+<th>SNR (dB)</th>
+<th>Doppler Rate</th>
+<th>Age</th>
+<th>Updates</th>
+<th>ADS-B Match</th>
+<th>Confidence</th>
+</tr></thead>
+<tbody id="target-body"></tbody>
+</table>
+</div>
+</div>
+
+<script>
+function render(data) {
+    // Stats
+    const s = data.stats || {};
+    const statsHtml = `
+        <div class="stat-box"><div class="value">${s.active||0}</div><div class="label">Active Targets</div></div>
+        <div class="stat-box"><div class="value" style="color:var(--ok)">${s.matched||0}</div><div class="label">ADS-B Matched</div></div>
+        <div class="stat-box"><div class="value" style="color:var(--warn)">${s.unmatched||0}</div><div class="label">Unmatched</div></div>
+        <div class="stat-box"><div class="value">${s.direct_signal!=null?s.direct_signal.toFixed(1):'—'}</div><div class="label">Direct Signal (dB)</div></div>
+        <div class="stat-box"><div class="value">${s.noise_floor!=null?s.noise_floor.toFixed(1):'—'}</div><div class="label">Noise Floor (dB)</div></div>
+        <div class="stat-box"><div class="value">${s.fft_frames!=null?s.fft_frames.toLocaleString():'—'}</div><div class="label">FFT Frames</div></div>
+    `;
+    document.getElementById('stats-area').innerHTML = statsHtml;
+
+    // Targets
+    const targets = data.targets || [];
+    if (data.rx < 0) {
+        document.getElementById('no-data').style.display = '';
+        document.getElementById('target-table').style.display = 'none';
+        return;
+    }
+    document.getElementById('no-data').style.display = 'none';
+
+    if (targets.length === 0) {
+        document.getElementById('target-table').style.display = 'none';
+        document.getElementById('stats-area').insertAdjacentHTML('afterend',
+            '<div style="color:var(--dim);text-align:center;padding:20px">Listening... no reflections detected yet.</div>');
+        return;
+    }
+
+    document.getElementById('target-table').style.display = '';
+    const body = document.getElementById('target-body');
+    let html = '';
+    for (const t of targets) {
+        const matched = t.matched_icao && t.matched_icao !== '000000';
+        const matchStr = matched
+            ? `<span class="matched">${t.matched_icao} ${t.callsign||''}</span>`
+            : `<span class="unmatched">— UNMATCHED</span>`;
+        const confStr = matched
+            ? `<span class="badge ok">${(t.match_score*100).toFixed(0)}%</span>`
+            : `<span class="badge warn">?</span>`;
+        const age = t.age != null ? t.age + 's' : '—';
+        const dopColor = t.doppler > 0 ? 'color:var(--ok)' : 'color:var(--link)';
+        html += `<tr>
+            <td>${t.id}</td>
+            <td style="${dopColor};font-family:monospace">${t.doppler>0?'+':''}${t.doppler.toFixed(1)}</td>
+            <td style="font-family:monospace">${t.velocity>0?'+':''}${t.velocity.toFixed(1)}</td>
+            <td>${t.snr.toFixed(1)}</td>
+            <td style="font-family:monospace">${t.doppler_rate.toFixed(2)} Hz/s</td>
+            <td>${age}</td>
+            <td>${t.updates}</td>
+            <td>${matchStr}</td>
+            <td>${confStr}</td>
+        </tr>`;
+    }
+    body.innerHTML = html;
+}
+
+function refresh() {
+    fetch('/api/graves').then(r => r.json()).then(data => render(data)).catch(e => {
+        document.getElementById('no-data').style.display = '';
+        document.getElementById('no-data').innerHTML = '<span style="color:var(--danger)">Error fetching GRAVES data: ' + e + '</span>';
+    });
+}
+
+refresh();
+setInterval(refresh, 2000);
+
+fetch('/api/status').then(r=>r.json()).then(d=>{const b=document.getElementById('ver-badge');if(b&&d.version)b.textContent='v'+d.version;}).catch(()=>{});
+</script>
+<script src="/warnings.js"></script>
+</body>
+</html>

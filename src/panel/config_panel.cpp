@@ -28,6 +28,7 @@
 #include "iot_tracker.h"
 #include "fanet_decode.h"
 #include "sarsat_decode.h"
+#include "graves_decode.h"
 #include "pocsag_demod.h"
 #include "decoder_config.h"
 #include "airframes_feed.h"
@@ -3057,6 +3058,17 @@ static void api_get_iot868(int32_t fd)
     http_send_json(fd, json.c_str(), (int32_t)json.size());
 }
 
+// ============================= API: GET /api/graves =======================
+
+// Declared in sdr_receiver.cpp — returns JSON for GRAVES targets
+extern std::string gravesGetTargetsJSON(void);
+
+static void api_get_graves(int32_t fd)
+{
+    std::string json = gravesGetTargetsJSON();
+    http_send_json(fd, json.c_str(), (int32_t)json.size());
+}
+
 // ============================= API: GET /api/fanet ========================
 
 // Callback for ground track serialization
@@ -3787,6 +3799,7 @@ static void rx_set_freq_for_role(rx_config_t *cfg)
         case SDR_ROLE_IOT868:     cfg->freq = IOT_CENTER_FREQ;  cfg->sample_rate = IOT_SAMPLE_RATE; break;
         case SDR_ROLE_FANET:      cfg->freq = FANET_CENTER_FREQ; cfg->sample_rate = FANET_SAMPLE_RATE; break;
         case SDR_ROLE_SARSAT:     cfg->freq = SARSAT_CENTER_FREQ; cfg->sample_rate = SARSAT_SAMPLE_RATE; break;
+        case SDR_ROLE_GRAVES:     cfg->freq = GRAVES_FREQ;        cfg->sample_rate = GRAVES_SAMPLE_RATE; break;
         default:                  cfg->freq = 0;          cfg->sample_rate = 0;       break;
     }
 }
@@ -4674,6 +4687,7 @@ static void serve_gsm_page(int32_t fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
@@ -4855,6 +4869,7 @@ static void serve_lte_page(int32_t fd)
         "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
@@ -5044,6 +5059,7 @@ static void serve_iot868_page(int32_t fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a class='active' href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
@@ -5485,6 +5501,7 @@ static void serve_devices_page(int32_t fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
@@ -5726,6 +5743,7 @@ static void serve_devices_page(int32_t fd)
         "h+='<option value=iot868'+(curRole=='iot868'?' selected':'')+'>&#x1f321;&#xfe0f; IoT 868 MHz</option>';"
         "h+='<option value=fanet'+(curRole=='fanet'?' selected':'')+'>&#x1f6a9; FANET (868.2 MHz)</option>';"
         "h+='<option value=sarsat'+(curRole=='sarsat'?' selected':'')+'>&#x1f6a8; Sarsat ELT (406 MHz)</option>';"
+        "h+='<option value=graves'+(curRole=='graves'?' selected':'')+'>&#x1f4e1; GRAVES Radar (143 MHz)</option>';"
         "h+='</select></td>';"
         // Gain dropdown - populated from receiver's gain_list
         "var gainOpts='';"
@@ -5876,6 +5894,7 @@ static void serve_diagnostics_page(int32_t fd)
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
+        "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a class='active' style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
@@ -6836,6 +6855,8 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             api_get_iot868(fd);
         } else if (path_sv == "/api/fanet") {
             api_get_fanet(fd);
+        } else if (path_sv == "/api/graves") {
+            api_get_graves(fd);
         } else if (path_sv == "/api/stats") {
             api_get_stats(fd);
         } else if (path_sv == "/api/connections") {

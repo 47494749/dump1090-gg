@@ -3065,6 +3065,50 @@ static bool gravesDecoderDrain(sdr_receiver_t *rx) {
 }
 static void gravesDecoderStop(sdr_receiver_t *rx)     { rxDecoderDestroy(rx); }
 
+std::string gravesGetTargetsJSON(void)
+{
+    std::string buf = "{\"targets\":[";
+    int32_t count = 0;
+
+    for (int32_t i = 0; i < SdrManager.count; i++) {
+        sdr_receiver_t *rx = &SdrManager.receivers[i];
+        if (rx->config.role != SDR_ROLE_GRAVES || !rx->decoder_state) continue;
+        graves_ctx_t *ctx = (graves_ctx_t *)rx->decoder_state;
+        if (!ctx->inner) continue;
+
+        graves_target_t targets[GRAVES_MAX_TARGETS];
+        int32_t n = graves_get_targets(ctx->inner, targets, GRAVES_MAX_TARGETS);
+        for (int32_t t = 0; t < n; t++) {
+            const graves_target_t *tgt = &targets[t];
+            if (count > 0) buf += ",";
+            buf += gg::format("{\"id\":%u,\"doppler\":%.1f,\"velocity\":%.1f,\"snr\":%.1f,"
+                        "\"doppler_rate\":%.2f,\"age\":%d,\"updates\":%d,"
+                        "\"first_seen\":%" PRIu64 ",\"last_seen\":%" PRIu64 ","
+                        "\"matched_icao\":\"%06X\",\"callsign\":\"%s\",\"match_score\":%.2f}",
+                        tgt->track_id, (double)tgt->doppler_hz, (double)tgt->velocity_ms,
+                        (double)tgt->amplitude_db, (double)tgt->doppler_rate,
+                        tgt->age_frames, tgt->updates,
+                        tgt->first_seen_ms, tgt->last_seen_ms,
+                        tgt->matched_icao, tgt->matched_callsign, (double)tgt->match_score);
+            count++;
+        }
+
+        graves_stats_t stats;
+        graves_get_stats(ctx->inner, &stats);
+        buf += gg::format("],\"stats\":{\"samples\":%" PRIu64 ",\"fft_frames\":%" PRIu64
+                    ",\"peaks\":%" PRIu64 ",\"active\":%d,\"matched\":%d,\"unmatched\":%d"
+                    ",\"noise_floor\":%.1f,\"direct_signal\":%.1f}"
+                    ",\"rx\":%d}",
+                    stats.samples_processed, stats.fft_frames, stats.peaks_detected,
+                    stats.active_targets, stats.matched_targets, stats.unmatched_targets,
+                    (double)stats.noise_floor_db, (double)stats.direct_signal_db, rx->id);
+        return buf;
+    }
+
+    buf += "],\"stats\":{},\"rx\":-1}";
+    return buf;
+}
+
 static const decoder_ops_t graves_decoder_ops = {
     .name    = "graves",
     .init    = gravesDecoderInit,

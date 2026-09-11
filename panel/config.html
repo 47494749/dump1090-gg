@@ -63,6 +63,7 @@ tr:hover td{background:var(--hover)}
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
 <a href="/fanet.html">🚩 FANET</a>
+<a href="/graves.html">📡 GRAVES</a>
 <a href="/stats.html">📊 Stats</a>
 <a href="/waterfall.html">🌊 Waterfall</a>
 <a href="/diagnostics.html" style="margin-left:auto">🔧 Diagnostics</a>
@@ -134,8 +135,8 @@ function renderConfigForm(){
     loadSdrReceiverConfig();
 }
 
-const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)',gsm:'GSM (935 MHz)',lte:'LTE (800 MHz)',iot868:'IoT 868 MHz',fanet:'FANET (868.2 MHz)',sarsat:'SARSAT (406 MHz)'};
-const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟',gsm:'📶',lte:'📶',iot868:'🌡️',fanet:'🚩',sarsat:'🚨'};
+const roleLabels={adsb:'ADS-B (1090 MHz)',flarm:'FLARM / OGNTP (868 MHz)',acars:'ACARS (131 MHz)',vdl2:'VDL2 (136 MHz)',radiosonde:'Radiosonde (403 MHz)',pocsag:'POCSAG (466 MHz)',gsm:'GSM (935 MHz)',lte:'LTE (800 MHz)',iot868:'IoT 868 MHz',fanet:'FANET (868.2 MHz)',sarsat:'SARSAT (406 MHz)',graves:'GRAVES Radar (143 MHz)'};
+const roleIcons={adsb:'✈️',flarm:'🚩',acars:'📡',vdl2:'📡',radiosonde:'🎈',pocsag:'📟',gsm:'📶',lte:'📶',iot868:'🌡️',fanet:'🚩',sarsat:'🚨',graves:'📡'};
 
 let decoderCfg={};  // loaded from /api/decoders
 
