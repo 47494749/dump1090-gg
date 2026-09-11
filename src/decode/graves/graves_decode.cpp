@@ -93,8 +93,17 @@ typedef struct {
 typedef struct {
     graves_target_t info;
     int32_t active;         // 1 = active, 0 = slot free
+    int32_t confirmed;      // 1 = confirmed (enough consistent updates), 0 = tentative
+    int32_t hit_count;      // hits in the confirmation window
+    int32_t window_count;   // total frames in confirmation window
     float   predicted_doppler;  // predicted Doppler for next frame
 } track_slot_t;
+
+// Confirmation: need MIN_HITS updates within CONFIRM_WINDOW frames
+#define GRAVES_CONFIRM_WINDOW   8
+#define GRAVES_MIN_HITS         4
+// Max plausible doppler rate for an aircraft (Hz/s)
+#define GRAVES_MAX_DOPPLER_RATE 60.0f
 
 // ======================== State ========================
 
@@ -151,10 +160,10 @@ struct graves_state *graves_create(const graves_config_t *config)
     if (!s) return NULL;
 
     s->config = *config;
-    if (s->config.min_snr_db <= 0) s->config.min_snr_db = 8.0f;
-    if (s->config.min_doppler_hz <= 0) s->config.min_doppler_hz = 200.0f;
-    if (s->config.max_doppler_hz <= 0) s->config.max_doppler_hz = 15000.0f;
-    if (s->config.track_timeout_sec <= 0) s->config.track_timeout_sec = 30;
+    if (s->config.min_snr_db <= 0) s->config.min_snr_db = 14.0f;
+    if (s->config.min_doppler_hz <= 0) s->config.min_doppler_hz = 400.0f;
+    if (s->config.max_doppler_hz <= 0) s->config.max_doppler_hz = 8000.0f;
+    if (s->config.track_timeout_sec <= 0) s->config.track_timeout_sec = 10;
     if (s->config.sample_rate <= 0) s->config.sample_rate = GRAVES_SAMPLE_RATE;
 
     s->iq_buf_i = (float *)calloc(GRAVES_FFT_SIZE * 2, sizeof(float));
@@ -293,26 +302,59 @@ static void update_tracks(struct graves_state *s, const peak_t *peaks, int32_t n
             track_updated[t] = true;
             graves_target_t *tgt = &s->tracks[t].info;
             float old_doppler = tgt->doppler_hz;
-            tgt->doppler_hz = peaks[best_pk].freq_hz;
-            tgt->amplitude_db = peaks[best_pk].power_db - s->noise_floor_db;
-            tgt->velocity_ms = (float)(tgt->doppler_hz * C_LIGHT / (double)GRAVES_FREQ);
+            float new_doppler = peaks[best_pk].freq_hz;
+
+            // Compute doppler rate and reject implausible values
             float dt = (now - tgt->last_seen_ms) / 1000.0f;
+            float rate = 0;
             if (dt > 0.01f)
-                tgt->doppler_rate = (tgt->doppler_hz - old_doppler) / dt;
-            tgt->last_seen_ms = now;
-            tgt->updates++;
-            tgt->missed = 0;
-            tgt->age_frames++;
-            s->tracks[t].predicted_doppler = tgt->doppler_hz + tgt->doppler_rate * 0.033f;
+                rate = (new_doppler - old_doppler) / dt;
+
+            // If doppler rate is physically impossible, drop the association
+            if (s->tracks[t].confirmed && fabsf(rate) > GRAVES_MAX_DOPPLER_RATE) {
+                peak_used[best_pk] = false;
+                track_updated[t] = false;
+            } else {
+                tgt->doppler_hz = new_doppler;
+                tgt->amplitude_db = peaks[best_pk].power_db - s->noise_floor_db;
+                tgt->velocity_ms = (float)(tgt->doppler_hz * C_LIGHT / (double)GRAVES_FREQ);
+                tgt->doppler_rate = rate;
+                tgt->last_seen_ms = now;
+                tgt->updates++;
+                tgt->missed = 0;
+                tgt->age_frames++;
+                s->tracks[t].hit_count++;
+                s->tracks[t].predicted_doppler = tgt->doppler_hz + tgt->doppler_rate * 0.033f;
+
+                // Confirmation logic
+                if (!s->tracks[t].confirmed &&
+                    s->tracks[t].hit_count >= GRAVES_MIN_HITS) {
+                    s->tracks[t].confirmed = 1;
+                }
+            }
         }
     }
 
     // Age out tracks that weren't updated
     for (int32_t t = 0; t < GRAVES_MAX_TARGETS; t++) {
         if (!s->tracks[t].active) continue;
+
+        s->tracks[t].window_count++;
+
         if (!track_updated[t]) {
             s->tracks[t].info.missed++;
             s->tracks[t].info.age_frames++;
+
+            // Tentative tracks: kill if not confirmed within the window
+            if (!s->tracks[t].confirmed &&
+                s->tracks[t].window_count >= GRAVES_CONFIRM_WINDOW) {
+                s->tracks[t].active = 0;
+                s->stats.targets_lost++;
+                s->stats.active_targets--;
+                continue;
+            }
+
+            // Confirmed tracks: normal timeout
             float timeout_ms = s->config.track_timeout_sec * 1000.0f;
             if ((now - s->tracks[t].info.last_seen_ms) > (uint64_t)timeout_ms) {
                 s->tracks[t].active = 0;
@@ -360,7 +402,7 @@ static void correlate_adsb(struct graves_state *s)
     int32_t matched = 0, unmatched = 0;
 
     for (int32_t t = 0; t < GRAVES_MAX_TARGETS; t++) {
-        if (!s->tracks[t].active) continue;
+        if (!s->tracks[t].active || !s->tracks[t].confirmed) continue;
         graves_target_t *tgt = &s->tracks[t].info;
         tgt->matched_icao = 0;
         tgt->matched_callsign[0] = '\0';
@@ -517,7 +559,8 @@ int32_t graves_get_targets(struct graves_state *state, graves_target_t *targets,
 {
     int32_t count = 0;
     for (int32_t t = 0; t < GRAVES_MAX_TARGETS && count < max_targets; t++) {
-        if (state->tracks[t].active) {
+        // Only return confirmed targets (passed multi-frame consistency check)
+        if (state->tracks[t].active && state->tracks[t].confirmed) {
             targets[count++] = state->tracks[t].info;
         }
     }
