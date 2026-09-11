@@ -118,10 +118,19 @@ function render(data) {
     }
     document.getElementById('no-data').style.display = 'none';
 
+    // Remove previous "listening" message if any
+    const oldMsg = document.getElementById('graves-listening-msg');
+    if (oldMsg) oldMsg.remove();
+
     if (targets.length === 0) {
         document.getElementById('target-table').style.display = 'none';
-        document.getElementById('stats-area').insertAdjacentHTML('afterend',
-            '<div style="color:var(--dim);text-align:center;padding:20px">Listening... no reflections detected yet.</div>');
+        if (!document.getElementById('graves-listening-msg')) {
+            const msg = document.createElement('div');
+            msg.id = 'graves-listening-msg';
+            msg.style.cssText = 'color:var(--dim);text-align:center;padding:20px';
+            msg.textContent = 'Listening... no reflections detected yet.';
+            document.getElementById('stats-area').after(msg);
+        }
         return;
     }
 
