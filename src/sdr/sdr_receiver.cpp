@@ -1708,6 +1708,21 @@ void rxClose(sdr_receiver_t *rx)
 bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
                    int32_t new_ppm, uint32_t new_freq, double new_sample_rate)
 {
+    // FC0012 tuners on sdrgg backend go deaf after reconfigure because
+    // set_direct_sampling(0) is only available via rtlsdr. Force a full
+    // close+reopen through rxOpen which handles the FC0012→rtlsdr switch.
+    if (rx->backend_dev && rx->backend_dev->tuner_type == SDR_TUNER_FC0012) {
+        gg::eprint("rx[%d]: FC0012 detected — doing full close+reopen instead of soft reconfigure\n", rx->id);
+        rxClose(rx);
+        rx->config.role = new_role;
+        rx->config.gain = new_gain;
+        rx->config.ppm_error = new_ppm;
+        rx->config.freq = new_freq;
+        rx->config.sample_rate = new_sample_rate;
+        if (!rxOpen(rx)) return false;
+        return rxStart(rx);
+    }
+
     if (rx->state == RX_STATE_RUNNING)
         rxStop(rx);
 
