@@ -282,10 +282,19 @@ static int32_t gg_set_agc(sdr_device_t *dev, int32_t enable)
     return sdr::set_digital_agc(static_cast<sdrgg_dev_t *>(dev->handle), enable != 0);
 }
 
-static int32_t gg_set_direct_sampling(sdr_device_t * /*dev*/, int32_t /*mode*/)
+static int32_t gg_set_direct_sampling(sdr_device_t *dev, int32_t mode)
 {
-    // libsdrgg does not support direct sampling (RTL2832U limitation)
-    return 0;
+    if (mode != 0) {
+        // True direct sampling mode is not supported
+        return 0;
+    }
+    // FC0012 Zero-IF tuners need demod register page0:0x08 = 0xCD to
+    // enable both I and Q ADC channels. Without this write, only one
+    // channel is active and the tuner is deaf (gain/freq have no effect).
+    // This is harmless for R820T (register 0x08 is already 0xCD).
+    sdrgg_dev_t *h = static_cast<sdrgg_dev_t *>(dev->handle);
+    if (!h) return -1;
+    return demod::write(h, 0, 0x08, 0xCD);
 }
 
 static int32_t gg_reset_buffer(sdr_device_t * /*dev*/)
