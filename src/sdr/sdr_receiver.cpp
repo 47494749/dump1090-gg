@@ -992,28 +992,13 @@ static void rx_stream_callback(uint8_t *buf, uint32_t len, void *ctx)
         return;
     }
 
-    // Apply deferred retune (e.g. LTE frequency hopping)
-    uint32_t new_freq = rx->pending_freq;
-    if (new_freq) {
-        rx->pending_freq = 0;
-        int32_t ret = rx->backend_ops->set_frequency(rx->backend_dev, new_freq);
-        if (ret < 0) {
-            rx->usb_error_count++;
-            rx->usb_error_total++;
-            if (rx->usb_error_count == 1) {
-                fprintf(stderr, "rx[%d]: set_frequency failed (%d), "
-                        "USB error recovery started\n", rx->id, ret);
-            }
-            if (rx->usb_error_count >= 10) {
-                fprintf(stderr, "rx[%d]: %u consecutive USB errors, "
-                        "cancelling async for device reset\n",
-                        rx->id, rx->usb_error_count);
-                rx->backend_ops->cancel_async(rx->backend_dev);
-            }
-            return;
-        }
-        rx->usb_error_count = 0;
-        rx->config.freq = new_freq;
+    // Deferred retune (sonde scan, LTE hopping): calling set_frequency()
+    // from inside the async callback fails on some RTL-SDR/kernel combos
+    // with LIBUSB_ERROR_BUSY (-6) because bulk transfers are still in flight.
+    // Instead, cancel async so read_async returns to the reader thread,
+    // which performs the retune with no USB contention, then restarts.
+    if (rx->pending_freq) {
+        rx->backend_ops->cancel_async(rx->backend_dev);
         return;
     }
 
@@ -1405,7 +1390,44 @@ static void *rx_reader_thread(void *arg)
     fprintf(stderr, "rx[%d]: reader thread started (role=%s, serial=%s, backend=%s)\n",
             rx->id, sdrRoleName(rx->config.role), rx->serial_actual, ops->name);
 
+    {
+    int32_t empty_returns = 0;  // track consecutive read_async returns with no work
+restart_async:
     ops->read_async(sdev, rx_stream_callback, rx, 4, MODES_RTL_BUF_SIZE);
+
+    // Lightweight retune: read_async exited because the callback called
+    // cancel_async for a pending frequency hop.  Apply the retune here
+    // (no USB bulk transfers in flight) and loop back to read_async.
+    if (!Modes.exit && rx->state != RX_STATE_STOPPING &&
+        __atomic_load_n(&rx->pending_freq, __ATOMIC_ACQUIRE)) {
+        uint32_t new_freq = __atomic_load_n(&rx->pending_freq, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&rx->pending_freq, (uint32_t)0, __ATOMIC_RELEASE);
+        int32_t ret = ops->set_frequency(sdev, new_freq);
+        if (ret == 0) {
+            ops->reset_buffer(sdev);
+            __atomic_store_n((uint32_t *)&rx->config.freq, new_freq, __ATOMIC_RELEASE);
+            rx->usb_error_count = 0;
+            empty_returns = 0;
+            goto restart_async;
+        }
+        // set_frequency failed even outside async — count as USB error
+        gg::eprint("rx[%d]: retune to %u failed (%d) outside async\n", rx->id, new_freq, ret);
+        rx->usb_error_count++;
+        rx->usb_error_total++;
+    }
+
+    // read_async can return spuriously after cancel_async (residual USB
+    // state, URB cleanup).  Retry with a short pause before giving up.
+    if (!Modes.exit && rx->state != RX_STATE_STOPPING &&
+        rx->usb_error_count == 0 && empty_returns < 3) {
+        empty_returns++;
+        ops->reset_buffer(sdev);
+        struct timespec ts = {0, 100000000};  // 100 ms
+        nanosleep(&ts, NULL);
+        if (!Modes.exit && rx->state != RX_STATE_STOPPING)
+            goto restart_async;
+    }
+    }
 
     // If cancelled due to USB errors (not shutdown), try to recover
     if (!Modes.exit && rx->state != RX_STATE_STOPPING && rx->usb_error_count > 0) {

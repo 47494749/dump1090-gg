@@ -1701,13 +1701,15 @@ static bool wf_tune(uint32_t freq_hz) {
     if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
 
     __atomic_store_n(&rx->pending_freq, freq_hz, __ATOMIC_RELEASE);
-    for (int32_t attempt = 0; attempt < 250; attempt++) {
+    // The retune happens in the reader thread after cancel_async exits
+    // the async loop. This takes ~50-300 ms depending on USB state.
+    for (int32_t attempt = 0; attempt < 500; attempt++) {
         uint32_t pending = __atomic_load_n(&rx->pending_freq, __ATOMIC_ACQUIRE);
-        int32_t applied = __atomic_load_n(&rx->config.freq, __ATOMIC_ACQUIRE);
-        if (pending == 0 && applied == (int32_t)freq_hz) {
+        uint32_t applied = __atomic_load_n((uint32_t *)&rx->config.freq, __ATOMIC_ACQUIRE);
+        if (pending == 0 && applied == freq_hz) {
             return true;
         }
-        usleep(1000);
+        usleep(2000);
     }
 
     return false;
