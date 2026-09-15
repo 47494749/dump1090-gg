@@ -853,7 +853,36 @@ void rxDiagHealthCheck(void)
 
         if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) continue;
 
-        // Only check R820T-based receivers (ADSB, FLARM)
+        // ---- IQ signal presence check (ALL receivers) ----
+        // Detect deaf tuner: IQ power that never changes indicates the
+        // tuner is disconnected from the ADC (FC0012 known issue).
+        // Read and RESET the atomic accumulators to get per-second window.
+        {
+            uint64_t iq_sum = __atomic_exchange_n(&rx->ag_iq_sum, (uint64_t)0, __ATOMIC_RELAXED);
+            uint32_t iq_cnt = __atomic_exchange_n(&rx->ag_iq_count, (uint32_t)0, __ATOMIC_RELAXED);
+            if (iq_cnt > 100) {
+                float iq_power = (float)((double)iq_sum / iq_cnt);
+                float delta = fabsf(iq_power - h->last_iq_power);
+                if (h->last_iq_power > 0 && delta < 1.0f) {
+                    h->iq_stuck_count++;
+                    if (h->iq_stuck_count >= 30 && !h->deaf_reported) {
+                        h->deaf_reported = true;
+                        gg::eprint("rx[%d]: *** IQ SIGNAL STUCK *** power=%.1f for %ds — tuner may be deaf (serial=%s)\n",
+                                   rx->id, iq_power, h->iq_stuck_count, rx->serial_actual);
+                    }
+                } else {
+                    if (h->deaf_reported) {
+                        gg::eprint("rx[%d]: IQ signal recovered (%.1f -> %.1f)\n",
+                                   rx->id, h->last_iq_power, iq_power);
+                    }
+                    h->iq_stuck_count = 0;
+                    h->deaf_reported = false;
+                }
+                h->last_iq_power = iq_power;
+            }
+        }
+
+        // Only check R820T-based receivers (ADSB, FLARM) for further diagnostics
         if (rx->config.role != SDR_ROLE_ADSB && rx->config.role != SDR_ROLE_FLARM)
             continue;
 
@@ -905,34 +934,7 @@ void rxDiagHealthCheck(void)
         // For FLARM: use sample_counter growth without decoded frames
         // (FLARM is sparse, so use longer timeout — handled by FLARM decoder stats)
 
-        // ---- IQ signal presence check (all receivers) ----
-        // Detect deaf tuner: IQ power that never changes indicates the
-        // tuner is disconnected from the ADC (FC0012 known issue).
-        // Read and RESET the atomic accumulators to get per-second window.
-        {
-            uint64_t iq_sum = __atomic_exchange_n(&rx->ag_iq_sum, (uint64_t)0, __ATOMIC_RELAXED);
-            uint32_t iq_cnt = __atomic_exchange_n(&rx->ag_iq_count, (uint32_t)0, __ATOMIC_RELAXED);
-            if (iq_cnt > 100) {
-                float iq_power = (float)((double)iq_sum / iq_cnt);
-                float delta = fabsf(iq_power - h->last_iq_power);
-                if (h->last_iq_power > 0 && delta < 1.0f) {
-                    h->iq_stuck_count++;
-                    if (h->iq_stuck_count >= 30 && !h->deaf_reported) {
-                        h->deaf_reported = true;
-                        gg::eprint("rx[%d]: *** IQ SIGNAL STUCK *** power=%.1f for %ds — tuner may be deaf (serial=%s)\n",
-                                   rx->id, iq_power, h->iq_stuck_count, rx->serial_actual);
-                    }
-                } else {
-                    if (h->deaf_reported) {
-                        gg::eprint("rx[%d]: IQ signal recovered (%.1f → %.1f)\n",
-                                   rx->id, h->last_iq_power, iq_power);
-                    }
-                    h->iq_stuck_count = 0;
-                    h->deaf_reported = false;
-                }
-                h->last_iq_power = iq_power;
-            }
-        }
+        // (IQ check moved above the ADSB/FLARM filter to cover all receivers)
     }
 
     // ---- USB hotplug recovery: resurrect receivers in ERROR state ----
