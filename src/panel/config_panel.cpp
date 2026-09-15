@@ -7196,12 +7196,6 @@ static void *panel_thread_entry(void *arg)
                             // Already have a waterfall client, reject
                             http_send(client_fd, 409, "text/plain", "Busy", 4);
                         } else if (ws_handshake(client_fd, reqbuf.c_str())) {
-                            // Set 2-second send timeout to prevent blocking
-                            // when the browser tab goes to background and
-                            // stops consuming frames. Without this, send()
-                            // blocks indefinitely and freezes the panel thread.
-                            struct timeval tv = {2, 0};
-                            setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
                             WF.ws_fd = client_fd;
                             WF.last_frame_ms = 0;
                             client_fd = -1; // prevent close below
