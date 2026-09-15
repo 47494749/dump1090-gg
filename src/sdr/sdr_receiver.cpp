@@ -908,24 +908,23 @@ void rxDiagHealthCheck(void)
         // ---- IQ signal presence check (all receivers) ----
         // Detect deaf tuner: IQ power that never changes indicates the
         // tuner is disconnected from the ADC (FC0012 known issue).
-        // Uses the auto-gain IQ power accumulator already updated by the callback.
+        // Read and RESET the atomic accumulators to get per-second window.
         {
-            uint64_t iq_sum = __atomic_load_n(&rx->ag_iq_sum, __ATOMIC_RELAXED);
-            uint32_t iq_cnt = __atomic_load_n(&rx->ag_iq_count, __ATOMIC_RELAXED);
-            if (iq_cnt > 0) {
+            uint64_t iq_sum = __atomic_exchange_n(&rx->ag_iq_sum, (uint64_t)0, __ATOMIC_RELAXED);
+            uint32_t iq_cnt = __atomic_exchange_n(&rx->ag_iq_count, (uint32_t)0, __ATOMIC_RELAXED);
+            if (iq_cnt > 100) {
                 float iq_power = (float)((double)iq_sum / iq_cnt);
                 float delta = fabsf(iq_power - h->last_iq_power);
-                if (h->last_iq_power > 0 && delta < 0.1f) {
+                if (h->last_iq_power > 0 && delta < 1.0f) {
                     h->iq_stuck_count++;
-                    // After 60 consecutive identical readings (~60s), report deaf
-                    if (h->iq_stuck_count >= 60 && !h->deaf_reported) {
+                    if (h->iq_stuck_count >= 30 && !h->deaf_reported) {
                         h->deaf_reported = true;
-                        gg::eprint("rx[%d]: *** IQ SIGNAL STUCK *** power=%.1f for %ds — tuner may be deaf\n",
-                                   rx->id, iq_power, h->iq_stuck_count);
+                        gg::eprint("rx[%d]: *** IQ SIGNAL STUCK *** power=%.1f for %ds — tuner may be deaf (serial=%s)\n",
+                                   rx->id, iq_power, h->iq_stuck_count, rx->serial_actual);
                     }
                 } else {
-                    if (h->deaf_reported && h->iq_stuck_count >= 60) {
-                        gg::eprint("rx[%d]: IQ signal recovered (power changed from %.1f to %.1f)\n",
+                    if (h->deaf_reported) {
+                        gg::eprint("rx[%d]: IQ signal recovered (%.1f → %.1f)\n",
                                    rx->id, h->last_iq_power, iq_power);
                     }
                     h->iq_stuck_count = 0;
