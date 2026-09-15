@@ -311,6 +311,79 @@ static bool decode_bresser_5in1(const pulse_t *pulses, int32_t count, iot_device
 
 // ======================== FSK Protocol decoders ========================
 
+// LaCrosse TX29/TX35 FSK: 17241 baud, sync 0x2DD4, 5 data bytes
+// Preamble: 0xAAAA..., Sync: 0x2DD4
+// Data: [type+id_hi] [id_lo] [value_hi] [value_lo] [checksum]
+// Checksum: sum of nibbles mod 16 == 0
+// Based on rtl_433 LaCrosse-TX29IT decoder
+static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
+{
+    if (bit_count < 80) return false;
+
+    // Search for sync word 0x2DD4 (16 bits: 0010 1101 1101 0100)
+    int32_t start = -1;
+    for (int32_t i = 0; i <= bit_count - 80; i++) {
+        uint16_t word = 0;
+        for (int32_t b = 0; b < 16; b++)
+            word = (word << 1) | (bits[i + b] & 1);
+        if (word == 0x2DD4) {
+            start = i + 16;
+            break;
+        }
+    }
+    if (start < 0 || start + 40 > bit_count) return false;
+
+    // Decode 5 bytes after sync
+    uint8_t bytes[5] = {0};
+    for (int32_t i = 0; i < 40 && (start + i) < bit_count; i++) {
+        bytes[i / 8] |= (bits[start + i] & 1) << (7 - (i % 8));
+    }
+
+    // Nibble checksum: sum of all 10 nibbles must be 0 mod 16
+    uint8_t sum = 0;
+    for (int32_t i = 0; i < 5; i++)
+        sum += (bytes[i] >> 4) + (bytes[i] & 0x0F);
+    if ((sum & 0x0F) != 0) return false;
+
+    // Parse fields
+    uint8_t type_nibble = bytes[0] >> 4;
+    uint8_t sensor_id = ((bytes[0] & 0x0F) << 4) | (bytes[1] >> 4);
+    uint8_t new_battery = (bytes[1] >> 2) & 1;
+    int32_t raw_value = ((bytes[2] & 0x0F) << 8) | bytes[3];
+
+    msg->protocol = IOT_PROTO_LACROSSE_TX;
+    msg->modulation = IOT_MOD_FSK;
+    msg->device_id = sensor_id;
+    msg->channel = 0;
+    msg->battery_ok = new_battery ? 0 : 1;
+
+    if (type_nibble == 0x00) {
+        // Temperature: raw/10 - 40
+        msg->temperature_c = raw_value / 10.0f - 40.0f;
+        msg->humidity_pct = NAN;
+    } else if (type_nibble == 0x0E) {
+        // Humidity
+        msg->humidity_pct = raw_value / 10.0f;
+        msg->temperature_c = NAN;
+    } else {
+        return false;  // unknown type
+    }
+
+    msg->pressure_hpa = NAN;
+    msg->wind_speed_ms = NAN;
+    msg->wind_dir_deg = NAN;
+    msg->rain_mm = NAN;
+    msg->power_w = NAN;
+    msg->energy_kwh = NAN;
+    msg->battery_v = NAN;
+    msg->freq_hz = 868.3e6;
+
+    memcpy(msg->payload, bytes, 5);
+    msg->payload_len = 5;
+    msg->timestamp_ms = now_ms();
+    return true;
+}
+
 // wMBus Mode C/T: GFSK ±50 kHz, 100 kbps (Mode C) or ~32.768 kbps (Mode T)
 // Preamble: Mode C = 0101...0101 + 0x543D, Mode T = 1010...1010 + 0x3965543D
 // We require the FULL 16-bit sync 0x543D (Mode C) to avoid false positives.
@@ -608,8 +681,9 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
     // Pass 2: FSK demodulation at multiple bit rates
     // wMBus Mode C = 100 kbps (20 samp/bit), Mode T = 32.768 kbps (61 samp/bit)
     // Honeywell CM9xx = 38.4 kbps (52 samp/bit)
-    static const int32_t bit_periods[] = { 20, 52, 61 };  // samples per bit
-    static const int32_t num_rates = 3;
+    // LaCrosse TX29/TX35 = 17.241 kbps (116 samp/bit)
+    static const int32_t bit_periods[] = { 20, 52, 61, 116 };
+    static const int32_t num_rates = 4;
 
     for (int32_t rate_idx = 0; rate_idx < num_rates; rate_idx++) {
         int32_t samples_per_bit = bit_periods[rate_idx];
@@ -664,6 +738,7 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
             msg.freq_offset_hz = NAN;
 
             bool decoded = false;
+            if (!decoded) decoded = decode_lacrosse_fsk(fsk_bits_local, fsk_bit_count, &msg);
             if (!decoded) decoded = decode_wmbus(fsk_bits_local, fsk_bit_count, &msg);
             if (!decoded) decoded = decode_honeywell_cm(fsk_bits_local, fsk_bit_count, &msg);
 
