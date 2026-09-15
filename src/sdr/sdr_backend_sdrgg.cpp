@@ -401,34 +401,14 @@ static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     gg::eprint("sdrgg-diag: adapter[%d] streaming started, entering consumer loop\n", adapter->adapter_id);
 
     // Consume ring buffer data (reader thread context)
-    // Poll the ring and deliver data to the user callback.
-    //
-    // Adaptive CPU throttle: after processing each ring slot, sleep for a
-    // fraction of the processing time so the thread never exceeds ~80% of
-    // one core.  The formula is:
-    //
-    //     sleep = processing_time * IDLE_RATIO / (1 - IDLE_RATIO)
-    //
-    // With IDLE_RATIO = 0.20 and processing = 60 ms, sleep = 15 ms.
-    // This is self-adaptive: heavier decoders (FLARM 1.6 MHz) sleep more,
-    // lighter decoders (GRAVES 500 kHz) sleep less.  For ADSB the callback
-    // is very fast (<1 ms per slot) so the sleep is negligible.
-    //
-    // Ring overflow protection: if the ring is more than half full (4+ of 8
-    // slots ready), skip the throttle sleep to drain the backlog.
-    //
-    const float IDLE_RATIO = 0.20f;  // target: max 80% CPU per sdrgg thread
-    struct timespec ts_poll = { .tv_sec = 0, .tv_nsec = 1000000 };  // 1 ms (no data)
+    // This replaces the old spin-wait: instead of sleeping, we poll the ring.
+    struct timespec ts_poll = { .tv_sec = 0, .tv_nsec = 1000000 }; // 1ms poll interval
     uint32_t poll_empty = 0;
     while (dev->handle && dev->async_running) {
         int32_t idx = ring->read_idx;
         struct ring_slot *slot = &ring->slots[idx];
         if (__atomic_load_n(&slot->ready, __ATOMIC_ACQUIRE)) {
-            // Measure processing time
-            struct timespec t0, t1;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
-
-            // Deliver data to user callback
+            // Deliver data to user callback (heavy processing happens HERE, not in event_loop)
             if (adapter->user_cb && !adapter->stopping) {
                 adapter->user_cb(slot->data, slot->len, adapter->user_ctx);
                 adapter->deliver_count++;
@@ -436,26 +416,6 @@ static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
             slot->ready = 0;
             ring->read_idx = (idx + 1) % SDRGG_RING_SLOTS;
             poll_empty = 0;
-
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            int64_t elapsed_ns = (int64_t)(t1.tv_sec - t0.tv_sec) * 1000000000LL
-                                + (t1.tv_nsec - t0.tv_nsec);
-
-            // Adaptive CPU throttle: after every slot, sleep for a fraction
-            // of the processing time.  This limits each sdrgg reader thread
-            // to ~80% of one core regardless of decoder weight.
-            // The ring buffer (8 slots) absorbs the brief pauses — no data
-            // is lost because the sdrgg internal thread keeps filling slots
-            // while we sleep.
-            if (elapsed_ns > 500000) {  // only throttle if callback took >0.5ms
-                int64_t sleep_ns = (int64_t)((double)elapsed_ns * IDLE_RATIO / (1.0 - IDLE_RATIO));
-                if (sleep_ns > 50000000) sleep_ns = 50000000;  // cap at 50ms
-                struct timespec ts_throttle = {
-                    .tv_sec = 0,
-                    .tv_nsec = (long)sleep_ns
-                };
-                nanosleep(&ts_throttle, nullptr);
-            }
         } else {
             nanosleep(&ts_poll, nullptr);
             poll_empty++;
