@@ -7189,9 +7189,13 @@ static void *panel_thread_entry(void *arg)
                     // Only accept /ws/waterfall endpoint
                     if (strstr(reqbuf.c_str(), "GET /ws/waterfall")) {
                         if (WF.ws_fd >= 0) {
-                            // Already have a waterfall client, reject
-                            http_send(client_fd, 409, "text/plain", "Busy", 4);
-                        } else if (ws_handshake(client_fd, reqbuf.c_str())) {
+                            // Old client still connected (or stale) — close it
+                            // and accept the new one. This handles the case where
+                            // the browser tab went to background and the old WS
+                            // died without a clean close frame.
+                            wf_disconnect();
+                        }
+                        if (ws_handshake(client_fd, reqbuf.c_str())) {
                             WF.ws_fd = client_fd;
                             WF.last_frame_ms = 0;
                             client_fd = -1; // prevent close below
