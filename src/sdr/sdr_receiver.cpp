@@ -1319,9 +1319,10 @@ bool rxOpen(sdr_receiver_t *rx)
      * appears to work (streaming OK, API calls return 0) but
      * the RF front-end is effectively disconnected from the ADC.
      * ================================================================ */
-    if (!rx->config.direct_sampling && sdev->tuner_type == SDR_TUNER_FC0012) {
+    if (!rx->config.direct_sampling &&
+        (sdev->tuner_type == SDR_TUNER_FC0012 || sdev->tuner_type == SDR_TUNER_FC0013)) {
         int32_t ds_rc = ops->set_direct_sampling(sdev, 0);
-        rxDebugLogState(rx, "set_direct_sampling(0) for FC0012", ds_rc);
+        rxDebugLogState(rx, "set_direct_sampling(0) for FC001x", ds_rc);
     }
 
     // Gain setup

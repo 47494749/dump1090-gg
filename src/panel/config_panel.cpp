@@ -7112,15 +7112,9 @@ static void *panel_thread_entry(void *arg)
         } else if (wf_poll_idx >= 0 && fds[wf_poll_idx].revents & POLLIN) {
             wf_handle_ws_read();
         }
-        // Kill stale waterfall WebSocket (no activity for 30s)
-        if (WF.ws_fd >= 0 && WF.last_frame_ms > 0) {
-            uint64_t idle_ms = mstime() - WF.last_frame_ms;
-            if (idle_ms > 30000) {
-                panelLog("Panel: waterfall WS stale (%llu ms idle), disconnecting",
-                         (unsigned long long)idle_ms);
-                wf_disconnect();
-            }
-        }
+        // Stale WebSocket cleanup: POLLHUP/POLLERR at line 7110 already
+        // handles ungraceful disconnects. No idle timeout needed — the
+        // TCP keepalive and poll() error detection are sufficient.
 
         // Process waterfall spectrum frames
         if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();

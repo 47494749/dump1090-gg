@@ -145,6 +145,13 @@ static sdr_device_t *gg_open_by_index(int32_t index)
 
     // Get tuner type
     sdrgg_tuner_type_t tt = sdr::get_tuner_type(dev);
+
+    // FC0012 Zero-IF fix: enable both I+Q ADC channels immediately after open.
+    // demod page0:0x08 = 0xCD enables both ADC channels.
+    if (tt == SDRGG_TUNER_FC0012 || tt == SDRGG_TUNER_FC0013) {
+        demod::write(dev, 0, 0x08, 0xCD);
+    }
+
     switch (tt) {
         case SDRGG_TUNER_R820T:  sdev->tuner_type = SDR_TUNER_R820T;  break;
         case SDRGG_TUNER_R820T2: sdev->tuner_type = SDR_TUNER_R820T2; break;
@@ -294,20 +301,7 @@ static int32_t gg_set_direct_sampling(sdr_device_t *dev, int32_t mode)
     // This is harmless for R820T (register 0x08 is already 0xCD).
     sdrgg_dev_t *h = static_cast<sdrgg_dev_t *>(dev->handle);
     if (!h) return -1;
-
-    // Read current value first for diagnostics
-    uint8_t old_val = 0;
-    demod::read(h, 0, 0x08, &old_val);
-
-    int32_t rc = demod::write(h, 0, 0x08, 0xCD);
-
-    // Verify the write took effect
-    uint8_t new_val = 0;
-    demod::read(h, 0, 0x08, &new_val);
-    fprintf(stderr, "sdrgg: FC0012 ADC fix: page0:0x08 was 0x%02X, wrote 0xCD, now 0x%02X (rc=%d)\n",
-            old_val, new_val, rc);
-
-    return rc;
+    return demod::write(h, 0, 0x08, 0xCD);
 }
 
 static int32_t gg_reset_buffer(sdr_device_t * /*dev*/)
