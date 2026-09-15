@@ -7112,9 +7112,6 @@ static void *panel_thread_entry(void *arg)
         } else if (wf_poll_idx >= 0 && fds[wf_poll_idx].revents & POLLIN) {
             wf_handle_ws_read();
         }
-        // Stale WebSocket cleanup: POLLHUP/POLLERR at line 7110 already
-        // handles ungraceful disconnects. No idle timeout needed — the
-        // TCP keepalive and poll() error detection are sufficient.
 
         // Process waterfall spectrum frames
         if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();
@@ -7152,7 +7149,6 @@ static void *panel_thread_entry(void *arg)
         setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
 
         // Wait for data readiness before reading (avoid blocking on idle connections)
-        // Reduced from 3s to 1s to improve throughput under concurrent connections
         struct pollfd cpfd = { .fd = client_fd, .events = POLLIN };
         if (poll(&cpfd, 1, 3000) <= 0) {
             close(client_fd);
