@@ -1445,7 +1445,7 @@ static bool ws_handshake(int32_t fd, const char *request) {
     return true;
 }
 
-// Send a WebSocket binary frame
+// Send a WebSocket binary frame (non-blocking: drops frame if buffer full)
 static bool ws_send_binary(int32_t fd, const uint8_t *data, int32_t len) {
     uint8_t hdr[10];
     int32_t hlen = 0;
@@ -1461,12 +1461,15 @@ static bool ws_send_binary(int32_t fd, const uint8_t *data, int32_t len) {
     } else {
         return false; // frames >64K not needed
     }
-    if (send(fd, hdr, hlen, MSG_NOSIGNAL) != hlen) return false;
-    if (send(fd, data, len, MSG_NOSIGNAL) != len) return false;
+    // MSG_DONTWAIT prevents blocking when the client stops consuming
+    // (e.g., browser tab in background). If the send buffer is full,
+    // we drop the frame rather than blocking the entire panel thread.
+    if (send(fd, hdr, hlen, MSG_NOSIGNAL | MSG_DONTWAIT) != hlen) return false;
+    if (send(fd, data, len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) return false;
     return true;
 }
 
-// Send a WebSocket text frame
+// Send a WebSocket text frame (non-blocking)
 static bool ws_send_text(int32_t fd, const char *text, int32_t len) {
     uint8_t hdr[10];
     int32_t hlen = 0;
@@ -1482,8 +1485,8 @@ static bool ws_send_text(int32_t fd, const char *text, int32_t len) {
     } else {
         return false;
     }
-    if (send(fd, hdr, hlen, MSG_NOSIGNAL) != hlen) return false;
-    if (send(fd, text, len, MSG_NOSIGNAL) != len) return false;
+    if (send(fd, hdr, hlen, MSG_NOSIGNAL | MSG_DONTWAIT) != hlen) return false;
+    if (send(fd, text, len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) return false;
     return true;
 }
 
