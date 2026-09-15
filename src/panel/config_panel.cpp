@@ -7154,7 +7154,7 @@ static void *panel_thread_entry(void *arg)
         // Wait for data readiness before reading (avoid blocking on idle connections)
         // Reduced from 3s to 1s to improve throughput under concurrent connections
         struct pollfd cpfd = { .fd = client_fd, .events = POLLIN };
-        if (poll(&cpfd, 1, 1000) <= 0) {
+        if (poll(&cpfd, 1, 3000) <= 0) {
             close(client_fd);
             continue;
         }
@@ -7256,16 +7256,7 @@ static void *panel_thread_entry(void *arg)
             }
         }
 
-        if (client_fd >= 0) {
-            // Graceful shutdown: send FIN to the client before close.
-            // Without this, close() on a socket with unread data sends RST,
-            // causing CLOSE-WAIT/LAST-ACK leak when clients disconnect early.
-            shutdown(client_fd, SHUT_WR);
-            // Drain any remaining data (prevents RST on close)
-            char drain[256];
-            while (read(client_fd, drain, sizeof(drain)) > 0) {}
-            close(client_fd);
-        }
+        if (client_fd >= 0) close(client_fd);
     }
 
     return NULL;
