@@ -17,11 +17,120 @@
 #include <new>
 #include <pthread.h>
 #include <time.h>
+#include <libusb-1.0/libusb.h>
 
 #include "sdr_backend.h"
 
 #include "sdrgg.h"
 #include "gg_format.h"
+
+/* ================================================================
+ * USB HUB PORT POWER CYCLE (for FC0012 recovery)
+ * ================================================================
+ *
+ * When the FC0012 tuner enters a stuck state where its I2C bus is
+ * dead (all register reads return 0xFF, writes silently ignored),
+ * the ONLY recovery is a full 5V power cycle on the USB port.
+ *
+ * No software reset (GPIO pulse, demod reset, USB device reset,
+ * authorized toggle, unbind/rebind) can restore it — the FC0012
+ * silicon needs its power rail to go to 0V and back.
+ *
+ * This function sends USB hub class requests to cut and restore
+ * power on a specific port, equivalent to physically unplugging
+ * and replugging the dongle.
+ *
+ * Uses libusb directly (already linked via librtlsdr dependency).
+ * ================================================================ */
+
+static bool usb_hub_power_cycle(uint16_t vid, uint16_t pid, const char *serial)
+{
+    libusb_context *usb_ctx = NULL;
+    if (libusb_init(&usb_ctx) != 0) return false;
+
+    libusb_device **devlist = NULL;
+    ssize_t cnt = libusb_get_device_list(usb_ctx, &devlist);
+    if (cnt < 0) { libusb_exit(usb_ctx); return false; }
+
+    // Find the target device by VID:PID and serial
+    libusb_device *target = NULL;
+    for (ssize_t i = 0; i < cnt; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(devlist[i], &desc) != 0) continue;
+        if (desc.idVendor != vid || desc.idProduct != pid) continue;
+
+        libusb_device_handle *h = NULL;
+        if (libusb_open(devlist[i], &h) != 0) continue;
+        char sn[64] = {};
+        if (desc.iSerialNumber)
+            libusb_get_string_descriptor_ascii(h, desc.iSerialNumber, (uint8_t*)sn, sizeof(sn));
+        libusb_close(h);
+
+        if (strcmp(sn, serial) == 0) { target = devlist[i]; break; }
+    }
+
+    if (!target) {
+        libusb_free_device_list(devlist, 1);
+        libusb_exit(usb_ctx);
+        return false;
+    }
+
+    // Get parent hub and port number
+    libusb_device *hub = libusb_get_parent(target);
+    uint8_t port = libusb_get_port_number(target);
+    if (!hub || port == 0) {
+        libusb_free_device_list(devlist, 1);
+        libusb_exit(usb_ctx);
+        return false;
+    }
+
+    // Open the hub
+    libusb_device_handle *hub_h = NULL;
+    if (libusb_open(hub, &hub_h) != 0) {
+        libusb_free_device_list(devlist, 1);
+        libusb_exit(usb_ctx);
+        return false;
+    }
+
+    fprintf(stderr, "sdrgg: FC0012 USB power cycle: hub bus=%d dev=%d port=%d serial=%s\n",
+            libusb_get_bus_number(hub), libusb_get_device_address(hub), port, serial);
+
+    // USB Hub Class: CLEAR_FEATURE(PORT_POWER) — turns off 5V
+    int rc = libusb_control_transfer(hub_h,
+        0x23,   // bmRequestType: class | other | host-to-device
+        0x01,   // bRequest: CLEAR_FEATURE
+        0x0008, // wValue: PORT_POWER
+        port,   // wIndex: port number
+        NULL, 0, 1000);
+
+    if (rc < 0) {
+        fprintf(stderr, "sdrgg: USB power off failed: %s\n", libusb_error_name(rc));
+        libusb_close(hub_h);
+        libusb_free_device_list(devlist, 1);
+        libusb_exit(usb_ctx);
+        return false;
+    }
+
+    fprintf(stderr, "sdrgg: USB port %d powered OFF, waiting 3s...\n", port);
+    { struct timespec ts = {3, 0}; nanosleep(&ts, nullptr); }
+
+    // USB Hub Class: SET_FEATURE(PORT_POWER) — turns on 5V
+    rc = libusb_control_transfer(hub_h,
+        0x23,   // bmRequestType: class | other | host-to-device
+        0x03,   // bRequest: SET_FEATURE
+        0x0008, // wValue: PORT_POWER
+        port,   // wIndex: port number
+        NULL, 0, 1000);
+
+    fprintf(stderr, "sdrgg: USB port %d powered ON (rc=%d), waiting 5s for re-enumeration...\n", port, rc);
+    libusb_close(hub_h);
+    libusb_free_device_list(devlist, 1);
+    libusb_exit(usb_ctx);
+
+    { struct timespec ts = {5, 0}; nanosleep(&ts, nullptr); }
+
+    return (rc >= 0);
+}
 #include <string>
 
 // ======================== Global sdrgg context ========================
@@ -232,8 +341,55 @@ static sdr_device_t *gg_open_by_index(int32_t index)
                 }
             }
 
+            if (chip_id != 0xA1) {
+                /* ============================================================
+                 * LAST RESORT: USB hub port power cycle
+                 * ============================================================
+                 * GPIO brute-force failed to unblock the FC0012 I2C bus.
+                 * The only remaining option is a full 5V power cycle on the
+                 * USB port. This is equivalent to physically unplugging the
+                 * dongle. We send USB hub class requests to cut and restore
+                 * power on the port, then reopen the device.
+                 *
+                 * This works because the FC0012 silicon needs its power rail
+                 * to go to 0V and back to fully reset internal state.
+                 * ============================================================ */
+                fprintf(stderr, "sdrgg: FC0012 GPIO recovery failed, attempting USB power cycle\n");
+
+                // Get serial before closing
+                sdrgg_devinfo_t di[8];
+                int dc = sdrgg_enumerate(ctx, di, 8);
+                char serial[64] = {};
+                for (int i = 0; i < dc; i++) {
+                    if (i == index) { strncpy(serial, di[i].serial, 63); break; }
+                }
+
+                // Close device before power cycle
+                sdr::close(dev);
+                dev = nullptr;
+
+                if (serial[0] && usb_hub_power_cycle(0x0bda, 0x2838, serial)) {
+                    fprintf(stderr, "sdrgg: USB power cycle done, reopening device\n");
+                    dev = sdr::open(ctx, index);
+                    if (dev) {
+                        sdev->handle = dev;
+                        tt = sdr::get_tuner_type(dev);
+                        tuner::read_reg(dev, 0x00, &chip_id);
+                        fprintf(stderr, "sdrgg: after power cycle: chip_id=0x%02X tuner=%d\n",
+                                chip_id, tt);
+                    }
+                }
+
+                if (!dev) {
+                    fprintf(stderr, "sdrgg: FC0012 recovery failed completely\n");
+                    delete sdev;
+                    return nullptr;
+                }
+            }
+
             if (chip_id == 0xA1) {
-                // I2C recovered! Re-run FC0012 init (the one during sdr::open failed)
+                fprintf(stderr, "sdrgg: FC0012 I2C recovered, re-running init\n");
+                // Re-run FC0012 init (the one during sdr::open failed on dead I2C)
                 static const uint8_t init_regs[] = {
                     0x05,0x10,0x00,0x00,0x0F,0x00,0x20,0xFF,
                     0x6E,0xB8,0x82,0xFE,0x02,0x00,0x00,0x00,

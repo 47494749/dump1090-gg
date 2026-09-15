@@ -194,7 +194,7 @@ ifeq ($(SDRGG), yes)
       DUMP1090_CPPFLAGS += -I$(SDRGG_PREFIX)/include
       SDRGG_LIBDIR := $(SDRGG_PREFIX)/lib
     endif
-    LIBS_SDR += -L$(SDRGG_LIBDIR) -Wl,-rpath,$(SDRGG_LIBDIR) -lsdrgg -lstdc++
+    LIBS_SDR += -L$(SDRGG_LIBDIR) -Wl,-rpath,$(SDRGG_LIBDIR) -lsdrgg -lstdc++ -lusb-1.0
   else ifeq ($(PKGCONFIG), yes)
     ifeq ($(shell pkg-config --exists libsdrgg && echo "yes" || echo "no"), yes)
       DUMP1090_CPPFLAGS += $(shell pkg-config --cflags libsdrgg)
