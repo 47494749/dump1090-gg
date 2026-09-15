@@ -198,17 +198,56 @@ static sdr_device_t *gg_open_by_index(int32_t index)
      *
      * ================================================================ */
     if (tt == SDRGG_TUNER_FC0012 || tt == SDRGG_TUNER_FC0013) {
-        // ISSUE 1: GPIO7 reset pulse to unblock stuck I2C bus
-        uint8_t gpo = 0, gpd = 0, gpoe = 0;
-        demod::read(dev, 2, 0x0001, &gpo);
-        demod::read(dev, 2, 0x0002, &gpd);
-        demod::read(dev, 2, 0x0003, &gpoe);
-        demod::write(dev, 2, 0x0003, gpoe | 0x80);  // GPIO7 output enable
-        demod::write(dev, 2, 0x0002, gpd  | 0x80);  // GPIO7 direction = out
-        demod::write(dev, 2, 0x0001, gpo  & ~0x80); // GPIO7 LOW (reset)
-        { struct timespec ts = {0, 100000000}; nanosleep(&ts, nullptr); }
-        demod::write(dev, 2, 0x0001, gpo  | 0x80);  // GPIO7 HIGH (release)
-        { struct timespec ts = {0, 200000000}; nanosleep(&ts, nullptr); }
+        // Check if I2C to tuner is alive (chip ID should be 0xA1)
+        uint8_t chip_id = 0;
+        tuner::read_reg(dev, 0x00, &chip_id);
+
+        if (chip_id != 0xA1) {
+            // ISSUE 1: I2C bus stuck — tuner not responding.
+            // Recovery: demod reset + I2C repeater enable + GPIO brute-force.
+            // The FC0012 reset pin varies by dongle (GPIO3, GPIO4, or GPIO7).
+            // We try all GPIOs with demod reset between rounds.
+            // sdr::open() already ran fc0012::init() but it failed silently
+            // because I2C was dead. After recovery we re-init manually.
+            for (int round = 0; round < 3 && chip_id != 0xA1; round++) {
+                // Demod soft reset
+                demod::write(dev, 1, 0x01, 0x14);
+                { struct timespec ts = {0, 100000000}; nanosleep(&ts, nullptr); }
+                demod::write(dev, 1, 0x01, 0x10);
+                { struct timespec ts = {0, 100000000}; nanosleep(&ts, nullptr); }
+                // Enable I2C repeater
+                uint8_t p1 = 0; demod::read(dev, 1, 0x01, &p1);
+                demod::write(dev, 1, 0x01, p1 | 0x18);
+                { struct timespec ts = {0, 50000000}; nanosleep(&ts, nullptr); }
+                // Pulse each GPIO pin
+                for (int pin = 0; pin < 8 && chip_id != 0xA1; pin++) {
+                    uint8_t mask = 1 << pin;
+                    demod::write(dev, 2, 0x0003, mask);
+                    demod::write(dev, 2, 0x0002, mask);
+                    demod::write(dev, 2, 0x0001, 0x00);
+                    { struct timespec ts = {0, 100000000}; nanosleep(&ts, nullptr); }
+                    demod::write(dev, 2, 0x0001, mask);
+                    { struct timespec ts = {0, 100000000}; nanosleep(&ts, nullptr); }
+                    tuner::read_reg(dev, 0x00, &chip_id);
+                }
+            }
+
+            if (chip_id == 0xA1) {
+                // I2C recovered! Re-run FC0012 init (the one during sdr::open failed)
+                static const uint8_t init_regs[] = {
+                    0x05,0x10,0x00,0x00,0x0F,0x00,0x20,0xFF,
+                    0x6E,0xB8,0x82,0xFE,0x02,0x00,0x00,0x00,
+                    0x00,0x1F,0x00,0x00,0x04
+                };
+                for (int i = 0; i < 21; i++)
+                    tuner::write_reg(dev, 0x01 + i, init_regs[i]);
+                // VCO calibration
+                tuner::write_reg(dev, 0x0E, 0x80);
+                { struct timespec ts = {0, 10000000}; nanosleep(&ts, nullptr); }
+                tuner::write_reg(dev, 0x0E, 0x00);
+                { struct timespec ts = {0, 10000000}; nanosleep(&ts, nullptr); }
+            }
+        }
 
         // ISSUE 2: Enable both I+Q ADC channels
         demod::write(dev, 0, 0x08, 0xCD);
