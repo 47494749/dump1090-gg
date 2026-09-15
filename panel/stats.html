@@ -582,13 +582,18 @@ function updateChartsData(hist){
     }
     keyMap={'ch-ogntp':'od','ch-adsl':'al','ch-p3i':'pi',
             'ch-acars':'ad','ch-vdl2':'vd','ch-sonde':'sd','ch-pocsag':'pd',
-            'ch-gsm':'gb','ch-lte':'lm','ch-iot868':'id','ch-fanet':'nd','ch-sarsat':'sf','ch-graves':'gt'};
+            'ch-gsm':'gb','ch-lte':'lm','ch-iot868':'id','ch-fanet':'nd','ch-sarsat':'sf'};
     Object.keys(keyMap).forEach(function(id){
         if(chartInstances[id]){
             chartInstances[id].data.datasets[0].data=computeRates(snaps,keyMap[id]);
             chartInstances[id].update(mode);
         }
     });
+    // GRAVES targets is an instantaneous count, not a cumulative counter
+    if(chartInstances['ch-graves']){
+        chartInstances['ch-graves'].data.datasets[0].data=instantValues(snaps,'gt');
+        chartInstances['ch-graves'].update(mode);
+    }
 
     // Re-apply per-chart views (preserve zoom state on data refresh)
     Object.keys(chartInstances).forEach(function(key){

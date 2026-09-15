@@ -91,6 +91,7 @@ static void http_send_json(int32_t fd, const char *json, int32_t len);
 
 #define STATS_HISTORY_MAX_ENTRIES  129600 // 90 days at 60s interval (~12 MB)
 #define STATS_HISTORY_FILE        "/etc/dump1090-gg/stats_history.dat"
+#define STATS_HISTORY_BACKUP_DIR  "/home/ubuntu/meteo/stats_backup"
 #define STATS_HISTORY_MAGIC       0x53483033  // "SH03"
 #define STATS_HISTORY_VERSION     3
 #define STATS_HISTORY_SAVE_INTERVAL 10  // save every N snapshots
@@ -135,6 +136,8 @@ struct stats_snapshot {
     uint32_t fanet_dec;
     // SARSAT
     uint32_t sarsat_frm;
+    // GRAVES
+    uint32_t graves_tgt;   // current active targets count
     // Panel port traffic (cumulative KB in the dominant direction for each service)
     uint32_t raw_out_kb;
     uint32_t beast_cooked_out_kb;
@@ -230,6 +233,39 @@ static void statsHistorySaveLocked(void)
     fclose(f);
     rename(tmppath, STATS_HISTORY_FILE);
     StatsHistory.unsaved_count = 0;
+
+    // Rotating backup: copy to backup directory every save.
+    // Keeps 3 generations: stats_history.dat.1 (newest) .2 .3 (oldest)
+    // Backup is in a DIFFERENT directory so accidental rm of the primary
+    // can be recovered from.
+    {
+        static uint32_t backup_counter = 0;
+        // Backup every 60 saves (~10 minutes at default interval) to reduce I/O
+        if (++backup_counter >= 60) {
+            backup_counter = 0;
+            mkdir(STATS_HISTORY_BACKUP_DIR, 0755);  // create if missing
+            char bak3[384], bak2[384], bak1[384];
+            snprintf(bak3, sizeof(bak3), "%s/stats_history.dat.3", STATS_HISTORY_BACKUP_DIR);
+            snprintf(bak2, sizeof(bak2), "%s/stats_history.dat.2", STATS_HISTORY_BACKUP_DIR);
+            snprintf(bak1, sizeof(bak1), "%s/stats_history.dat.1", STATS_HISTORY_BACKUP_DIR);
+            // Rotate: 2→3, 1→2, current→1
+            rename(bak2, bak3);
+            rename(bak1, bak2);
+            // Copy (not move) the primary file to backup
+            FILE *src = fopen(STATS_HISTORY_FILE, "rb");
+            if (src) {
+                FILE *dst = fopen(bak1, "wb");
+                if (dst) {
+                    char cpbuf[8192];
+                    size_t n;
+                    while ((n = fread(cpbuf, 1, sizeof(cpbuf), src)) > 0)
+                        fwrite(cpbuf, 1, n, dst);
+                    fclose(dst);
+                }
+                fclose(src);
+            }
+        }
+    }
 }
 
 // Public save (takes lock)
@@ -330,7 +366,28 @@ static struct stats_snapshot *statsHistoryMigrate(const char *path, int32_t *out
 static void statsHistoryLoad(void)
 {
     FILE *f = fopen(STATS_HISTORY_FILE, "rb");
-    if (!f) return;
+    if (!f) {
+        // Primary file missing — try to restore from backup
+        for (int32_t gen = 1; gen <= 3 && !f; gen++) {
+            char bak[384];
+            snprintf(bak, sizeof(bak), "%s/stats_history.dat.%d", STATS_HISTORY_BACKUP_DIR, gen);
+            FILE *src = fopen(bak, "rb");
+            if (src) {
+                FILE *dst = fopen(STATS_HISTORY_FILE, "wb");
+                if (dst) {
+                    char cpbuf[8192];
+                    size_t n;
+                    while ((n = fread(cpbuf, 1, sizeof(cpbuf), src)) > 0)
+                        fwrite(cpbuf, 1, n, dst);
+                    fclose(dst);
+                    PANEL_DIAG_STDERR("Panel: Stats recovered from backup %s\n", bak);
+                }
+                fclose(src);
+                f = fopen(STATS_HISTORY_FILE, "rb");
+            }
+        }
+        if (!f) return;
+    }
 
     struct stats_file_header hdr;
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.count <= 0) {
@@ -488,6 +545,7 @@ static void statsHistoryTakeSnapshot(void)
         snap.iot868_dec  = ds.iot868_decoded;
         snap.fanet_dec   = ds.fanet_decoded;
         snap.sarsat_frm  = ds.sarsat_frames;
+        snap.graves_tgt  = ds.graves_targets;
     }
 
     // --- Panel port traffic from network services ---
@@ -566,6 +624,7 @@ static void serialize_snapshot(char *buf, size_t buf_cap, int32_t *pos, struct s
         ",\"gb\":%" PRIu32 ",\"lm\":%" PRIu32
         ",\"id\":%" PRIu32
         ",\"nd\":%" PRIu32 ",\"sf\":%" PRIu32
+        ",\"gt\":%" PRIu32
         ",\"tro\":%" PRIu32 ",\"tbc\":%" PRIu32
         ",\"tbv\":%" PRIu32 ",\"tbl\":%" PRIu32
         ",\"tbs\":%" PRIu32 ",\"tst\":%" PRIu32
@@ -582,6 +641,7 @@ static void serialize_snapshot(char *buf, size_t buf_cap, int32_t *pos, struct s
         s->gsm_bcch, s->lte_mib,
         s->iot868_dec,
         s->fanet_dec, s->sarsat_frm,
+        s->graves_tgt,
         s->raw_out_kb, s->beast_cooked_out_kb,
         s->beast_verbatim_out_kb, s->beast_verbatim_local_out_kb,
         s->basestation_out_kb, s->stratux_out_kb,
@@ -622,6 +682,7 @@ static void avg_snapshots(struct stats_snapshot *out, struct stats_snapshot *arr
         sd += arr[i].sonde_dec; pd += arr[i].pocsag_dec;
         gb += arr[i].gsm_bcch; lm += arr[i].lte_mib; id_ += arr[i].iot868_dec;
         nd += arr[i].fanet_dec; sf += arr[i].sarsat_frm;
+        // graves_tgt is instantaneous (not cumulative) — averaged below
         tro += arr[i].raw_out_kb; tbc += arr[i].beast_cooked_out_kb;
         tbv += arr[i].beast_verbatim_out_kb; tbl += arr[i].beast_verbatim_local_out_kb;
         tbs += arr[i].basestation_out_kb; tst += arr[i].stratux_out_kb;
@@ -640,6 +701,7 @@ static void avg_snapshots(struct stats_snapshot *out, struct stats_snapshot *arr
     out->gsm_bcch = arr[n - 1].gsm_bcch; out->lte_mib = arr[n - 1].lte_mib;
     out->iot868_dec = arr[n - 1].iot868_dec;
     out->fanet_dec = arr[n - 1].fanet_dec; out->sarsat_frm = arr[n - 1].sarsat_frm;
+    out->graves_tgt = arr[n - 1].graves_tgt;  // instantaneous: take last value
     out->raw_out_kb = arr[n - 1].raw_out_kb; out->beast_cooked_out_kb = arr[n - 1].beast_cooked_out_kb;
     out->beast_verbatim_out_kb = arr[n - 1].beast_verbatim_out_kb;
     out->beast_verbatim_local_out_kb = arr[n - 1].beast_verbatim_local_out_kb;
@@ -7050,6 +7112,15 @@ static void *panel_thread_entry(void *arg)
         } else if (wf_poll_idx >= 0 && fds[wf_poll_idx].revents & POLLIN) {
             wf_handle_ws_read();
         }
+        // Kill stale waterfall WebSocket (no activity for 30s)
+        if (WF.ws_fd >= 0 && WF.last_frame_ms > 0) {
+            uint64_t idle_ms = mstime() - WF.last_frame_ms;
+            if (idle_ms > 30000) {
+                panelLog("Panel: waterfall WS stale (%llu ms idle), disconnecting",
+                         (unsigned long long)idle_ms);
+                wf_disconnect();
+            }
+        }
 
         // Process waterfall spectrum frames
         if (WF.ws_fd >= 0 && WF.rx_id >= 0) wf_process_and_send();
@@ -7087,8 +7158,9 @@ static void *panel_thread_entry(void *arg)
         setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
 
         // Wait for data readiness before reading (avoid blocking on idle connections)
+        // Reduced from 3s to 1s to improve throughput under concurrent connections
         struct pollfd cpfd = { .fd = client_fd, .events = POLLIN };
-        if (poll(&cpfd, 1, 3000) <= 0) {
+        if (poll(&cpfd, 1, 1000) <= 0) {
             close(client_fd);
             continue;
         }
@@ -7190,7 +7262,16 @@ static void *panel_thread_entry(void *arg)
             }
         }
 
-        if (client_fd >= 0) close(client_fd);
+        if (client_fd >= 0) {
+            // Graceful shutdown: send FIN to the client before close.
+            // Without this, close() on a socket with unread data sends RST,
+            // causing CLOSE-WAIT/LAST-ACK leak when clients disconnect early.
+            shutdown(client_fd, SHUT_WR);
+            // Drain any remaining data (prevents RST on close)
+            char drain[256];
+            while (read(client_fd, drain, sizeof(drain)) > 0) {}
+            close(client_fd);
+        }
     }
 
     return NULL;

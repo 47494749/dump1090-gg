@@ -373,23 +373,35 @@ score_rank scoreModesMessage(const uint8_t *uncorrected)
 
     uint32_t df = getbits(corrected, 1, 5); // Downlink Format
     switch (df) {
-    case 0:  // int16_t air-air surveillance
+    case 0:  // short air-air surveillance (TCAS)
     case 4:  // surveillance, altitude reply
-    case 5:  // surveillance, altitude reply
+    case 5:  // surveillance, identity reply
         {
             if (short_syndrome == UNCHECKED_SYNDROME)
                 short_syndrome = modesChecksum(corrected, MODES_SHORT_MSG_BITS);
             bool recent = icaoFilterTest(short_syndrome);
+            if (!recent && (df == 0)) {
+                // DF0: TCAS air-air surveillance. Military aircraft may only
+                // respond to TCAS interrogations.  Note the ICAO for promotion
+                // after repeated sightings.
+                if (icaoFilterTcasNote(short_syndrome))
+                    recent = true;  // just promoted
+            }
             return recent ? SR_UNRELIABLE_KNOWN : SR_UNRELIABLE_UNKNOWN;
         }
 
-    case 16: // int64_t air-air surveillance
+    case 16: // long air-air surveillance (TCAS)
     case 20: // Comm-B, altitude reply
     case 21: // Comm-B, identity reply
         {
             if (long_syndrome == UNCHECKED_SYNDROME)
                 long_syndrome = modesChecksum(corrected, MODES_LONG_MSG_BITS);
             bool recent = icaoFilterTest(long_syndrome);
+            if (!recent && (df == 16)) {
+                // DF16: TCAS long air-air surveillance with ACAS data.
+                if (icaoFilterTcasNote(long_syndrome))
+                    recent = true;
+            }
             return recent ? SR_UNRELIABLE_KNOWN : SR_UNRELIABLE_UNKNOWN;
         }
 

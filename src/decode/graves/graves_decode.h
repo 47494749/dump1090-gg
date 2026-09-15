@@ -24,10 +24,10 @@ extern "C" {
 // ======================== Constants ========================
 
 #define GRAVES_FREQ             143050000   // 143.050 MHz
-#define GRAVES_SAMPLE_RATE      1000000     // 1 MHz (covers ±500 kHz, min for sdrgg/RTL-SDR)
+#define GRAVES_SAMPLE_RATE      500000      // 500 kHz (covers ±250 kHz, sufficient for Doppler ±15kHz)
 #define GRAVES_MAX_TARGETS      64          // max simultaneous tracked targets
-#define GRAVES_FFT_SIZE         8192        // FFT size (~30 Hz/bin at 250 kHz)
-#define GRAVES_OVERLAP          4096        // 50% overlap
+#define GRAVES_FFT_SIZE         4096        // FFT size (~30.5 Hz/bin at 125 kHz analysis rate)
+#define GRAVES_OVERLAP          4096        // 0% overlap — ~30 FFTs/sec
 #define GRAVES_MAX_PEAKS        32          // max peaks per FFT frame
 
 // GRAVES transmitter location (Plateau d'Albion)

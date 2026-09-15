@@ -43,4 +43,11 @@ uint32_t icaoFilterTestFuzzy(uint32_t partial);
 // old entries.
 void icaoFilterExpire();
 
+// DF0/DF16 TCAS promotion: note an ICAO seen via air-air surveillance.
+// After TCAS_PROMOTE_THRESHOLD sightings within 60 seconds, the ICAO
+// is promoted into the main filter so the aircraft can be tracked.
+// Returns 1 if promoted this call, 0 otherwise.
+void icaoFilterTcasInit(void);
+int32_t icaoFilterTcasNote(uint32_t addr);
+
 #endif

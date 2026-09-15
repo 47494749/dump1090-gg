@@ -729,6 +729,7 @@ static void modesInit(void) {
     // Prepare error correction tables
     modesChecksumInit(Modes.nfix_crc);
     icaoFilterInit();
+    icaoFilterTcasInit();
     modeACInit();
 
     if (Modes.show_only)
@@ -2370,11 +2371,16 @@ int main(int argc, char **argv) {
 
             if (got_data) {
                 watchdogCounter = 3000;
+                // Yield briefly even when data is available to prevent 100% CPU
+                // on the main thread.  1 ms is short enough for low-latency ADS-B
+                // while keeping system-wide load manageable on RPi.
+                struct timespec slp_short = { 0, 1 * 1000 * 1000 }; // 1ms
+                nanosleep(&slp_short, NULL);
             } else {
                 struct timespec slp = { 0, 10 * 1000 * 1000 }; // 10ms
                 nanosleep(&slp, NULL);
                 if (--watchdogCounter <= 0) {
-                    log_with_timestamp("No samples received from any SDR for a int64_t time. Giving up.");
+                    log_with_timestamp("No samples received from any SDR for a long time. Giving up.");
                     Modes.exit = 2;
                 }
             }

@@ -127,3 +127,77 @@ void icaoFilterExpire()
         next_flip = now + MODES_ICAO_FILTER_TTL;
     }
 }
+
+// ---- DF0/DF16 (air-air surveillance) ICAO promotion ----
+// Military aircraft that only respond to TCAS/SSR interrogations never
+// appear in DF11/17/18, so their ICAO never enters the filter.
+// We count DF0/DF16 sightings per ICAO and promote to the filter after
+// TCAS_PROMOTE_THRESHOLD hits within TCAS_PROMOTE_WINDOW_MS.
+// This lets TCAS-only aircraft be tracked without lowering the overall
+// noise threshold.
+
+#define TCAS_PROMOTE_TABLE_SIZE 256
+#define TCAS_PROMOTE_THRESHOLD  4
+#define TCAS_PROMOTE_WINDOW_MS  60000
+
+struct tcas_candidate {
+    uint32_t addr;
+    uint32_t count;
+    uint64_t first_seen;
+    uint64_t last_seen;
+};
+
+static struct tcas_candidate tcas_candidates[TCAS_PROMOTE_TABLE_SIZE];
+
+void icaoFilterTcasInit(void)
+{
+    memset(tcas_candidates, 0, sizeof(tcas_candidates));
+}
+
+int32_t icaoFilterTcasNote(uint32_t addr)
+{
+    if (addr == 0 || addr == 0xFFFFFF) return 0;
+
+    // If already in the main ICAO filter, nothing to do
+    if (icaoFilterTest(addr)) return 0;
+
+    uint64_t now = mstime();
+    uint32_t h = icaoHash(addr) & (TCAS_PROMOTE_TABLE_SIZE - 1);
+
+    // Linear probe for this address
+    for (int32_t i = 0; i < 8; i++) {
+        uint32_t idx = (h + i) & (TCAS_PROMOTE_TABLE_SIZE - 1);
+        struct tcas_candidate *c = &tcas_candidates[idx];
+
+        if (c->addr == addr) {
+            // Existing entry — check window
+            if (now - c->first_seen > TCAS_PROMOTE_WINDOW_MS) {
+                // Window expired, restart
+                c->count = 1;
+                c->first_seen = now;
+                c->last_seen = now;
+                return 0;
+            }
+            c->count++;
+            c->last_seen = now;
+            if (c->count >= TCAS_PROMOTE_THRESHOLD) {
+                // Promote: add to main ICAO filter
+                icaoFilterAdd(addr);
+                c->addr = 0; // free slot
+                return 1; // promoted
+            }
+            return 0;
+        }
+
+        if (c->addr == 0 || (now - c->last_seen > TCAS_PROMOTE_WINDOW_MS * 2)) {
+            // Empty or expired slot — use it
+            c->addr = addr;
+            c->count = 1;
+            c->first_seen = now;
+            c->last_seen = now;
+            return 0;
+        }
+    }
+
+    return 0; // table full in this neighborhood, ignore
+}

@@ -112,6 +112,7 @@ struct aircraft {
     int32_t           reliable;       // Do we think this is a real aircraft, not noise?
     int64_t       reliableDF11;   // Number of "reliable" DF11s (no CRC errors corrected, IID = 0) received
     int64_t       reliableDF17;   // Number of "reliable" DF17s (no CRC errors corrected) received
+    int64_t       messages_df0_df16; // DF0/DF16 (air-air TCAS surveillance) messages
     int64_t       discarded;      // Number of messages discarded as possibly-noise
 
     double        signalLevel[8]; // Last 8 Signal Amplitudes

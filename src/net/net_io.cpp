@@ -1999,6 +1999,15 @@ char *generateAircraftJson(const char *url_path, int32_t *len) {
                           a->opstatus_cc_uat_in, a->opstatus_cc_poa, a->opstatus_cc_b2_low, a->opstatus_cc_lw, a->opstatus_cc_antenna_offset);
         }
 
+        // TCAS/air-air surveillance message count and TCAS-only flag
+        if (a->messages_df0_df16 > 0) {
+            s += sfmt(",\"tcas_msgs\":%" PRId64, a->messages_df0_df16);
+            // TCAS-only: aircraft seen exclusively via DF0/DF16 (no ADS-B, no Mode S All-Call)
+            // These are likely military with transponder but no ADS-B out
+            if (a->reliableDF17 == 0 && a->reliableDF11 == 0 && a->messages_df0_df16 >= 4)
+                s += ",\"tcas_only\":true";
+        }
+
         if (a->modeA_hit)
             s += ",\"modea\":true";
         if (a->modeC_hit)

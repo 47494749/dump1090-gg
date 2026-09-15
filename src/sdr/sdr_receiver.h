@@ -404,6 +404,7 @@ typedef struct {
     uint32_t iot868_decoded;
     uint32_t fanet_decoded;
     uint32_t sarsat_frames;
+    uint32_t graves_targets;
 } rx_stats_snapshot_t;
 
 // Fill a stats snapshot from all running decoder receivers

@@ -105,9 +105,11 @@ typedef struct {
 // Max plausible doppler rate for an aircraft (Hz/s)
 #define GRAVES_MAX_DOPPLER_RATE 60.0f
 
-// Decimation: SDR rate (1 MHz) → analysis rate (250 kHz)
-#define GRAVES_DECIM_FACTOR     4
-#define GRAVES_ANALYSIS_RATE    (GRAVES_SAMPLE_RATE / GRAVES_DECIM_FACTOR)  // 250 kHz
+// Decimation: SDR rate (500 kHz) → analysis rate (62.5 kHz)
+// Bin resolution: 62.5 kHz / 4096 = 15.3 Hz — good for aircraft Doppler (200-15000 Hz)
+// Halved from original to reduce ARM CPU load; ~15 FFTs/sec is adequate for tracking
+#define GRAVES_DECIM_FACTOR     8
+#define GRAVES_ANALYSIS_RATE    (GRAVES_SAMPLE_RATE / GRAVES_DECIM_FACTOR)  // 62.5 kHz
 
 // ======================== State ========================
 
@@ -130,6 +132,9 @@ struct graves_state {
 
     // DC removal (applied before decimation)
     float dc_i, dc_q;
+
+    // Frame skip: process every Nth FFT frame to cap CPU on ARM
+    int32_t fft_skip_counter;
 
     // Noise floor estimation
     float noise_floor_db;

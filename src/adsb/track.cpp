@@ -1121,6 +1121,10 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
         ++a->reliableDF17;
     }
 
+    if (mm->msgtype == 0 || mm->msgtype == 16) {
+        ++a->messages_df0_df16;
+    }
+
     if (mm->msgtype == 19) {
         a->seen_df19 = 1;
     }

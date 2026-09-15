@@ -445,6 +445,8 @@ function renderAC(){
         const isGhost=!a.flight&&a.lat==null&&a.lon==null;
         if(isGhost)flags+=`<span class="badge" style="background:rgba(150,150,150,0.3);color:#888" title="ICAO only — no ADS-B data">👻</span> `;
         if(isMilitary(a))flags+=`<span class="badge" style="background:rgba(255,160,0,0.25);color:#ffa000" title="Probable military aircraft">🎖️</span> `;
+        if(a.tcas_only)flags+=`<span class="badge" style="background:rgba(200,50,50,0.25);color:#e53935" title="TCAS-only: no ADS-B, detected via air-air surveillance (DF0/DF16). Likely military.">📡 TCAS</span> `;
+        // ACAS RA badge: only in side panel (DF16 MV field is too noisy for table badge)
         if(a.gps_integrity==='suspect')flags+=`<span class="badge err">GPS!</span> `;
         else if(a.gps_integrity==='degraded')flags+=`<span class="badge warn">GPS↓</span> `;
         if(a.circling)flags+=`<span class="badge info">🔄</span> `;
@@ -602,6 +604,34 @@ function renderIcaoInfo(hex,info){
         html+=`<div class="photo"><img src="${urlThumb||url}" alt="${reg}" onerror="this.parentElement.style.display='none'"></div>`;
     }
     if(src)html+=`<div style="text-align:right;color:var(--dim);font-size:10px;margin-top:6px">source: ${src}</div>`;
+
+    // Live TCAS/ACAS data from current aircraft data
+    const liveAc=acData.find(a=>(a.hex||'').toLowerCase()===hex.toLowerCase());
+    if(liveAc){
+        let liveHtml='<div style="margin-top:12px;border-top:1px solid var(--dim);padding-top:8px">';
+        liveHtml+='<div style="font-weight:600;color:var(--accent);margin-bottom:6px">📡 Live Data</div>';
+        if(liveAc.tcas_msgs)liveHtml+=`<div class="info-row"><span class="lbl">TCAS msgs (DF0/16)</span><span class="val">${liveAc.tcas_msgs}</span></div>`;
+        if(liveAc.tcas_only)liveHtml+='<div style="background:rgba(200,50,50,0.15);border:1px solid rgba(200,50,50,0.3);border-radius:6px;padding:6px;text-align:center;margin:6px 0;color:#e53935;font-weight:600">📡 TCAS-only — No ADS-B (probable military)</div>';
+        if(liveAc.acas_ra){
+            const ra=liveAc.acas_ra;
+            const isActive=!ra.rat&&ra.ara;
+            const bgColor=isActive?'rgba(255,60,0,0.15)':'rgba(100,100,100,0.1)';
+            const borderColor=isActive?'rgba(255,60,0,0.3)':'rgba(100,100,100,0.2)';
+            const titleColor=isActive?'#ff3d00':'var(--dim)';
+            const label=isActive?'⚠️ ACAS RA ACTIVE':'ℹ️ ACAS (last RA terminated)';
+            let raHtml=`<div style="background:${bgColor};border:1px solid ${borderColor};border-radius:6px;padding:8px;margin:6px 0">`;
+            raHtml+=`<div style="font-weight:600;color:${titleColor}">${label}</div>`;
+            raHtml+=`<div class="info-row"><span class="lbl">ARA code</span><span class="val">${ra.ara}</span></div>`;
+            raHtml+=`<div class="info-row"><span class="lbl">Multiple threats</span><span class="val">${ra.mte?'Yes':'No'}</span></div>`;
+            if(ra.threat&&ra.threat!=='000000')raHtml+=`<div class="info-row"><span class="lbl">Threat ICAO</span><span class="val" style="font-family:monospace;color:var(--accent)">${ra.threat}</span></div>`;
+            raHtml+='</div>';
+            liveHtml+=raHtml;
+        }
+        if(liveAc.df19)liveHtml+='<div class="info-row"><span class="lbl">DF19</span><span class="val">Military Extended Squitter</span></div>';
+        liveHtml+='</div>';
+        html+=liveHtml;
+    }
+
     body.innerHTML=html;
 }
 

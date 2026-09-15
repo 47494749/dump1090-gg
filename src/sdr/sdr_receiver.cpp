@@ -2720,6 +2720,40 @@ static bool iot868_decoder_drain(sdr_receiver_t *rx) {
     while (iotDecoderDequeue(state, &msg)) {
         had_data = true;
         iotTrackerUpdate(&msg);
+
+        // Log to Messages page so IoT detections are visible without
+        // staying on the IoT page
+        {
+            char extra[128] = {0};
+            int32_t pos = 0;
+            if (!isnan(msg.temperature_c))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " %.1f°C", (double)msg.temperature_c);
+            if (!isnan(msg.humidity_pct))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " %.0f%%RH", (double)msg.humidity_pct);
+            if (!isnan(msg.pressure_hpa))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " %.1fhPa", (double)msg.pressure_hpa);
+            if (!isnan(msg.wind_speed_ms))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " wind=%.1fm/s", (double)msg.wind_speed_ms);
+            if (!isnan(msg.rain_mm))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " rain=%.1fmm", (double)msg.rain_mm);
+            if (!isnan(msg.power_w))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " %.1fW", (double)msg.power_w);
+            if (!isnan(msg.energy_kwh))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " %.2fkWh", (double)msg.energy_kwh);
+            if (!isnan(msg.battery_v))
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " bat=%.2fV", (double)msg.battery_v);
+            else if (msg.battery_ok == 0)
+                pos += snprintf(extra + pos, sizeof(extra) - pos, " bat=LOW");
+
+            char rssi_str[32] = "";
+            if (!isnan(msg.rssi_db))
+                snprintf(rssi_str, sizeof(rssi_str), " RSSI=%.0fdB", (double)msg.rssi_db);
+            panelLogMessage("[IoT rx%d] %s id=%u ch=%u %s%s%s",
+                    rx->id, iotProtocolName(msg.protocol),
+                    msg.device_id, msg.channel,
+                    iotModulationName(msg.modulation),
+                    rssi_str, extra);
+        }
     }
     return had_data;
 }
@@ -4212,6 +4246,15 @@ void rxGetStatsSnapshot(rx_stats_snapshot_t *out)
             iot_decoder_state_t *c = (iot_decoder_state_t *)rx->decoder_state;
             if (c) {
                 out->iot868_decoded = (uint32_t)iotDecoderGetPacketsDecoded(c);
+            }
+            break;
+        }
+        case SDR_ROLE_GRAVES: {
+            graves_ctx_t *c = (graves_ctx_t *)rx->decoder_state;
+            if (c && c->inner) {
+                graves_stats_t gs;
+                graves_get_stats(c->inner, &gs);
+                out->graves_targets = (uint32_t)gs.active_targets;
             }
             break;
         }
