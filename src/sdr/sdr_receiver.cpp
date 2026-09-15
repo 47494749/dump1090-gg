@@ -1008,6 +1008,13 @@ int32_t rxSetGain(sdr_receiver_t *rx, int32_t step)
             gg::eprint("rx[%d]: failed to disable tuner AGC\n", rx->id);
             return rx->rtl.current_gain;
         }
+        // FC0012 hardware bug: the analog gain latch only changes when
+        // transitioning from minimum gain. Set to min first, then desired.
+        // (confirmed fix: librtlsdr PR#74, rtl_433 PR#2417)
+        if (rx->backend_dev->tuner_type == SDR_TUNER_FC0012 ||
+            rx->backend_dev->tuner_type == SDR_TUNER_FC0013) {
+            rx->backend_ops->set_gain(rx->backend_dev, rx->rtl.gains[0]);
+        }
         gain_rc = rx->backend_ops->set_gain(rx->backend_dev, rx->rtl.gains[step]);
         if (gain_rc < 0) {
             fprintf(stderr, "rx[%d]: failed to set tuner gain to %.1fdB\n",

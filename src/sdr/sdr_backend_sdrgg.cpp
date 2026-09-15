@@ -150,6 +150,10 @@ static sdr_device_t *gg_open_by_index(int32_t index)
     // demod page0:0x08 = 0xCD enables both ADC channels.
     if (tt == SDRGG_TUNER_FC0012 || tt == SDRGG_TUNER_FC0013) {
         demod::write(dev, 0, 0x08, 0xCD);
+        // FC0012 gain latch bug (librtlsdr PR#74, rtl_433 PR#2417):
+        // Register 0x13 must be 0x00 (Low Gain) at init, not 0x08 (Middle).
+        // The analog gain circuitry only latches changes from low gain state.
+        tuner::write_reg(dev, 0x13, 0x00);
     }
 
     switch (tt) {
