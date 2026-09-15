@@ -311,62 +311,71 @@ static bool decode_bresser_5in1(const pulse_t *pulses, int32_t count, iot_device
 
 // ======================== FSK Protocol decoders ========================
 
-// LaCrosse TX29/TX35 FSK: 17241 baud, sync 0x2DD4, 5 data bytes
-// Preamble: 0xAAAA..., Sync: 0x2DD4
-// Data: [type+id_hi] [id_lo] [value_hi] [value_lo] [checksum]
-// Checksum: sum of nibbles mod 16 == 0
-// Based on rtl_433 LaCrosse-TX29IT decoder
+// LaCrosse TX29/TX35 FSK (868 MHz "IT+" instant transmission protocol)
+// Based on rtl_433 lacrosse_tx35.c by Sébastien Blanc.
+//
+// Modulation: FSK PCM, ~17.2 kbps (55 µs per bit for TX29, 105 µs for TX35)
+// Preamble: 1010... (4+ bits), Sync: 0x2DD4, Model nibble: 0x9
+// After model: 5 bytes of data + CRC-8 (poly 0x31, init 0x00)
+//
+// Data layout (5 bytes, extracted after the model nibble 0x9):
+//   b[0]: [id5:2]       — upper 4 bits of 6-bit sensor ID
+//   b[1]: [id1:0][new_batt][0][temp_digit1] — lower 2 bits of ID, battery, BCD temp
+//   b[2]: [temp_digit2][temp_digit3]        — BCD temperature (tens, units, tenths)
+//   b[3]: [batt_low][humidity6:0]           — battery low, humidity %
+//   b[4]: CRC-8 (poly 0x31, init 0x00) of b[0..3]
+//
+// Temperature: digit1*10 + digit2 + digit3*0.1 - 40.0 (BCD, in Celsius)
+// Humidity: 0x6A = no sensor, 0x7D = probe channel, otherwise %RH
 static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
 {
-    if (bit_count < 80) return false;
+    if (bit_count < 68) return false;  // need preamble(4) + sync(16) + model(4) + data(40) + crc(8) = 72 min
 
-    // Search for sync word 0x2DD4 (16 bits: 0010 1101 1101 0100)
+    // Search for combined preamble+sync+model: 0xA2DD49 (24 bits)
+    //   1010 0010 1101 1101 0100 1001
+    //   ^^^^ preamble     ^^^^^^^^^ sync 0x2DD4     ^^^^ model 0x9
     int32_t start = -1;
-    for (int32_t i = 0; i <= bit_count - 80; i++) {
-        uint16_t word = 0;
-        for (int32_t b = 0; b < 16; b++)
+    for (int32_t i = 0; i <= bit_count - 64; i++) {
+        uint32_t word = 0;
+        for (int32_t b = 0; b < 24; b++)
             word = (word << 1) | (bits[i + b] & 1);
-        if (word == 0x2DD4) {
-            start = i + 16;
+        if (word == 0xA2DD49) {
+            start = i + 20;  // skip preamble(4) + sync(16) = 20, keep model+data
             break;
         }
     }
-    if (start < 0 || start + 40 > bit_count) return false;
+    if (start < 0 || start + 44 > bit_count) return false;  // need 4+40 bits
 
-    // Decode 5 bytes after sync
-    uint8_t bytes[5] = {0};
-    for (int32_t i = 0; i < 40 && (start + i) < bit_count; i++) {
-        bytes[i / 8] |= (bits[start + i] & 1) << (7 - (i % 8));
+    // Extract 5 bytes starting AFTER the model nibble (skip 4 bits)
+    uint8_t b[5] = {0};
+    for (int32_t i = 0; i < 40; i++) {
+        int32_t bit_pos = start + 4 + i;  // +4 to skip model nibble 0x9
+        if (bit_pos >= bit_count) return false;
+        b[i / 8] |= (bits[bit_pos] & 1) << (7 - (i % 8));
     }
 
-    // Nibble checksum: sum of all 10 nibbles must be 0 mod 16
-    uint8_t sum = 0;
-    for (int32_t i = 0; i < 5; i++)
-        sum += (bytes[i] >> 4) + (bytes[i] & 0x0F);
-    if ((sum & 0x0F) != 0) return false;
+    // CRC-8 check (poly 0x31, init 0x00) over first 4 bytes
+    uint8_t crc = crc8(b, 4, 0x31, 0x00);
+    if (crc != b[4]) return false;
 
-    // Parse fields
-    uint8_t type_nibble = bytes[0] >> 4;
-    uint8_t sensor_id = ((bytes[0] & 0x0F) << 4) | (bytes[1] >> 4);
-    uint8_t new_battery = (bytes[1] >> 2) & 1;
-    int32_t raw_value = ((bytes[2] & 0x0F) << 8) | bytes[3];
+    // Parse fields (rtl_433 lacrosse_tx35.c exact field extraction)
+    int32_t sensor_id   = ((b[0] & 0x0F) << 2) | (b[1] >> 6);
+    (void)((b[1] >> 5) & 1);  // new_batt — not used in output
+    float   temp_c      = 10.0f * (b[1] & 0x0F) + 1.0f * ((b[2] >> 4) & 0x0F) + 0.1f * (b[2] & 0x0F) - 40.0f;
+    int32_t battery_low = b[3] >> 7;
+    int32_t humidity    = b[3] & 0x7F;
 
     msg->protocol = IOT_PROTO_LACROSSE_TX;
     msg->modulation = IOT_MOD_FSK;
     msg->device_id = sensor_id;
     msg->channel = 0;
-    msg->battery_ok = new_battery ? 0 : 1;
+    msg->battery_ok = battery_low ? 0 : 1;
+    msg->temperature_c = temp_c;
 
-    if (type_nibble == 0x00) {
-        // Temperature: raw/10 - 40
-        msg->temperature_c = raw_value / 10.0f - 40.0f;
-        msg->humidity_pct = NAN;
-    } else if (type_nibble == 0x0E) {
-        // Humidity
-        msg->humidity_pct = raw_value / 10.0f;
-        msg->temperature_c = NAN;
+    if (humidity == 0x6A || humidity == 0x7D) {
+        msg->humidity_pct = NAN;  // no humidity sensor or probe channel
     } else {
-        return false;  // unknown type
+        msg->humidity_pct = (float)humidity;
     }
 
     msg->pressure_hpa = NAN;
@@ -378,7 +387,7 @@ static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_devi
     msg->battery_v = NAN;
     msg->freq_hz = 868.3e6;
 
-    memcpy(msg->payload, bytes, 5);
+    memcpy(msg->payload, b, 5);
     msg->payload_len = 5;
     msg->timestamp_ms = now_ms();
     return true;
