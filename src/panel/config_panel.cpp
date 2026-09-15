@@ -1445,7 +1445,7 @@ static bool ws_handshake(int32_t fd, const char *request) {
     return true;
 }
 
-// Send a WebSocket binary frame (non-blocking: drops frame if buffer full)
+// Send a WebSocket binary frame
 static bool ws_send_binary(int32_t fd, const uint8_t *data, int32_t len) {
     uint8_t hdr[10];
     int32_t hlen = 0;
@@ -1461,15 +1461,12 @@ static bool ws_send_binary(int32_t fd, const uint8_t *data, int32_t len) {
     } else {
         return false; // frames >64K not needed
     }
-    // MSG_DONTWAIT prevents blocking when the client stops consuming
-    // (e.g., browser tab in background). If the send buffer is full,
-    // we drop the frame rather than blocking the entire panel thread.
-    if (send(fd, hdr, hlen, MSG_NOSIGNAL | MSG_DONTWAIT) != hlen) return false;
-    if (send(fd, data, len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) return false;
+    if (send(fd, hdr, hlen, MSG_NOSIGNAL) != hlen) return false;
+    if (send(fd, data, len, MSG_NOSIGNAL) != len) return false;
     return true;
 }
 
-// Send a WebSocket text frame (non-blocking)
+// Send a WebSocket text frame
 static bool ws_send_text(int32_t fd, const char *text, int32_t len) {
     uint8_t hdr[10];
     int32_t hlen = 0;
@@ -1485,8 +1482,8 @@ static bool ws_send_text(int32_t fd, const char *text, int32_t len) {
     } else {
         return false;
     }
-    if (send(fd, hdr, hlen, MSG_NOSIGNAL | MSG_DONTWAIT) != hlen) return false;
-    if (send(fd, text, len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) return false;
+    if (send(fd, hdr, hlen, MSG_NOSIGNAL) != hlen) return false;
+    if (send(fd, text, len, MSG_NOSIGNAL) != len) return false;
     return true;
 }
 
@@ -7199,6 +7196,12 @@ static void *panel_thread_entry(void *arg)
                             // Already have a waterfall client, reject
                             http_send(client_fd, 409, "text/plain", "Busy", 4);
                         } else if (ws_handshake(client_fd, reqbuf.c_str())) {
+                            // Set 2-second send timeout to prevent blocking
+                            // when the browser tab goes to background and
+                            // stops consuming frames. Without this, send()
+                            // blocks indefinitely and freezes the panel thread.
+                            struct timeval tv = {2, 0};
+                            setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
                             WF.ws_fd = client_fd;
                             WF.last_frame_ms = 0;
                             client_fd = -1; // prevent close below
