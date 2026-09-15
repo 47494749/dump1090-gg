@@ -813,6 +813,10 @@ struct rx_health_state {
     uint32_t no_msg_seconds;        // consecutive seconds with 0 new messages
     bool     dump_done;             // already dumped for this "episode"
     bool     baseline_done;         // init dump completed
+    // FC0012 deaf detection
+    float    last_iq_power;         // last measured IQ power
+    int32_t  iq_stuck_count;        // consecutive checks with identical IQ power
+    bool     deaf_reported;         // already logged deaf warning
 };
 static struct rx_health_state rx_health[MAX_SDR_RECEIVERS];
 
@@ -900,6 +904,36 @@ void rxDiagHealthCheck(void)
 
         // For FLARM: use sample_counter growth without decoded frames
         // (FLARM is sparse, so use longer timeout — handled by FLARM decoder stats)
+
+        // ---- IQ signal presence check (all receivers) ----
+        // Detect deaf tuner: IQ power that never changes indicates the
+        // tuner is disconnected from the ADC (FC0012 known issue).
+        // Uses the auto-gain IQ power accumulator already updated by the callback.
+        {
+            uint64_t iq_sum = __atomic_load_n(&rx->ag_iq_sum, __ATOMIC_RELAXED);
+            uint32_t iq_cnt = __atomic_load_n(&rx->ag_iq_count, __ATOMIC_RELAXED);
+            if (iq_cnt > 0) {
+                float iq_power = (float)((double)iq_sum / iq_cnt);
+                float delta = fabsf(iq_power - h->last_iq_power);
+                if (h->last_iq_power > 0 && delta < 0.1f) {
+                    h->iq_stuck_count++;
+                    // After 60 consecutive identical readings (~60s), report deaf
+                    if (h->iq_stuck_count >= 60 && !h->deaf_reported) {
+                        h->deaf_reported = true;
+                        gg::eprint("rx[%d]: *** IQ SIGNAL STUCK *** power=%.1f for %ds — tuner may be deaf\n",
+                                   rx->id, iq_power, h->iq_stuck_count);
+                    }
+                } else {
+                    if (h->deaf_reported && h->iq_stuck_count >= 60) {
+                        gg::eprint("rx[%d]: IQ signal recovered (power changed from %.1f to %.1f)\n",
+                                   rx->id, h->last_iq_power, iq_power);
+                    }
+                    h->iq_stuck_count = 0;
+                    h->deaf_reported = false;
+                }
+                h->last_iq_power = iq_power;
+            }
+        }
     }
 
     // ---- USB hotplug recovery: resurrect receivers in ERROR state ----
