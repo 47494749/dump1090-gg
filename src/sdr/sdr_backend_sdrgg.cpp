@@ -146,13 +146,74 @@ static sdr_device_t *gg_open_by_index(int32_t index)
     // Get tuner type
     sdrgg_tuner_type_t tt = sdr::get_tuner_type(dev);
 
-    // FC0012 Zero-IF fix: enable both I+Q ADC channels immediately after open.
-    // demod page0:0x08 = 0xCD enables both ADC channels.
+    /* ================================================================
+     * FC0012 CRITICAL INIT SEQUENCE — DO NOT REMOVE OR REORDER
+     * ================================================================
+     *
+     * The Fitipower FC0012 tuner has THREE known hardware issues that
+     * must all be addressed at open time, or the dongle appears to work
+     * (streaming OK, API calls return success) but is actually deaf:
+     *
+     * ISSUE 1 — GPIO7 RESET (dongle-specific, discovered by brute-force)
+     *
+     *   On this dongle (serial 00000103, RTL2838UHIDIR), the FC0012
+     *   reset pin is connected to RTL2832U GPIO7 — NOT GPIO4 as in
+     *   the standard documentation and librtlsdr code.
+     *
+     *   When the dongle enters a stuck state (I2C bus dead: all tuner
+     *   register reads return 0xFF, chip ID reads as 0x00 instead of
+     *   0xA1), pulsing GPIO7 low-then-high resets the FC0012 and
+     *   restores I2C communication.
+     *
+     *   Without this pulse: no USB reset, no software reset, no register
+     *   write, and no amount of close/reopen will recover the tuner.
+     *   Only a physical USB disconnect/reconnect (power cycle) works.
+     *
+     *   The GPIO7 pulse is harmless on dongles where GPIO7 is not
+     *   connected to anything — it just toggles an unused pin.
+     *
+     * ISSUE 2 — DUAL ADC CHANNEL ENABLE (demod page0:0x08 = 0xCD)
+     *
+     *   FC0012 is a Zero-IF tuner that needs both I and Q ADC channels
+     *   active. The RTL2832U register page0:0x08 must be 0xCD to enable
+     *   both channels. Without this write, only one ADC channel is active
+     *   and gain/frequency changes have no effect on IQ data.
+     *
+     *   This register is normally written by rtlsdr_set_direct_sampling(0)
+     *   but the sdrgg backend previously had that as a no-op.
+     *
+     * ISSUE 3 — GAIN LATCH BUG (tuner reg 0x13, librtlsdr PR#74)
+     *
+     *   The FC0012 silicon has a bug where the analog gain circuitry
+     *   only latches a new value when transitioning from the minimum
+     *   (Low Gain) state. Initializing reg 0x13 to 0x08 (Middle Gain)
+     *   causes all subsequent gain writes to be silently ignored.
+     *
+     *   Fix: init reg 0x13 = 0x00 (Low Gain), and before every gain
+     *   change, always set gain to minimum first, then desired value.
+     *   (The min-first workaround is in rxSetGain in sdr_receiver.cpp)
+     *
+     *   Confirmed by: librtlsdr PR#74 (March 2024), rtl_433 PR#2417
+     *   (March 2023), RTLSDR-Airband issue #145.
+     *
+     * ================================================================ */
     if (tt == SDRGG_TUNER_FC0012 || tt == SDRGG_TUNER_FC0013) {
+        // ISSUE 1: GPIO7 reset pulse to unblock stuck I2C bus
+        uint8_t gpo = 0, gpd = 0, gpoe = 0;
+        demod::read(dev, 2, 0x0001, &gpo);
+        demod::read(dev, 2, 0x0002, &gpd);
+        demod::read(dev, 2, 0x0003, &gpoe);
+        demod::write(dev, 2, 0x0003, gpoe | 0x80);  // GPIO7 output enable
+        demod::write(dev, 2, 0x0002, gpd  | 0x80);  // GPIO7 direction = out
+        demod::write(dev, 2, 0x0001, gpo  & ~0x80); // GPIO7 LOW (reset)
+        { struct timespec ts = {0, 100000000}; nanosleep(&ts, nullptr); }
+        demod::write(dev, 2, 0x0001, gpo  | 0x80);  // GPIO7 HIGH (release)
+        { struct timespec ts = {0, 200000000}; nanosleep(&ts, nullptr); }
+
+        // ISSUE 2: Enable both I+Q ADC channels
         demod::write(dev, 0, 0x08, 0xCD);
-        // FC0012 gain latch bug (librtlsdr PR#74, rtl_433 PR#2417):
-        // Register 0x13 must be 0x00 (Low Gain) at init, not 0x08 (Middle).
-        // The analog gain circuitry only latches changes from low gain state.
+
+        // ISSUE 3: Init gain register to Low Gain (unlocks the latch)
         tuner::write_reg(dev, 0x13, 0x00);
     }
 
