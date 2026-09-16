@@ -690,9 +690,10 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
     // Pass 2: FSK demodulation at multiple bit rates
     // wMBus Mode C = 100 kbps (20 samp/bit), Mode T = 32.768 kbps (61 samp/bit)
     // Honeywell CM9xx = 38.4 kbps (52 samp/bit)
-    // LaCrosse TX29/TX35 = 17.241 kbps (116 samp/bit)
-    static const int32_t bit_periods[] = { 20, 52, 61, 116 };
-    static const int32_t num_rates = 4;
+    // LaCrosse TX29 = 18.2 kbps / 55µs per bit (110 samp/bit at 2 MSPS)
+    // LaCrosse TX35 = 9.5 kbps / 105µs per bit (210 samp/bit at 2 MSPS)
+    static const int32_t bit_periods[] = { 20, 52, 61, 110, 210 };
+    static const int32_t num_rates = 5;
 
     for (int32_t rate_idx = 0; rate_idx < num_rates; rate_idx++) {
         int32_t samples_per_bit = bit_periods[rate_idx];
