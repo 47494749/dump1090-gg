@@ -393,6 +393,157 @@ static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_devi
     return true;
 }
 
+// Fine Offset WH1080/WH3080 FSK variant (868.3 MHz)
+// Protocol from rtl_433 fineoffset.c
+// FSK PCM, 58µs/bit (~17.2 kbps), sync 0xAA2DD4
+// Data: 11 bytes (weather) or 8 bytes (UV/light)
+// CRC-8 poly 0x31, init 0xFF
+static bool decode_fineoffset_fsk(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
+{
+    if (bit_count < 100) return false;
+
+    // Search for preamble 0xAA + sync 0x2DD4 (24 bits)
+    int32_t start = -1;
+    for (int32_t i = 0; i <= bit_count - 100; i++) {
+        uint32_t word = 0;
+        for (int32_t b = 0; b < 24; b++)
+            word = (word << 1) | (bits[i + b] & 1);
+        if (word == 0xAA2DD4) {
+            start = i + 24;
+            break;
+        }
+    }
+    if (start < 0) return false;
+
+    // Try 88-bit weather packet (11 bytes)
+    if (start + 88 <= bit_count) {
+        uint8_t b[11] = {};
+        for (int32_t i = 0; i < 88; i++)
+            b[i/8] |= (bits[start + i] & 1) << (7 - (i % 8));
+
+        // CRC-8 check
+        uint8_t crc = 0xFF;
+        for (int32_t i = 0; i < 11; i++) {
+            crc ^= b[i];
+            for (int32_t j = 0; j < 8; j++)
+                crc = (crc & 0x80) ? (crc << 1) ^ 0x31 : crc << 1;
+        }
+        if (crc == 0) {
+            uint8_t type_nibble = b[0] >> 4;
+            if (type_nibble == 0x0A) {  // Weather data
+                msg->protocol = IOT_PROTO_FINE_OFFSET_WH;
+                msg->modulation = IOT_MOD_FSK;
+                msg->device_id = ((b[1] & 0x0F) << 4) | (b[2] >> 4);
+                // FSK temperature: sign-magnitude, bit 11 = sign
+                int32_t temp_raw = ((b[2] & 0x0F) << 8) | b[3];
+                if (temp_raw & 0x800) temp_raw = -(temp_raw & 0x7FF);
+                msg->temperature_c = temp_raw * 0.1f;
+                msg->humidity_pct = (float)b[4];
+                msg->wind_speed_ms = b[5] * 0.34f;
+                msg->wind_dir_deg = (float)(uint16_t[]){0,23,45,68,90,113,135,158,180,203,225,248,270,293,315,338}[b[9] & 0x0F];
+                msg->rain_mm = (((b[7] & 0x0F) << 8) | b[8]) * 0.3f;
+                msg->battery_ok = ((b[9] >> 4) == 1) ? 0 : 1;
+                msg->channel = 0;
+                msg->pressure_hpa = NAN;
+                msg->power_w = NAN;
+                msg->energy_kwh = NAN;
+                msg->battery_v = NAN;
+                msg->rssi_db = NAN;
+                msg->freq_offset_hz = NAN;
+                msg->freq_hz = 868.3e6;
+                memcpy(msg->payload, b, 11);
+                msg->payload_len = 11;
+                msg->timestamp_ms = now_ms();
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Bresser 6-in-1 Weather Center FSK (868 MHz)
+// Protocol from rtl_433 bresser_6in1.c
+// FSK PCM, 124µs/bit (~8065 bps), sync 0xAA2DD4
+// Data: 18 bytes, LFSR-16 digest + additive checksum
+static bool decode_bresser_6in1(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
+{
+    if (bit_count < 168) return false;  // need 24 sync + 144 data
+
+    // Search for sync 0xAA2DD4
+    int32_t start = -1;
+    for (int32_t i = 0; i <= bit_count - 168; i++) {
+        uint32_t word = 0;
+        for (int32_t b = 0; b < 24; b++)
+            word = (word << 1) | (bits[i + b] & 1);
+        if (word == 0xAA2DD4) {
+            start = i + 24;
+            break;
+        }
+    }
+    if (start < 0 || start + 144 > bit_count) return false;
+
+    uint8_t m[18] = {};
+    for (int32_t i = 0; i < 144; i++)
+        m[i/8] |= (bits[start + i] & 1) << (7 - (i % 8));
+
+    // Additive checksum: sum of bytes 2..17 must be 0xFF
+    uint8_t sum = 0;
+    for (int32_t i = 2; i < 18; i++) sum += m[i];
+    if (sum != 0xFF) return false;
+
+    // Parse sensor type
+    uint8_t stype = m[6] >> 4;
+    if (stype != 1 && stype != 2) return false;  // 1=weather, 2=thermo/hygro
+
+    msg->protocol = IOT_PROTO_BRESSER_6IN1;
+    msg->modulation = IOT_MOD_FSK;
+    msg->device_id = ((uint32_t)m[2] << 24) | ((uint32_t)m[3] << 16) | ((uint32_t)m[4] << 8) | m[5];
+    msg->channel = m[6] & 0x07;
+
+    // Temperature: BCD in bytes 12-13, sign bit at m[13] bit 3
+    int32_t temp_bcd = (m[12] >> 4) * 100 + (m[12] & 0x0F) * 10 + (m[13] >> 4);
+    float temp_c = temp_bcd * 0.1f;
+    if (m[13] & 0x08) temp_c = -temp_c;
+    msg->temperature_c = temp_c;
+
+    // Humidity: BCD in byte 14
+    msg->humidity_pct = (float)((m[14] >> 4) * 10 + (m[14] & 0x0F));
+
+    // Wind speed: inverted BCD in bytes 7-9
+    if (stype == 1) {
+        uint8_t w8 = m[8] ^ 0xFF, w9 = m[9] ^ 0xFF;
+        msg->wind_speed_ms = ((w9 >> 4) * 100 + (w9 & 0x0F) * 10 + (w8 & 0x0F)) * 0.1f;
+        msg->wind_dir_deg = (float)((m[10] >> 4) * 100 + (m[10] & 0x0F) * 10 + (m[11] >> 4));
+        // Rain: bytes 12-14 XOR 0xFF when rain flag set
+        if (m[16] & 0x01) {
+            uint8_t r12 = m[12] ^ 0xFF, r13 = m[13] ^ 0xFF, r14 = m[14] ^ 0xFF;
+            int32_t rain_bcd = (r12 >> 4) * 100000 + (r12 & 0x0F) * 10000 +
+                               (r13 >> 4) * 1000 + (r13 & 0x0F) * 100 +
+                               (r14 >> 4) * 10 + (r14 & 0x0F);
+            msg->rain_mm = rain_bcd * 0.1f;
+        } else {
+            msg->rain_mm = NAN;
+        }
+    } else {
+        msg->wind_speed_ms = NAN;
+        msg->wind_dir_deg = NAN;
+        msg->rain_mm = NAN;
+    }
+
+    msg->battery_ok = (m[13] & 0x02) ? 1 : 0;
+    msg->pressure_hpa = NAN;
+    msg->power_w = NAN;
+    msg->energy_kwh = NAN;
+    msg->battery_v = NAN;
+    msg->rssi_db = NAN;
+    msg->freq_offset_hz = NAN;
+    msg->freq_hz = 868.3e6;
+    memcpy(msg->payload, m, 18);
+    msg->payload_len = 18;
+    msg->timestamp_ms = now_ms();
+    return true;
+}
+
 // wMBus Mode C/T: GFSK ±50 kHz, 100 kbps (Mode C) or ~32.768 kbps (Mode T)
 // Preamble: Mode C = 0101...0101 + 0x543D, Mode T = 1010...1010 + 0x3965543D
 // We require the FULL 16-bit sync 0x543D (Mode C) to avoid false positives.
@@ -690,10 +841,11 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
     // Pass 2: FSK demodulation at multiple bit rates
     // wMBus Mode C = 100 kbps (20 samp/bit), Mode T = 32.768 kbps (61 samp/bit)
     // Honeywell CM9xx = 38.4 kbps (52 samp/bit)
-    // LaCrosse TX29 = 18.2 kbps / 55µs per bit (110 samp/bit at 2 MSPS)
-    // LaCrosse TX35 = 9.5 kbps / 105µs per bit (210 samp/bit at 2 MSPS)
-    static const int32_t bit_periods[] = { 20, 52, 61, 110, 210 };
-    static const int32_t num_rates = 5;
+    // LaCrosse TX29 / Fine Offset WH = 18.2 kbps / 55-58µs per bit (110 samp/bit)
+    // LaCrosse TX35 = 9.5 kbps / 105µs per bit (210 samp/bit)
+    // Bresser 6-in-1 = 8.1 kbps / 124µs per bit (248 samp/bit)
+    static const int32_t bit_periods[] = { 20, 52, 61, 110, 210, 248 };
+    static const int32_t num_rates = 6;
 
     for (int32_t rate_idx = 0; rate_idx < num_rates; rate_idx++) {
         int32_t samples_per_bit = bit_periods[rate_idx];
@@ -749,6 +901,8 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
 
             bool decoded = false;
             if (!decoded) decoded = decode_lacrosse_fsk(fsk_bits_local, fsk_bit_count, &msg);
+            if (!decoded) decoded = decode_fineoffset_fsk(fsk_bits_local, fsk_bit_count, &msg);
+            if (!decoded) decoded = decode_bresser_6in1(fsk_bits_local, fsk_bit_count, &msg);
             if (!decoded) decoded = decode_wmbus(fsk_bits_local, fsk_bit_count, &msg);
             if (!decoded) decoded = decode_honeywell_cm(fsk_bits_local, fsk_bit_count, &msg);
 
