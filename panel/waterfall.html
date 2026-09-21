@@ -66,6 +66,7 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 <a href="/gsm.html">📶 GSM</a>
 <a href="/lte.html">📶 LTE</a>
 <a href="/iot868.html">🌡️ IoT 868</a>
+<a href="/cubecellgg.html">📡 CubeCell</a>
 <a href="/fanet.html">🚩 FANET</a>
 <a href="/graves.html">📡 GRAVES</a>
 <a href="/stats.html">📊 Stats</a>
@@ -259,8 +260,19 @@ function loadReceivers() {
                 opt.dataset.gains = JSON.stringify(rx.gain_list);
             }
         });
+        // Add cubecellgg as source if available
+        fetch('/api/cubecellgg').then(function(r){return r.json();}).then(function(cc){
+            if (cc.state === 'running') {
+                var opt = document.createElement('option');
+                opt.value = 'cubecellgg';
+                opt.textContent = '📡 CubeCell GG (' + cc.fw_version + ') — 858-878 MHz RSSI';
+                opt.dataset.serial = 'cubecellgg';
+                opt.dataset.cubecell = '1';
+                sel.appendChild(opt);
+            }
+        }).catch(function(){});
         if (sel.options.length === 0) {
-            sel.innerHTML = '<option value="-1">No sdrgg devices found</option>';
+            sel.innerHTML = '<option value="-1">No devices found</option>';
         }
     }).catch(function(e){
         console.error('Failed to load receivers:', e);
@@ -402,12 +414,92 @@ function sendCmd(obj) {
 }
 
 // Button handlers
+var ccggPollTimer = null;
+var ccggMode = false;
+
+function startCubeCell() {
+    ccggMode = true;
+    running = true;
+    fetch('/api/cubecellgg/config', {method:'POST', body:JSON.stringify({waterfall:'start'})});
+    updateUI();
+    setMsg('CubeCell GG waterfall running (858-878 MHz)');
+    document.getElementById('ws-status').innerHTML = '<span class="dot dot-green"></span>CubeCell GG';
+    // Update freq axis
+    document.getElementById('freq-lo').textContent = '858 MHz';
+    document.getElementById('freq-mid').textContent = '868 MHz';
+    document.getElementById('freq-hi').textContent = '878 MHz';
+    // Start polling
+    ccggPoll();
+}
+
+function ccggPoll() {
+    if (!ccggMode || !running) return;
+    fetch('/api/cubecellgg/waterfall').then(function(r){return r.json();}).then(function(d){
+        if (d.d && d.d.length > 0) {
+            drawCcggLine(d.d);
+        }
+    }).catch(function(){});
+    ccggPollTimer = setTimeout(ccggPoll, 250);
+}
+
+function drawCcggLine(data) {
+    var canvas = document.getElementById('waterfall-canvas');
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width, h = canvas.height;
+    // Scroll down
+    var img = ctx.getImageData(0, 0, w, h - 1);
+    ctx.putImageData(img, 0, 1);
+    // Draw new line at top
+    var binW = w / data.length;
+    for (var i = 0; i < data.length; i++) {
+        var v = data[i];
+        var n = (v + 120) / 50;
+        if (n < 0) n = 0; if (n > 1) n = 1;
+        var r = Math.floor(n * n * 255);
+        var g = Math.floor(n * 180);
+        var b = Math.floor((1 - n) * 255);
+        if (n > 0.6) { r = 255; g = 200 + Math.floor((n - 0.6) * 137); b = Math.floor((n - 0.6) * 2.5 * 255); }
+        ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+        ctx.fillRect(Math.floor(i * binW), 0, Math.ceil(binW), 1);
+    }
+    // Also draw spectrum
+    var sCanvas = document.getElementById('spectrum-canvas');
+    var sCtx = sCanvas.getContext('2d');
+    var sw = sCanvas.width, sh = sCanvas.height;
+    sCtx.fillStyle = 'rgba(0,0,0,0.3)';
+    sCtx.fillRect(0, 0, sw, sh);
+    sCtx.strokeStyle = '#4fc3f7';
+    sCtx.lineWidth = 1;
+    sCtx.beginPath();
+    for (var i = 0; i < data.length; i++) {
+        var x = (i / data.length) * sw;
+        var y = sh - ((data[i] + 120) / 50) * sh;
+        if (y < 0) y = 0; if (y > sh) y = sh;
+        if (i === 0) sCtx.moveTo(x, y); else sCtx.lineTo(x, y);
+    }
+    sCtx.stroke();
+}
+
+function stopCubeCell() {
+    ccggMode = false;
+    running = false;
+    if (ccggPollTimer) { clearTimeout(ccggPollTimer); ccggPollTimer = null; }
+    fetch('/api/cubecellgg/config', {method:'POST', body:JSON.stringify({waterfall:'stop'})});
+    updateUI();
+    setMsg('Stopped');
+    document.getElementById('ws-status').innerHTML = '<span class="dot dot-red"></span>Disconnected';
+}
+
 document.getElementById('btn-start').addEventListener('click', function() {
+    var opt = document.getElementById('rx-select').selectedOptions[0];
+    if (opt && opt.dataset.cubecell === '1') {
+        startCubeCell();
+        return;
+    }
     var rxId = parseInt(document.getElementById('rx-select').value);
     if (rxId < 0) return;
     currentRxId = rxId;
-    // Get gain list and serial from selected option
-    var opt = document.getElementById('rx-select').selectedOptions[0];
+    ccggMode = false;
     if (opt && opt.dataset.gains) {
         updateGainSlider(JSON.parse(opt.dataset.gains));
     }
@@ -418,6 +510,7 @@ document.getElementById('btn-start').addEventListener('click', function() {
 });
 
 document.getElementById('btn-stop').addEventListener('click', function() {
+    if (ccggMode) { stopCubeCell(); return; }
     sendCmd({cmd:'stop'});
     running = false;
     owned = false;

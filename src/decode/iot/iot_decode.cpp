@@ -39,7 +39,7 @@ using std::isnan;
 
 // Pulse timing constants (in microseconds at 2 MSPS → 1 sample = 0.5 µs)
 #define US_TO_SAMPLES(us) ((us) * 2)
-#define SAMPLES_TO_US(s)  ((s) / 2)
+#define SAMPLES_TO_US(s)  ((s) / 2)  // 2 MSPS: 2 samples = 1 µs
 
 // ======================== Pulse representation ========================
 
@@ -64,9 +64,17 @@ struct iot_decoder_state {
     pulse_t  pulses[IOT_MAX_PULSES];
     int32_t      pulse_count;
 
-    // FSK demodulator state
-    int16_t  fsk_prev_i;
-    int16_t  fsk_prev_q;
+    // FSK demodulator state (2:1 decimated to 1 MSPS effective)
+    int8_t   fsk_prev_i;
+    int8_t   fsk_prev_q;
+    int32_t  fsk_dec_i;       // decimation accumulator I
+    int32_t  fsk_dec_q;       // decimation accumulator Q
+    int32_t  fsk_dec_phase;   // 0 or 1 — decimation phase
+    int32_t  fsk_fm_dc[8];
+    int32_t  fsk_accum[8];
+    int32_t  fsk_count[8];
+    uint8_t  fsk_ring[8][4096];
+    int32_t  fsk_ring_len[8];
 
     // Statistics
     uint64_t samples_processed;
@@ -327,43 +335,167 @@ static bool decode_bresser_5in1(const pulse_t *pulses, int32_t count, iot_device
 //
 // Temperature: digit1*10 + digit2 + digit3*0.1 - 40.0 (BCD, in Celsius)
 // Humidity: 0x6A = no sensor, 0x7D = probe channel, otherwise %RH
-static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
-{
-    if (bit_count < 68) return false;  // need preamble(4) + sync(16) + model(4) + data(40) + crc(8) = 72 min
+// LaCrosse TX29/TX35 FSK decoder — works directly on FM discriminator output.
+// Uses correlator-based sync detection instead of bit slicer for robustness.
+// sync_word = 0xA2DD49 (24 bits) as ±1 pattern
+static const int8_t lacrosse_sync_pattern[24] = {
+    +1,-1,+1,-1, // preamble 1010
+    +1,-1,+1,-1, -1,+1,-1,+1, +1,+1,-1,+1, -1,+1,-1,-1, // sync 0x2DD4
+    +1,-1,-1,+1  // model 0x9
+};
 
-    // Search for combined preamble+sync+model: 0xA2DD49 (24 bits)
-    //   1010 0010 1101 1101 0100 1001
-    //   ^^^^ preamble     ^^^^^^^^^ sync 0x2DD4     ^^^^ model 0x9
-    int32_t start = -1;
-    for (int32_t i = 0; i <= bit_count - 64; i++) {
-        uint32_t word = 0;
-        for (int32_t b = 0; b < 24; b++)
-            word = (word << 1) | (bits[i + b] & 1);
-        if (word == 0xA2DD49) {
-            start = i + 20;  // skip preamble(4) + sync(16) = 20, keep model+data
-            break;
+static bool decode_lacrosse_fm(const int16_t *fm, int32_t fm_len,
+                               int32_t samples_per_bit, iot_device_msg_t *msg)
+{
+    int32_t total_bits_needed = 24 + 44;  // sync(24) + model_skip(4) + data(40)
+    int32_t total_samples = total_bits_needed * samples_per_bit;
+    if (fm_len < total_samples + samples_per_bit) return false;
+
+    // Correlate sync pattern against FM output, trying both polarities.
+    // The FM discriminator polarity depends on the signal's frequency offset
+    // relative to the tuner center. Try both +1/-1 and -1/+1 mappings.
+    int32_t fm_mean = 0;
+    int32_t best_pos = -1;
+    int64_t best_corr = 0;
+    int32_t best_polarity = 1;
+
+    for (int32_t pos = 0; pos <= fm_len - total_samples; pos++) {
+        int64_t corr = 0;
+        for (int32_t b = 0; b < 24; b++) {
+            int32_t sample_center = pos + b * samples_per_bit + samples_per_bit / 2;
+            if (sample_center >= fm_len) break;
+            int32_t half = samples_per_bit / 4;
+            if (half < 1) half = 1;
+            int64_t bit_val = 0;
+            for (int32_t k = -half; k <= half; k++) {
+                int32_t idx = sample_center + k;
+                if (idx >= 0 && idx < fm_len) bit_val += fm[idx];
+            }
+            corr += bit_val * lacrosse_sync_pattern[b];
+        }
+        // Check both polarities: positive and negative correlation
+        int64_t abs_corr = (corr > 0) ? corr : -corr;
+        if (abs_corr > best_corr) {
+            best_corr = abs_corr;
+            best_pos = pos;
+            best_polarity = (corr > 0) ? 1 : -1;
         }
     }
-    if (start < 0 || start + 44 > bit_count) return false;  // need 4+40 bits
 
-    // Extract 5 bytes starting AFTER the model nibble (skip 4 bits)
-    uint8_t b[5] = {0};
+    if (best_pos < 0) return false;
+
+    // Threshold: correlator must be significantly above noise
+    int64_t norm = 55000;
+    if (best_corr < norm) return false;
+
+    // Compute local DC from the sync region for payload extraction
+    {
+        int32_t sync_end = best_pos + 24 * samples_per_bit;
+        int64_t local_sum = 0;
+        int32_t local_cnt = 0;
+        for (int32_t k = best_pos; k < sync_end && k < fm_len; k++) {
+            local_sum += fm[k]; local_cnt++;
+        }
+        if (local_cnt > 0) fm_mean = (int32_t)(local_sum / local_cnt);
+    }
+
+    // Extract bits using sub-sample clock calibration from the sync word.
+    //
+    // The correlator gives best_pos at sample granularity. To find the
+    // exact sub-sample phase, we test multiple offsets within one bit
+    // period and pick the one that best matches the known sync bits.
+    // Then use that calibrated phase for the payload extraction with
+    // zero-crossing clock recovery.
+    int32_t best_phase = 0;
+    int32_t best_sync_score = -1;
+    int32_t quarter_bit = samples_per_bit / 4;
+    if (quarter_bit < 1) quarter_bit = 1;
+
+    for (int32_t phase = -quarter_bit; phase <= quarter_bit; phase++) {
+        int32_t score = 0;
+        int32_t cpos = best_pos + phase;
+        for (int32_t b = 0; b < 24; b++) {
+            if (cpos + samples_per_bit > fm_len) break;
+            int64_t bit_sum = 0;
+            for (int32_t k = 0; k < samples_per_bit; k++)
+                bit_sum += (fm[cpos + k] - fm_mean);
+            // Apply polarity: if signal is inverted, flip the comparison
+            int32_t got = ((bit_sum * best_polarity) > 0) ? 1 : 0;
+            int32_t expect = (lacrosse_sync_pattern[b] > 0) ? 1 : 0;
+            if (got == expect) score++;
+            cpos += samples_per_bit;
+        }
+        if (score > best_sync_score) {
+            best_sync_score = score;
+            best_phase = phase;
+        }
+    }
+
+    if (best_sync_score < 18) return false;
+
+    // Now extract data bits (skip preamble+sync = 20 bits) with the
+    // calibrated phase and zero-crossing clock recovery.
+    int32_t data_start = best_pos + best_phase + 20 * samples_per_bit;
+    uint8_t raw_bits[64];
+    int32_t clock_pos = data_start;
+
+    for (int32_t b = 0; b < 48; b++) {
+        if (clock_pos + samples_per_bit > fm_len) break;
+
+        int64_t bit_sum = 0;
+        for (int32_t k = 0; k < samples_per_bit; k++)
+            bit_sum += (fm[clock_pos + k] - fm_mean);
+        raw_bits[b] = ((bit_sum * best_polarity) > 0) ? 1 : 0;
+
+        int32_t next_boundary = clock_pos + samples_per_bit;
+
+        // Clock recovery: snap to nearest zero-crossing
+        int32_t best_zc = next_boundary;
+        int32_t best_zc_dist = quarter_bit + 1;
+        for (int32_t k = -quarter_bit; k <= quarter_bit; k++) {
+            int32_t p = next_boundary + k;
+            if (p > 0 && p < fm_len - 1) {
+                int32_t v0 = fm[p - 1] - fm_mean;
+                int32_t v1 = fm[p] - fm_mean;
+                if ((v0 > 0) != (v1 > 0)) {
+                    if (abs(k) < best_zc_dist) {
+                        best_zc_dist = abs(k);
+                        best_zc = p;
+                    }
+                }
+            }
+        }
+        clock_pos = (best_zc_dist <= quarter_bit) ? best_zc : next_boundary;
+    }
+
+    // Skip model nibble (4 bits), extract 5 data bytes (40 bits)
+    uint8_t b5[5] = {0};
     for (int32_t i = 0; i < 40; i++) {
-        int32_t bit_pos = start + 4 + i;  // +4 to skip model nibble 0x9
-        if (bit_pos >= bit_count) return false;
-        b[i / 8] |= (bits[bit_pos] & 1) << (7 - (i % 8));
+        int32_t bit_pos = 4 + i;  // skip model nibble
+        if (bit_pos >= 48) return false;
+        b5[i / 8] |= (raw_bits[bit_pos] & 1) << (7 - (i % 8));
     }
 
     // CRC-8 check (poly 0x31, init 0x00) over first 4 bytes
-    uint8_t crc = crc8(b, 4, 0x31, 0x00);
-    if (crc != b[4]) return false;
+    uint8_t crc = crc8(b5, 4, 0x31, 0x00);
+    if (crc != b5[4]) return false;
 
-    // Parse fields (rtl_433 lacrosse_tx35.c exact field extraction)
-    int32_t sensor_id   = ((b[0] & 0x0F) << 2) | (b[1] >> 6);
-    (void)((b[1] >> 5) & 1);  // new_batt — not used in output
-    float   temp_c      = 10.0f * (b[1] & 0x0F) + 1.0f * ((b[2] >> 4) & 0x0F) + 0.1f * (b[2] & 0x0F) - 40.0f;
-    int32_t battery_low = b[3] >> 7;
-    int32_t humidity    = b[3] & 0x7F;
+    // Parse fields
+    int32_t sensor_id   = ((b5[0] & 0x0F) << 2) | (b5[1] >> 6);
+    float   temp_c      = 10.0f * (b5[1] & 0x0F) + 1.0f * ((b5[2] >> 4) & 0x0F) + 0.1f * (b5[2] & 0x0F) - 40.0f;
+    int32_t battery_low = b5[3] >> 7;
+    int32_t humidity    = b5[3] & 0x7F;
+
+    // Plausibility check: reject values outside physical range.
+    // CRC-8 has only 256 values — with frequent correlator triggers,
+    // ~0.4% of random data passes CRC by chance.
+    if (temp_c < -30.0f || temp_c > 60.0f) return false;
+    if (humidity != 0x6A && humidity != 0x7D && humidity > 100) return false;
+
+    // BCD digit validation: each nibble of temperature must be 0-9
+    if ((b5[1] & 0x0F) > 9) return false;
+    if (((b5[2] >> 4) & 0x0F) > 9) return false;
+    if ((b5[2] & 0x0F) > 9) return false;
 
     msg->protocol = IOT_PROTO_LACROSSE_TX;
     msg->modulation = IOT_MOD_FSK;
@@ -372,11 +504,10 @@ static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_devi
     msg->battery_ok = battery_low ? 0 : 1;
     msg->temperature_c = temp_c;
 
-    if (humidity == 0x6A || humidity == 0x7D) {
-        msg->humidity_pct = NAN;  // no humidity sensor or probe channel
-    } else {
+    if (humidity == 0x6A || humidity == 0x7D)
+        msg->humidity_pct = NAN;
+    else
         msg->humidity_pct = (float)humidity;
-    }
 
     msg->pressure_hpa = NAN;
     msg->wind_speed_ms = NAN;
@@ -387,10 +518,17 @@ static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_devi
     msg->battery_v = NAN;
     msg->freq_hz = 868.3e6;
 
-    memcpy(msg->payload, b, 5);
+    memcpy(msg->payload, b5, 5);
     msg->payload_len = 5;
     msg->timestamp_ms = now_ms();
     return true;
+}
+
+// Legacy bit-based decoder (for other FSK protocols that still use the ring)
+static bool decode_lacrosse_fsk(const uint8_t *bits, int32_t bit_count, iot_device_msg_t *msg)
+{
+    (void)bits; (void)bit_count; (void)msg;
+    return false;  // replaced by decode_lacrosse_fm correlator
 }
 
 // Fine Offset WH1080/WH3080 FSK variant (868.3 MHz)
@@ -838,50 +976,76 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
         }
     }
 
-    // Pass 2: FSK demodulation at multiple bit rates
-    // wMBus Mode C = 100 kbps (20 samp/bit), Mode T = 32.768 kbps (61 samp/bit)
-    // Honeywell CM9xx = 38.4 kbps (52 samp/bit)
-    // LaCrosse TX29 / Fine Offset WH = 18.2 kbps / 55-58µs per bit (110 samp/bit)
-    // LaCrosse TX35 = 9.5 kbps / 105µs per bit (210 samp/bit)
-    // Bresser 6-in-1 = 8.1 kbps / 124µs per bit (248 samp/bit)
+    // Pass 2: FSK demodulation at 2 MSPS with delay-1 FM discriminator.
+    // Bit periods at 2 MSPS:
     static const int32_t bit_periods[] = { 20, 52, 61, 110, 210, 248 };
     static const int32_t num_rates = 6;
 
+    int8_t prev_i = state->fsk_prev_i;
+    int8_t prev_q = state->fsk_prev_q;
+
+    int16_t fm_buf[IOT_BLOCK_SIZE + 1];
+    int32_t fm_len = 0;
+
+    for (uint32_t i = 0; i < sample_count; i++) {
+        int8_t si = (int8_t)((int32_t)iq[i * 2]     - 128);
+        int8_t sq = (int8_t)((int32_t)iq[i * 2 + 1] - 128);
+
+        fm_buf[fm_len++] = fm_demod(prev_i, prev_q, si, sq);
+        prev_i = si;
+        prev_q = sq;
+    }
+
+    state->fsk_prev_i = prev_i;
+    state->fsk_prev_q = prev_q;
+
+    // Try LaCrosse correlator directly on FM buffer (TX29: 14 samp/bit, TX35: 26 samp/bit at 250 kHz)
+    {
+        static const int32_t lacrosse_rates[] = { 110, 210 };
+        for (int32_t lr = 0; lr < 2; lr++) {
+            iot_device_msg_t msg = {};
+            msg.temperature_c = NAN; msg.humidity_pct = NAN; msg.pressure_hpa = NAN;
+            msg.wind_speed_ms = NAN; msg.wind_dir_deg = NAN; msg.rain_mm = NAN;
+            msg.power_w = NAN; msg.energy_kwh = NAN; msg.battery_v = NAN;
+            msg.rssi_db = NAN; msg.freq_offset_hz = NAN;
+            if (decode_lacrosse_fm(fm_buf, fm_len, lacrosse_rates[lr], &msg)) {
+                msg_queue_push(state->out_queue, &msg);
+                state->packets_decoded++;
+            }
+        }
+    }
+
+    // Bit-slice the decimated FM output at each rate
     for (int32_t rate_idx = 0; rate_idx < num_rates; rate_idx++) {
         int32_t samples_per_bit = bit_periods[rate_idx];
+        int32_t fm_dc = state->fsk_fm_dc[rate_idx];
+        int32_t accum = state->fsk_accum[rate_idx];
+        int32_t cnt = state->fsk_count[rate_idx];
+        int32_t ring_len = state->fsk_ring_len[rate_idx];
+        uint8_t *ring = state->fsk_ring[rate_idx];
 
-        uint8_t fsk_bits_local[4096];
-        int32_t fsk_bit_count = 0;
-        int32_t accum = 0;
-        int32_t count = 0;
-        int8_t prev_i = state->fsk_prev_i;
-        int8_t prev_q = state->fsk_prev_q;
+        for (int32_t fi = 0; fi < fm_len; fi++) {
+            int32_t freq = fm_buf[fi];
+            fm_dc += (freq - fm_dc + 128) >> 8;
+            accum += (freq - fm_dc);
+            cnt++;
 
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int8_t si = (int8_t)(iq[i*2]   - 128);
-            int8_t sq = (int8_t)(iq[i*2+1] - 128);
-
-            int16_t freq = fm_demod(prev_i, prev_q, si, sq);
-            prev_i = si;
-            prev_q = sq;
-
-            accum += freq;
-            count++;
-
-            if (count >= samples_per_bit) {
-                int32_t bit = (accum > 0) ? 1 : 0;
-                if (fsk_bit_count < 4096)
-                    fsk_bits_local[fsk_bit_count++] = bit;
+            if (cnt >= samples_per_bit) {
+                if (ring_len < 4096)
+                    ring[ring_len++] = (accum > 0) ? 1 : 0;
                 accum = 0;
-                count = 0;
+                cnt = 0;
             }
         }
 
-        // Save state from first rate pass (100 kbps) for continuity
-        if (rate_idx == 0) {
-            state->fsk_prev_i = prev_i;
-            state->fsk_prev_q = prev_q;
-        }
+        state->fsk_fm_dc[rate_idx] = fm_dc;
+        state->fsk_accum[rate_idx] = accum;
+        state->fsk_count[rate_idx] = cnt;
+        state->fsk_ring_len[rate_idx] = ring_len;
+
+        // Use the persistent ring buffer for decoding
+        uint8_t *fsk_bits_local = ring;
+        int32_t fsk_bit_count = ring_len;
 
         // Try FSK protocol decoders on accumulated bits
         if (fsk_bit_count >= 120) {
@@ -909,8 +1073,18 @@ static void process_block(iot_decoder_state_t *state, const uint8_t *iq, uint32_
             if (decoded) {
                 msg_queue_push(state->out_queue, &msg);
                 state->packets_decoded++;
-                break;  // decoded at this rate, skip remaining
+                state->fsk_ring_len[rate_idx] = 0;
+                break;
             }
+        }
+
+        // Prevent ring overflow: when full, shift out old bits keeping last 256
+        if (state->fsk_ring_len[rate_idx] >= 3840) {
+            int32_t keep = 256;
+            memmove(state->fsk_ring[rate_idx],
+                    state->fsk_ring[rate_idx] + state->fsk_ring_len[rate_idx] - keep,
+                    keep);
+            state->fsk_ring_len[rate_idx] = keep;
         }
     }
     state->samples_processed += sample_count;

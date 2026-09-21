@@ -592,16 +592,6 @@ static void try_decode_flarm(struct flarm_state *state, flarm_channel_t *ch)
             state->stats.packets_failed++;
             return;
         }
-        // Debug: dump failed payload for analysis
-        fprintf(stderr, "flarm-crc-fail ncc=%.3f pol=%d viol=%u start=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x"
-                "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                ch->flarm_det_ncc, ch->flarm_polarity, violations,
-                ch->flarm_payload_start,
-                payload[0],payload[1],payload[2],payload[3],payload[4],payload[5],
-                payload[6],payload[7],payload[8],payload[9],payload[10],payload[11],
-                payload[12],payload[13],payload[14],payload[15],payload[16],payload[17],
-                payload[18],payload[19],payload[20],payload[21],payload[22],payload[23],
-                payload[24],payload[25]);
         state->stats.packets_failed++;
         return;
     }
@@ -727,16 +717,13 @@ static void try_decode_adsl(struct flarm_state *state, flarm_channel_t *ch)
     uint32_t violations = 0;
 
     if (!manchester_decode_payload(manchester_bits, ADSL_PAYLOAD_CHIPS, payload, &payload_len, &violations)) {
-        gg::eprint("ADSL-DBG manchester fail len=%u viol=%u\n", payload_len, violations);
         state->stats.adsl_packets_failed++;
         return;
     }
     if (payload_len < ADSL_PACKET_TOTAL) {
-        gg::eprint("ADSL-DBG int16_t payload len=%u (need %d)\n", payload_len, ADSL_PACKET_TOTAL);
         state->stats.adsl_packets_failed++;
         return;
     }
-    gg::eprint("ADSL-DBG manchester OK len=%u viol=%u pol=%d\n", payload_len, violations, ch->adsl_polarity);
 
     // ADS-L payload is INVERTED on-air: flip all bytes
     for (uint32_t i = 0; i < ADSL_PACKET_TOTAL; i++) {
@@ -744,16 +731,10 @@ static void try_decode_adsl(struct flarm_state *state, flarm_channel_t *ch)
     }
 
     // CRC-24 check
-    fprintf(stderr, "ADSL-DBG pre-crc: %02X %02X %02X %02X %02X %02X %02X %02X ... %02X %02X %02X\n",
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7],
-            payload[ADSL_PACKET_TOTAL-3], payload[ADSL_PACKET_TOTAL-2], payload[ADSL_PACKET_TOTAL-1]);
     if (!adsl_check_crc(payload)) {
-        gg::eprint("ADSL-DBG CRC-24 FAIL\n");
         state->stats.adsl_packets_failed++;
         return;
     }
-    gg::eprint("ADSL-DBG CRC-24 PASS!\n");
     state->stats.adsl_packets_crc_ok++;
 
     adsl_message_t msg;
@@ -1100,9 +1081,6 @@ void flarm_demod_process(struct flarm_state *state, const uint8_t *iq_data, uint
                         float signed_ncc = compute_ncc_ring(ch->fm_ring, best_start,
                                                            adsl_sync_template,
                                                            adsl_template_energy, stl);
-
-                        fprintf(stderr, "ADSL-DBG peak ch=%d coarse=%.3f refined=%.3f start=%u\n",
-                                ch_idx, ch->adsl_peak_best_ncc, refined_ncc, best_start);
 
                         state->stats.adsl_packets_detected++;
                         ch->adsl_polarity = (signed_ncc > 0) ? 1 : -1;

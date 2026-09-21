@@ -26,6 +26,7 @@
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
 #include "iot_tracker.h"
+#include "cubecellgg_manager.h"
 #include "fanet_decode.h"
 #include "sarsat_decode.h"
 #include "graves_decode.h"
@@ -3120,6 +3121,71 @@ static void api_get_iot868(int32_t fd)
     http_send_json(fd, json.c_str(), (int32_t)json.size());
 }
 
+// ============================= API: GET /api/cubecellgg ===================
+
+static void api_get_cubecellgg(int32_t fd)
+{
+    ccgg_device_info_t info;
+    ccggGetDeviceInfo(&info);
+    char json[512];
+    int len = snprintf(json, sizeof(json),
+        "{\"state\":\"%s\",\"tty\":\"%s\",\"fw_version\":\"%s\","
+        "\"local_version\":\"%s\",\"profile\":\"%s\",\"frequency\":%u,"
+        "\"iot_packets\":%u,\"crc_failures\":%u}",
+        info.state == CCGG_STATE_RUNNING ? "running" :
+        info.state == CCGG_STATE_STOPPED ? "stopped" :
+        info.state == CCGG_STATE_DETECTING ? "detecting" :
+        info.state == CCGG_STATE_FLASHING ? "flashing" :
+        info.state == CCGG_STATE_ERROR ? "error" : "disconnected",
+        info.tty_path, info.fw_version, info.local_version,
+        info.profile, info.frequency, info.iot_packets, info.crc_failures);
+    http_send_json(fd, json, len);
+}
+
+// ============================= API: POST /api/cubecellgg/config ============
+
+static void api_post_cubecellgg_config(int32_t fd, const char *body)
+{
+    // Parse JSON body: {"profile":"lacrosse","frequency":868300000}
+    const char *p;
+    if ((p = strstr(body, "\"profile\":\""))) {
+        p += 11;
+        const char *e = strchr(p, '"');
+        if (e) {
+            char profile[16] = {};
+            int len = e - p;
+            if (len > 15) len = 15;
+            memcpy(profile, p, len);
+            ccggSetProfile(profile);
+        }
+    }
+    if ((p = strstr(body, "\"frequency\":"))) {
+        uint32_t freq = strtoul(p + 12, NULL, 10);
+        if (freq >= 150000000 && freq <= 960000000)
+            ccggSetFrequency(freq);
+    }
+    if (strstr(body, "\"cmd\":\"stop\"")) {
+        ccggSetPaused(true);
+    }
+    if (strstr(body, "\"cmd\":\"run\"")) {
+        ccggSetPaused(false);
+    }
+    if (strstr(body, "\"scan\":true")) {
+        ccggRequestScan();
+    }
+    if (strstr(body, "\"waterfall\":\"start\"")) {
+        uint32_t ws = 863000000, we = 870000000, wt = 50000;
+        if ((p = strstr(body, "\"wf_start\":"))) ws = strtoul(p + 11, NULL, 10);
+        if ((p = strstr(body, "\"wf_end\":"))) we = strtoul(p + 9, NULL, 10);
+        if ((p = strstr(body, "\"wf_step\":"))) wt = strtoul(p + 10, NULL, 10);
+        ccggWaterfallStart(ws, we, wt);
+    }
+    if (strstr(body, "\"waterfall\":\"stop\"")) {
+        ccggWaterfallStop();
+    }
+    http_send(fd, 200, "application/json", "{\"ok\":true}", 11);
+}
+
 // ============================= API: GET /api/graves =======================
 
 // Declared in sdr_receiver.cpp — returns JSON for GRAVES targets
@@ -4686,8 +4752,38 @@ static void api_get_devices(int32_t fd)
         pclose(fp);
     }
 
+    buf += "]";
+
+    // Append cubecellgg device info + capabilities
+    {
+        ccgg_device_info_t ccinfo;
+        ccggGetDeviceInfo(&ccinfo);
+        const char *cstate = ccinfo.state == CCGG_STATE_RUNNING ? "running" :
+                             ccinfo.state == CCGG_STATE_STOPPED ? "stopped" :
+                             ccinfo.state == CCGG_STATE_DETECTING ? "detecting" :
+                             ccinfo.state == CCGG_STATE_FLASHING ? "flashing" :
+                             ccinfo.state == CCGG_STATE_ERROR ? "error" : "disconnected";
+        std::string caps_json = "[";
+        for (int i = 0; i < ccinfo.num_caps; i++) {
+            if (i > 0) caps_json += ",";
+            caps_json += sfmt("{\"id\":%d,\"name\":\"%s\",\"desc\":\"%s\",\"freq\":%u}",
+                              ccinfo.caps[i].id, ccinfo.caps[i].name,
+                              ccinfo.caps[i].desc, ccinfo.caps[i].freq);
+        }
+        caps_json += "]";
+        buf += sfmt(
+            ",\"cubecellgg\":{\"state\":\"%s\",\"tty\":\"%s\","
+            "\"fw_version\":\"%s\",\"local_version\":\"%s\","
+            "\"profile\":\"%s\",\"frequency\":%u,"
+            "\"iot_packets\":%u,\"chip\":\"SX1262\",\"board\":\"HTCC-AB01\","
+            "\"caps\":%s}",
+            cstate, ccinfo.tty_path, ccinfo.fw_version, ccinfo.local_version,
+            ccinfo.profile, ccinfo.frequency, ccinfo.iot_packets,
+            caps_json.c_str());
+    }
+
     buf += sfmt(
-        "],\"rx_count\":%d,\"rx_max\":%d}",
+        ",\"rx_count\":%d,\"rx_max\":%d}",
         SdrManager.count, MAX_SDR_RECEIVERS);
 
     http_send_json(fd, buf.c_str(), (int32_t)buf.size());
@@ -4748,6 +4844,7 @@ static void serve_gsm_page(int32_t fd)
         "<a class='active' href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -4930,6 +5027,7 @@ static void serve_lte_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -5253,6 +5351,205 @@ static void serve_iot868_page(int32_t fd)
     http_send(fd, 200, "text/html", html, (int32_t)strlen(html));
 }
 
+// ============================= CubeCell GG Page ============================
+
+static void serve_cubecellgg_page(int32_t fd)
+{
+    const char *html =
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>CubeCell GG - dump1090-gg</title>"
+        "<style>"
+        ":root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--text:#e0e0e0;--dim:#888}"
+        "body{margin:0;font-family:system-ui;background:var(--bg);color:var(--text)}"
+        ".nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px;background:#0d1117;border-bottom:1px solid #333}"
+        ".nav a{padding:6px 12px;border-radius:4px;text-decoration:none;color:var(--dim);font-size:13px}"
+        ".nav a:hover{background:#333;color:#fff} .nav a.active{background:var(--accent);color:#fff}"
+        ".container{max-width:1200px;margin:20px auto;padding:0 16px}"
+        ".card{background:var(--card);border-radius:8px;padding:16px;margin:12px 0}"
+        ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}"
+        ".label{color:var(--dim);font-size:12px}.value{font-size:18px;font-weight:600}"
+        ".btn{padding:8px 16px;border:none;border-radius:4px;background:var(--accent);color:#fff;cursor:pointer}"
+        ".btn:hover{opacity:.8} .btn.danger{background:#c0392b}"
+        "select,input{padding:6px;border-radius:4px;border:1px solid #444;background:#1a1a2e;color:#fff}"
+        "canvas{width:100%;border-radius:4px;background:#000}"
+        "</style></head><body>"
+        "<div class='nav'>"
+        "<a href='/'>&#x1f3e0; Home</a>"
+        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
+        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
+        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a class='active' href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
+        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
+        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
+        "</div>"
+        "<div class='container'>"
+        "<h2>&#x1f4e1; CubeCell GG IoT Receiver</h2>"
+
+        /* Device info card */
+        "<div class='card' id='info-card'>"
+        "<div class='grid'>"
+        "<div><span class='label'>State</span><div class='value' id='cc-state'>-</div></div>"
+        "<div><span class='label'>Firmware</span><div class='value' id='cc-fw'>-</div></div>"
+        "<div><span class='label'>TTY</span><div class='value' id='cc-tty'>-</div></div>"
+        "<div><span class='label'>IoT Packets</span><div class='value' id='cc-pkts'>0</div></div>"
+        "<div><span class='label'>Profile</span><div class='value' id='cc-profile'>-</div></div>"
+        "<div><span class='label'>Frequency</span><div class='value' id='cc-freq'>-</div></div>"
+        "</div></div>"
+
+        /* Config card */
+        "<div class='card'>"
+        "<h3>Configuration</h3>"
+        "<div style='display:flex;gap:12px;align-items:center;flex-wrap:wrap'>"
+        "<label>Profile: <select id='sel-profile'>"
+        "<option value='lacrosse'>LaCrosse 868.3 MHz</option>"
+        "<option value='scan'>Scanner</option></select></label>"
+        "<label>Frequency: <input id='inp-freq' type='number' value='868300000' step='100000' style='width:140px'> Hz</label>"
+        "<button class='btn' onclick='applyConfig()'>Apply</button>"
+        "</div></div>"
+
+        /* Waterfall card */
+        "<div class='card'>"
+        "<h3>&#x1f30a; RSSI Waterfall (858-878 MHz)</h3>"
+        "<div style='display:flex;gap:8px;margin-bottom:8px'>"
+        "<button class='btn' id='btn-wf' onclick='toggleWF()'>Start Waterfall</button>"
+        "<span id='wf-status' style='color:var(--dim);line-height:36px'>Stopped</span>"
+        "</div>"
+        "<canvas id='wf-canvas' width='700' height='200'></canvas>"
+        "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--dim)'>"
+        "<span>858</span><span>862</span><span>866</span><span>868</span><span>870</span><span>874</span><span>878 MHz</span>"
+        "</div></div>"
+
+        /* Detected frequencies card */
+        "<div class='card'>"
+        "<h3>&#x1f4e1; Detected Signals</h3>"
+        "<p style='font-size:12px;color:var(--dim)'>Frequencies with signal above noise floor. Click Listen to tune and try decoding.</p>"
+        "<div id='freq-list'><p style='color:var(--dim)'>Start waterfall to detect signals</p></div>"
+        "</div>"
+
+        /* IoT devices card */
+        "<div class='card'>"
+        "<h3>&#x1f321; Detected IoT Devices</h3>"
+        "<div id='iot-list'><p style='color:var(--dim)'>No devices detected yet</p></div>"
+        "</div>"
+
+        "</div>"
+        "<script>"
+        "var wfRunning=false,wfCanvas,wfCtx,wfLine=0;"
+        "function load(){"
+        "  fetch('/api/cubecellgg').then(r=>r.json()).then(d=>{"
+        "    document.getElementById('cc-state').textContent=d.state;"
+        "    document.getElementById('cc-fw').textContent=d.fw_version||'-';"
+        "    document.getElementById('cc-tty').textContent=d.tty||'-';"
+        "    document.getElementById('cc-pkts').textContent=d.iot_packets;"
+        "    document.getElementById('cc-profile').textContent=d.profile||'-';"
+        "    document.getElementById('cc-freq').textContent=d.frequency?(d.frequency/1e6).toFixed(3)+' MHz':'-';"
+        "    document.getElementById('cc-state').style.color=d.state=='running'?'#2ecc71':'#e74c3c';"
+        "  }).catch(()=>{});"
+        "  fetch('/api/iot868').then(r=>r.json()).then(d=>{"
+        "    var h='';d.devices.forEach(function(dev){"
+        "      h+='<div style=\"padding:8px;border-bottom:1px solid #333\">';"
+        "      h+='<b>'+dev.protocol+'</b> ID='+dev.device_id;"
+        "      if(dev.temperature_c!=null) h+=' T='+dev.temperature_c.toFixed(1)+'&deg;C';"
+        "      if(dev.humidity_pct!=null&&dev.humidity_pct>=0) h+=' H='+dev.humidity_pct.toFixed(0)+'%';"
+        "      h+=' RSSI='+dev.rssi_db.toFixed(0)+'dBm';"
+        "      h+=' <span style=\"color:var(--dim);font-size:11px\">'+new Date(dev.last_seen_ms).toLocaleTimeString()+'</span>';"
+        "      h+='</div>';});"
+        "    if(h)document.getElementById('iot-list').innerHTML=h;"
+        "  }).catch(()=>{});"
+        "}"
+        "function applyConfig(){"
+        "  var p=document.getElementById('sel-profile').value;"
+        "  var f=parseInt(document.getElementById('inp-freq').value);"
+        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({profile:p,frequency:f})});"
+        "  setTimeout(load,500);"
+        "}"
+        "function toggleWF(){"
+        "  wfRunning=!wfRunning;"
+        "  var btn=document.getElementById('btn-wf');"
+        "  if(wfRunning){"
+        "    btn.textContent='Stop Waterfall';btn.classList.add('danger');"
+        "    document.getElementById('wf-status').textContent='Running...';"
+        "    fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({waterfall:'start'})});"
+        "    pollWF();"
+        "  }else{"
+        "    btn.textContent='Start Waterfall';btn.classList.remove('danger');"
+        "    document.getElementById('wf-status').textContent='Stopped';"
+        "    fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({waterfall:'stop'})});"
+        "  }"
+        "}"
+        "function pollWF(){"
+        "  if(!wfRunning)return;"
+        "  fetch('/api/cubecellgg/waterfall').then(r=>r.json()).then(d=>{"
+        "    if(d.d&&d.d.length>0){drawWFLine(d.d);updateDetected(d.d,d.s,d.t);}"
+        "  }).catch(()=>{});"
+        "  setTimeout(pollWF,300);"
+        "}"
+        "var detectedFreqs={};"
+        "var WF_THRESHOLD=-98;"
+        "var wfStart=858000000,wfStep=100000;"
+        "function updateDetected(data,s,t){"
+        "  if(s)wfStart=s;if(t)wfStep=t;"
+        "  for(var i=0;i<data.length;i++){"
+        "    if(data[i]>WF_THRESHOLD){"
+        "      var f=wfStart+i*wfStep;"
+        "      var key=Math.round(f/100000)*100000;"
+        "      if(!detectedFreqs[key]||data[i]>detectedFreqs[key].peak){"
+        "        detectedFreqs[key]={freq:key,peak:data[i],last:Date.now(),count:(detectedFreqs[key]?detectedFreqs[key].count:0)+1};"
+        "      }"
+        "    }"
+        "  }"
+        "  var now=Date.now();"
+        "  var list=Object.values(detectedFreqs).filter(f=>now-f.last<30000).sort((a,b)=>b.peak-a.peak);"
+        "  var el=document.getElementById('freq-list');"
+        "  if(!el)return;"
+        "  if(list.length==0){el.innerHTML='<p style=color:var(--dim)>No signals detected yet</p>';return;}"
+        "  var h='<table style=width:100%><tr><th>Frequency</th><th>Peak RSSI</th><th>Hits</th><th>Action</th></tr>';"
+        "  list.forEach(function(f){"
+        "    h+='<tr><td>'+(f.freq/1e6).toFixed(3)+' MHz</td>';"
+        "    h+='<td style=color:'+(f.peak>-90?'#2ecc71':f.peak>-100?'#f39c12':'#e74c3c')+'>'+f.peak+' dBm</td>';"
+        "    h+='<td>'+f.count+'</td>';"
+        "    h+='<td><button class=btn onclick=\"tuneToFreq('+f.freq+')\">&#x1f50d; Listen</button></td></tr>';});"
+        "  h+='</table>';el.innerHTML=h;"
+        "}"
+        "function tuneToFreq(freq){"
+        "  wfRunning=false;"
+        "  document.getElementById('btn-wf').textContent='Start Waterfall';"
+        "  document.getElementById('btn-wf').classList.remove('danger');"
+        "  document.getElementById('wf-status').textContent='Stopped - tuned to '+(freq/1e6).toFixed(3)+' MHz';"
+        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({waterfall:'stop',profile:'lacrosse',frequency:freq})});"
+        "  document.getElementById('inp-freq').value=freq;"
+        "  setTimeout(load,1000);"
+        "}"
+        "function drawWFLine(data){"
+        "  if(!wfCtx)return;"
+        "  var w=wfCanvas.width,h=wfCanvas.height;"
+        "  var img=wfCtx.getImageData(0,0,w,h-1);"
+        "  wfCtx.putImageData(img,0,1);"
+        "  var binW=w/data.length;"
+        "  for(var i=0;i<data.length;i++){"
+        "    var v=data[i];"
+        "    var n=(v+120)/50;"
+        "    if(n<0)n=0;if(n>1)n=1;"
+        "    var r=Math.floor(n*n*255),g=Math.floor(n*180),b=Math.floor((1-n)*255);"
+        "    if(n>0.6){r=255;g=200+Math.floor((n-0.6)*137);b=Math.floor((n-0.6)*2.5*255);}"
+        "    wfCtx.fillStyle='rgb('+r+','+g+','+b+')';"
+        "    wfCtx.fillRect(Math.floor(i*binW),0,Math.ceil(binW),1);"
+        "  }"
+        "}"
+        "function initWF(){"
+        "  wfCanvas=document.getElementById('wf-canvas');"
+        "  wfCtx=wfCanvas.getContext('2d');"
+        "  wfCanvas.width=700;wfCanvas.height=200;"
+        "  wfCtx.fillStyle='#000';wfCtx.fillRect(0,0,700,200);"
+        "}"
+        "load();setInterval(load,5000);initWF();"
+        "</script></body></html>";
+
+    http_send(fd, 200, "text/html", html, strlen(html));
+}
+
 static void serve_fanet_page(int32_t fd)
 {
     const char *html =
@@ -5299,6 +5596,7 @@ static void serve_fanet_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a class='active' href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -5563,6 +5861,7 @@ static void serve_devices_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -5585,6 +5884,19 @@ static void serve_devices_page(int32_t fd)
         "el.textContent=msg;el.className='status-msg '+(ok?'status-ok':'status-err');"
         "el.style.display='block';"
         "setTimeout(function(){el.style.display='';el.className='status-msg';},5000);"
+        "}"
+        ""
+        "function applyCubeCell(){"
+        "  var sel=document.getElementById('sel_cubecellgg');"
+        "  if(!sel)return;"
+        "  var profile=sel.value;"
+        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({profile:profile})}).then(function(){setTimeout(load,1000);});"
+        "}"
+        "function ccggRun(){"
+        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({cmd:'run'})}).then(function(){setTimeout(load,1000);});"
+        "}"
+        "function ccggStop(){"
+        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({cmd:'stop'})}).then(function(){setTimeout(load,1000);});"
         "}"
         ""
         "function assign(serial,role,gainEl,ppmEl){"
@@ -5842,6 +6154,49 @@ static void serve_devices_page(int32_t fd)
         "h+='<td>'+stateHtml+'</td>';"
         "h+='</tr>';"
         "});"
+        // CubeCell GG row — exact same structure as SDR rows
+        "if(d.cubecellgg && d.cubecellgg.state!='disconnected'){"
+        "var cc=d.cubecellgg;"
+        "var ccSt=cc.state=='running'?'<span class=state-running>RUNNING</span>':"
+        "cc.state=='stopped'?'<span style=color:#e74c3c>STOPPED</span>':"
+        "cc.state=='flashing'?'<span style=color:#f39c12>FLASHING</span>':'<span class=role-none>'+cc.state.toUpperCase()+'</span>';"
+        "var ccOpts='';"
+        "var ccSeen={};"
+        "if(cc.caps&&cc.caps.length){cc.caps.forEach(function(c){"
+        "  if(c.name=='scan'||c.name=='waterfall')return;"
+        "  if(ccSeen[c.name])return;ccSeen[c.name]=1;"
+        "  ccOpts+='<option value=\"'+c.name+'\"'+(cc.profile==c.name?' selected':'')+'>&#x1f4e1; '+c.desc+'</option>';});"
+        "}else{ccOpts='<option value=lacrosse>&#x1f4e1; IoT 868</option>';}"
+        // Rx column
+        "h+='<tr>';"
+        "h+='<td>&#x1f4e1;</td>';"
+        // Device column
+        "h+='<td>CubeCell GG<br><small style=color:#888>Heltec</small></td>';"
+        // Serial column
+        "h+='<td><code>'+(cc.tty||'-')+'</code></td>';"
+        // Tuner column
+        "h+='<td>SX1262<br><small class=freq>858-878 MHz</small></td>';"
+        // Library column
+        "h+='<td><span style=color:var(--dim)>fw '+cc.fw_version+'</span></td>';"
+        // Role dropdown column
+        "h+='<td><select id=sel_cubecellgg style=\"min-width:340px\">'+ccOpts+'</select></td>';"
+        // Gain column (disabled)
+        "h+='<td style=\"white-space:nowrap\"><select class=gain disabled style=opacity:0.3><option>—</option></select></td>';"
+        // PPM column (disabled)
+        "h+='<td style=\"white-space:nowrap\"><input type=number disabled value=0 style=\"width:60px;opacity:0.3\"></td>';"
+        // Action column — same buttons as SDR
+        "h+='<td style=\"white-space:nowrap\">';"
+        "h+='<button class=\"btn btn-apply\" onclick=\"applyCubeCell()\">&#x2714; Apply</button> ';"
+        "if(cc.state=='running'){"
+        "h+='<button class=\"btn btn-stop\" onclick=\"ccggStop()\">&#x23f9; Stop</button>';"
+        "}else{"
+        "h+='<button class=\"btn btn-run\" onclick=\"ccggRun()\">&#x25b6; Run</button>';"
+        "}"
+        "h+='</td>';"
+        // Status column
+        "h+='<td>'+ccSt+'</td>';"
+        "h+='</tr>';}"
+        ""
         "h+='</table>';"
         "}"
         ""
@@ -5863,11 +6218,14 @@ static void serve_devices_page(int32_t fd)
         "h+='<b>&#x1f321;&#xfe0f; IoT 868</b> &mdash; ISM OOK/FSK: Bresser, LaCrosse, Honeywell (868 MHz)<br>';"
         "h+='<b>&#x1f6a9; FANET</b> &mdash; LoRa CSS paraglider network, SF7 BW250k (868.2 MHz)<br>';"
         "h+='<b>&#x1f6f0;&#xfe0f; SARSAT</b> &mdash; COSPAS-SARSAT 406 MHz emergency beacon decoder<br>';"
+        "h+='<b>&#x1f4e1; CubeCell GG</b> &mdash; Dedicated SX1262 LoRa/FSK receiver (Heltec HTCC-AB01, USB serial, auto-flash)<br>';"
         "h+='</div>';"
+        ""
         ""
         // Active receivers section
         "if(rxData&&rxData.count>0){"
-        "h+='<h2>Active Multi-SDR Receivers ('+rxData.count+'/'+rxData.max+')</h2>';"
+        "var ccCount=(d.cubecellgg&&d.cubecellgg.state=='running')?1:0;"
+        "h+='<h2>Active Receivers ('+(rxData.count+ccCount)+'/'+(rxData.max+1)+')</h2>';"
         "h+='<div class=rx-grid>';"
         "rxData.receivers.forEach(function(r){"
         "var sc='state-'+r.state;"
@@ -5882,6 +6240,25 @@ static void serve_devices_page(int32_t fd)
         "if(r.tuner)h+='<tr><td>Tuner</td><td>'+r.tuner+' ('+r.freq_range+')</td></tr>';"
         "h+='</table></div>';"
         "});"
+        // CubeCell GG card in the receivers grid
+        "if(d.cubecellgg && d.cubecellgg.state=='running'){"
+        "var cc=d.cubecellgg;"
+        "h+='<div class=rx-section style=\"border-color:#0f3460\">';"
+        "h+='<div class=rx-title>&#x1f4e1; CubeCell GG &mdash; <span class=state-running>RUNNING</span></div>';"
+        "h+='<table style=\"width:auto\">';"
+        "h+='<tr><td>TTY</td><td><code>'+cc.tty+'</code></td></tr>';"
+        "h+='<tr><td>Role</td><td><span class=\"chip\" style=\"background:#0f3460\">'+cc.profile.toUpperCase()+'</span></td></tr>';"
+        "h+='<tr><td>Frequency</td><td>'+(cc.frequency/1e6).toFixed(3)+' MHz</td></tr>';"
+        "h+='<tr><td>Firmware</td><td>'+cc.fw_version+'</td></tr>';"
+        "h+='<tr><td>IoT Packets</td><td>'+cc.iot_packets+'</td></tr>';"
+        "h+='<tr><td>Hardware</td><td>Heltec HTCC-AB01</td></tr>';"
+        "h+='<tr><td>Radio</td><td>SX1262 (860-870 MHz)</td></tr>';"
+        "if(cc.caps&&cc.caps.length){"
+        "h+='<tr><td>Capabilities</td><td>';"
+        "cc.caps.forEach(function(c,i){if(i)h+=', ';h+=c.desc;});"
+        "h+='</td></tr>';}"
+        "h+='</table></div>';"
+        "}"
         "h+='</div>';"
         "}else{"
         "h+='<h2>Multi-SDR Receivers</h2><p style=color:#888>No receivers configured yet. Use the dropdowns above to assign roles.</p>';"
@@ -5956,6 +6333,7 @@ static void serve_diagnostics_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
+        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -6916,6 +7294,16 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             api_get_lte(fd);
         } else if (path_sv == "/api/iot868") {
             api_get_iot868(fd);
+        } else if (path_sv == "/api/cubecellgg/waterfall") {
+            char *line = ccggWaterfallGetLine();
+            if (line) {
+                http_send_json(fd, line, strlen(line));
+                free(line);
+            } else {
+                http_send_json(fd, "{}", 2);
+            }
+        } else if (path_sv == "/api/cubecellgg") {
+            api_get_cubecellgg(fd);
         } else if (path_sv == "/api/fanet") {
             api_get_fanet(fd);
         } else if (path_sv == "/api/graves") {
@@ -6942,6 +7330,8 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             serve_lte_page(fd);
         } else if (path_sv == "/iot868.html" || path_sv == "/iot868") {
             serve_iot868_page(fd);
+        } else if (path_sv == "/cubecellgg.html" || path_sv == "/cubecellgg") {
+            serve_cubecellgg_page(fd);
         } else if (path_sv == "/fanet.html" || path_sv == "/fanet") {
             serve_fanet_page(fd);
         } else if (path_sv == "/diagnostics.html" || path_sv == "/diagnostics") {
@@ -6988,6 +7378,14 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             if (body) {
                 body += 4;
                 api_post_receiver_toggle(fd, body);
+            } else {
+                http_send(fd, 400, "text/plain", "No body", 7);
+            }
+        } else if (path_sv == "/api/cubecellgg/config") {
+            const char *body = strstr(request, "\r\n\r\n");
+            if (body) {
+                body += 4;
+                api_post_cubecellgg_config(fd, body);
             } else {
                 http_send(fd, 400, "text/plain", "No body", 7);
             }

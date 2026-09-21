@@ -57,6 +57,8 @@
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
 #include "iot_tracker.h"
+#include "cubecellgg_manager.h"
+#include <cmath>
 #include "dispatcher.h"
 #include "airframes_feed.h"
 
@@ -1383,6 +1385,51 @@ int main(int argc, char **argv) {
     // Initialize IoT 868 MHz device tracker
     iotTrackerInit();
 
+    // Initialize cubecellgg IoT receiver (auto-detect, auto-flash, serial comm)
+    ccggInit(NULL);
+    ccggSetIoTCallback([](const ccgg_iot_msg_t *msg, void *) {
+        iot_device_msg_t iot = {};
+        if (strcmp(msg->proto, "lacrosse") == 0)
+            iot.protocol = IOT_PROTO_LACROSSE_TX;
+        else
+            iot.protocol = IOT_PROTO_FSK_GENERIC;
+        iot.modulation = IOT_MOD_FSK;
+        iot.device_id = msg->sensor_id;
+        iot.temperature_c = msg->temperature;
+        iot.humidity_pct = (msg->humidity >= 0 && msg->humidity <= 100) ? (float)msg->humidity : NAN;
+        iot.battery_ok = msg->battery_low ? 0 : 1;
+        iot.rssi_db = (float)msg->rssi;
+        iot.freq_hz = 868300000.0;
+        iot.timestamp_ms = msg->timestamp_ms;
+        iot.pressure_hpa = NAN;
+        iot.wind_speed_ms = NAN;
+        iot.wind_dir_deg = NAN;
+        iot.rain_mm = NAN;
+        iot.power_w = NAN;
+        iot.energy_kwh = NAN;
+        iot.battery_v = NAN;
+        iotTrackerUpdate(&iot);
+
+        char extra[128] = {0};
+        int32_t pos = 0;
+        if (!isnan(iot.temperature_c))
+            pos += snprintf(extra + pos, sizeof(extra) - pos, " %.1f°C", (double)iot.temperature_c);
+        if (!isnan(iot.humidity_pct))
+            pos += snprintf(extra + pos, sizeof(extra) - pos, " %.0f%%RH", (double)iot.humidity_pct);
+        if (iot.battery_ok == 0)
+            pos += snprintf(extra + pos, sizeof(extra) - pos, " bat=LOW");
+
+        char rssi_str[32] = "";
+        if (!isnan(iot.rssi_db))
+            snprintf(rssi_str, sizeof(rssi_str), " RSSI=%.0fdB", (double)iot.rssi_db);
+
+        panelLogMessage("[CubeCell] %s id=%u %s%s%s",
+                iotProtocolName(iot.protocol),
+                iot.device_id,
+                iotModulationName(iot.modulation),
+                rssi_str, extra);
+    }, NULL);
+
     // signal handlers:
     signal(SIGINT, sigintHandler);
     signal(SIGTERM, sigtermHandler);
@@ -2419,6 +2466,7 @@ int main(int argc, char **argv) {
         display_stats(&Modes.stats_alltime);
     }
 
+    ccggShutdown();
     sdrManagerShutdown();
     fifo_destroy();
 

@@ -166,7 +166,6 @@ bool adsl_decode_packet(const uint8_t *data24,
 
     uint8_t type = pkt[0];
     if (type != 0x02) {
-        gg::eprint("ADSL-DBG decode: type=0x%02X (expected 0x02)\n", type);
         return false;
     }
 
@@ -177,7 +176,6 @@ bool adsl_decode_packet(const uint8_t *data24,
 
     // Address sanity
     if (addr == 0x000000 || addr == 0xFFFFFF) {
-        gg::eprint("ADSL-DBG decode: invalid addr=0x%06X\n", addr);
         return false;
     }
     // Reject repeating-byte addresses
@@ -250,32 +248,21 @@ bool adsl_decode_packet(const uint8_t *data24,
     if (course >= 360.0f) course -= 360.0f;
 
     // ---- Sanity checks ----
-    if (latitude < -90.0 || latitude > 90.0) {
-        gg::eprint("ADSL-DBG decode: bad lat=%.4f addr=0x%06X\n", latitude, addr);
+    if (latitude < -90.0 || latitude > 90.0)
         return false;
-    }
-    if (longitude < -180.0 || longitude > 180.0) {
-        gg::eprint("ADSL-DBG decode: bad lon=%.4f addr=0x%06X\n", longitude, addr);
+    if (longitude < -180.0 || longitude > 180.0)
         return false;
-    }
-    if (altitude < -500 || altitude > 20000) {
-        gg::eprint("ADSL-DBG decode: bad alt=%d addr=0x%06X\n", altitude, addr);
+    if (altitude < -500 || altitude > 20000)
         return false;
-    }
-    if (speed < 0.0f || speed > 200.0f) {
-        gg::eprint("ADSL-DBG decode: bad speed=%.1f addr=0x%06X\n", speed, addr);
+    if (speed < 0.0f || speed > 200.0f)
         return false;
-    }
 
     // Distance check: max ~3° from receiver
     {
         double dlat = latitude - ref_lat;
         double dlon = longitude - ref_lon;
-        if (sqrt(dlat * dlat + dlon * dlon) > 3.0) {
-            fprintf(stderr, "ADSL-DBG decode: too far addr=0x%06X lat=%.4f lon=%.4f (ref=%.4f,%.4f)\n",
-                    addr, latitude, longitude, ref_lat, ref_lon);
+        if (sqrt(dlat * dlat + dlon * dlon) > 3.0)
             return false;
-        }
     }
 
     // ---- Fill output ----

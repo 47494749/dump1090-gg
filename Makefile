@@ -375,6 +375,7 @@ DUMP1090_OBJS := \
 	$(OBJDIR)/config_panel.o \
 	$(OBJDIR)/decoder_config.o \
 	$(OBJDIR)/sdr_receiver.o \
+	$(OBJDIR)/cubecellgg_manager.o \
 	$(OBJDIR)/dispatcher.o \
 	$(OBJDIR)/msg_queue.o
 

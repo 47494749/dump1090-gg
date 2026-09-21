@@ -10,6 +10,57 @@ actually present here.
 
 ---
 
+### v1.0.10 (2026-09-21)
+
+**CubeCell GG IoT receiver integration (new):**
+- New CubeCell GG manager (`cubecellgg_manager.cpp/.h`): auto-detect Heltec
+  HTCC-AB01 (SX1262) via USB serial, auto-flash firmware, serial communication
+  protocol for IoT 868 MHz reception
+- Dedicated panel page (`/cubecellgg.html`) with device status, configuration,
+  RSSI waterfall (858-878 MHz), signal detection, and IoT device listing
+- API endpoints: `/api/cubecellgg` (status), `/api/cubecellgg/config` (POST
+  profile/frequency/waterfall control), `/api/cubecellgg/waterfall` (RSSI data)
+- CubeCell appears in Devices page alongside SDR receivers with same controls
+  (role dropdown, run/stop buttons, status card)
+- IoT packets from CubeCell routed through `iotTrackerUpdate()` with panel log
+  messages prefixed `[CubeCell]`
+- Waterfall page: CubeCell selectable as spectrum source with RSSI display
+
+**IoT 868 FSK decoder rewrite (LaCrosse):**
+- Replaced bit-slicer-based LaCrosse decoder with correlator-based FM
+  discriminator decoder (`decode_lacrosse_fm`): direct sync word correlation
+  on FM output with sub-sample clock calibration and zero-crossing recovery
+- Dual-polarity correlator: automatically handles inverted FM signal from
+  frequency offset variations
+- Two LaCrosse bit rates: TX29 (110 samp/bit) and TX35 (210 samp/bit)
+- Added BCD digit validation and physical plausibility checks on CRC-passing
+  frames to reject false positives (~0.4% CRC collision rate)
+- FSK demodulator refactored: single FM discriminator pass shared across all
+  bit rates, persistent per-rate ring buffers with DC tracking, ring overflow
+  management
+
+**IoT 868 FSK decoder: Fine Offset and Bresser (new):**
+- Fine Offset WH1080/WH3080 FSK decoder (868.3 MHz, 17.2 kbps, sync 0xAA2DD4)
+- Bresser 6-in-1 FSK decoder (8.1 kbps, 124µs/bit)
+
+**libsdrgg backend simplification:**
+- Removed adapter ring buffer (`sdrgg_ring` double-ring): with libsdrgg v1.4.0
+  ring buffer engine, the consumer thread calls the backend callback directly
+- Eliminated ~150 lines of ring-buffer adapter code
+
+**Debug print cleanup:**
+- Removed all debug fprintf/eprint from FLARM demodulator (CRC fail dump,
+  ADS-L manchester/CRC/peak diagnostics)
+- Removed all debug eprint from ADS-L decode (type check, address check,
+  coordinate/speed/altitude bounds, distance check)
+- Removed IQ stuck check from sdr_receiver.cpp (moved to libsdrgg health)
+
+**Navigation bar update:**
+- CubeCell link added to all panel pages (waterfall, GSM, LTE, IoT, FANET,
+  devices, diagnostics)
+
+---
+
 ### v1.0.9 (2026-09-06)
 
 **Multi-decoder stats & charts:**

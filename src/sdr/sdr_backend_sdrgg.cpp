@@ -151,60 +151,34 @@ static sdrgg_ctx_t *get_ctx(void)
     return g_sdrgg_ctx;
 }
 
-// ======================== Ring buffer for async data delivery ========================
-// The sdrgg event_loop_thread calls our callback synchronously.
-// We must return quickly to avoid blocking URB processing for other devices.
-// Data is copied to a ring buffer and consumed by the reader thread.
-
-#define SDRGG_RING_SLOTS 8
-#define SDRGG_RING_BUFSIZE 262144
-
-struct ring_slot {
-    uint8_t data[SDRGG_RING_BUFSIZE];
-    uint32_t len;
-    volatile int32_t ready;  // 0=free, 1=filled
-};
-
-struct sdrgg_ring {
-    struct ring_slot slots[SDRGG_RING_SLOTS];
-    volatile int32_t write_idx;
-    volatile int32_t read_idx;
-};
-
 // ======================== Streaming adapter ========================
+// With the new libsdrgg ring-buffer engine (v1.3.1+), data flows:
+//   USB → libsdrgg reader thread → ring buffer → consumer thread → our callback
+// The old double-ring (sdrgg → adapter ring → consumer loop) is eliminated.
+// The consumer thread in libsdrgg calls our callback directly, so we just
+// need a thin adapter to bridge the sdrgg callback signature to the dump1090
+// sdr_async_cb_t signature.
 
 struct stream_adapter {
-    sdr_async_cb_t user_cb;
-    void          *user_ctx;
-    volatile int32_t   stopping;
-    struct sdrgg_ring *ring;
-    volatile uint32_t cb_count;      // debug: sdrgg callback invocations
-    volatile uint32_t ring_full;     // debug: ring full drops
-    volatile uint32_t deliver_count; // debug: deliveries to user callback
-    int32_t               adapter_id;   // debug: adapter identifier
+    sdr_async_cb_t    user_cb;
+    void             *user_ctx;
+    sdr_device_t     *sdr_dev;
+    volatile int32_t  stopping;
+    int32_t           adapter_id;
+    int32_t           sub_handle;    // libsdrgg subscriber handle (-1 if none)
+    volatile uint32_t deliver_count;
 };
 
-// Called from libsdrgg event_loop_thread — must return quickly!
+// Called from libsdrgg consumer thread — runs in its own thread context,
+// so heavy processing (demod, decode) is fine here.
 static void sdrgg_stream_callback(sdrgg_dev_t * /*dev*/, const sdrgg_buffer_t *buf, void *user_ctx)
 {
     auto *adapter = static_cast<stream_adapter *>(user_ctx);
     if (!adapter || adapter->stopping || !buf || !buf->data || buf->length == 0)
         return;
 
-    adapter->cb_count++;
-
-    struct sdrgg_ring *ring = adapter->ring;
-    if (!ring) return;
-
-    // Push to ring buffer (fast memcpy, no heavy processing here)
-    int32_t idx = ring->write_idx;
-    struct ring_slot *slot = &ring->slots[idx];
-    if (slot->ready) { adapter->ring_full++; return; }  // ring full — drop this buffer
-    uint32_t copy_len = buf->length < SDRGG_RING_BUFSIZE ? buf->length : SDRGG_RING_BUFSIZE;
-    memcpy(slot->data, buf->data, copy_len);
-    slot->len = copy_len;
-    __atomic_store_n(&slot->ready, 1, __ATOMIC_RELEASE);
-    ring->write_idx = (idx + 1) % SDRGG_RING_SLOTS;
+    adapter->deliver_count++;
+    adapter->user_cb(buf->data, buf->length, adapter->user_ctx);
 }
 
 // ======================== Backend operations ========================
@@ -456,19 +430,13 @@ static void gg_close(sdr_device_t *dev)
         if (adapter) adapter->stopping = 1;
         dev->async_running = 0;
 
-        // Let in-flight callbacks drain before closing
-        struct timespec settle = { .tv_sec = 0, .tv_nsec = 200000000 }; // 200ms
-        nanosleep(&settle, nullptr);
-
         pthread_mutex_lock(&g_stream_mutex);
         sdr::close(static_cast<sdrgg_dev_t *>(dev->handle));
         pthread_mutex_unlock(&g_stream_mutex);
         dev->handle = nullptr;
     }
-    // Free adapter + ring after close ensures no more callbacks
     if (dev && dev->ctx) {
         auto *adapter = static_cast<stream_adapter *>(dev->ctx);
-        delete adapter->ring;
         delete adapter;
         dev->ctx = nullptr;
     }
@@ -622,30 +590,26 @@ static int32_t gg_get_tuner_type(sdr_device_t *dev)
 static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
                          uint32_t buf_count, uint32_t buf_size)
 {
-    // Allocate ring buffer (large — ~2MB per device)
-    auto *ring = new (std::nothrow) sdrgg_ring{};
-    if (!ring) return -1;
-
-    // Allocate stream adapter
-    auto *adapter = new (std::nothrow) stream_adapter;
-    if (!adapter) { delete ring; return -1; }
+    auto *adapter = new (std::nothrow) stream_adapter{};
+    if (!adapter) return -1;
     adapter->user_cb = cb;
     adapter->user_ctx = ctx;
+    adapter->sdr_dev = dev;
     adapter->stopping = 0;
     static int32_t next_adapter_id = 0;
-    adapter->cb_count = 0;
-    adapter->ring_full = 0;
-    adapter->deliver_count = 0;
     adapter->adapter_id = next_adapter_id++;
-    adapter->ring = ring;
+    adapter->sub_handle = -1;
+    adapter->deliver_count = 0;
     dev->ctx = adapter;
-
-    gg::eprint("sdrgg-diag: adapter[%d] created ring=%p\n", adapter->adapter_id, (void*)ring);
 
     sdrgg_stream_cfg_t cfg = {};
     cfg.buf_count = buf_count ? buf_count : 4;
-    cfg.buf_size = buf_size ? buf_size : SDRGG_RING_BUFSIZE;
+    cfg.buf_size = buf_size ? buf_size : 262144;
 
+    /* start_stream initializes the ring buffer, starts the reader thread,
+     * and subscribes our callback as consumer[0]. The consumer thread in
+     * libsdrgg calls sdrgg_stream_callback directly — no intermediate
+     * ring buffer needed on our side. */
     pthread_mutex_lock(&g_stream_mutex);
     int32_t rc = sdr::start_stream(static_cast<sdrgg_dev_t *>(dev->handle),
                                    &cfg, sdrgg_stream_callback, adapter);
@@ -653,96 +617,37 @@ static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     if (rc != SDRGG_OK) {
         gg::eprint("sdrgg-diag: adapter[%d] start_stream FAILED rc=%d\n", adapter->adapter_id, rc);
         dev->ctx = nullptr;
-        delete ring;
         delete adapter;
         return rc;
     }
     dev->async_running = 1;
-    gg::eprint("sdrgg-diag: adapter[%d] streaming started, entering consumer loop\n", adapter->adapter_id);
+    gg::eprint("sdrgg-diag: adapter[%d] streaming started (ring-engine)\n", adapter->adapter_id);
 
-    // Consume ring buffer data (reader thread context)
-    // Poll the ring and deliver data to the user callback.
-    //
-    // Adaptive CPU throttle: after processing each ring slot, sleep for a
-    // fraction of the processing time so the thread never exceeds ~80% of
-    // one core.  The formula is:
-    //
-    //     sleep = processing_time * IDLE_RATIO / (1 - IDLE_RATIO)
-    //
-    // With IDLE_RATIO = 0.20 and processing = 60 ms, sleep = 15 ms.
-    // This is self-adaptive: heavier decoders (FLARM 1.6 MHz) sleep more,
-    // lighter decoders (GRAVES 500 kHz) sleep less.  For ADSB the callback
-    // is very fast (<1 ms per slot) so the sleep is negligible.
-    //
-    // Ring overflow protection: if the ring is more than half full (4+ of 8
-    // slots ready), skip the throttle sleep to drain the backlog.
-    //
-    const float IDLE_RATIO = 0.20f;  // target: max 80% CPU per sdrgg thread
-    struct timespec ts_poll = { .tv_sec = 0, .tv_nsec = 1000000 };  // 1 ms (no data)
-    uint32_t poll_empty = 0;
-    while (dev->handle && dev->async_running) {
-        int32_t idx = ring->read_idx;
-        struct ring_slot *slot = &ring->slots[idx];
-        if (__atomic_load_n(&slot->ready, __ATOMIC_ACQUIRE)) {
-            // Measure processing time
-            struct timespec t0, t1;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
-
-            // Deliver data to user callback
-            if (adapter->user_cb && !adapter->stopping) {
-                adapter->user_cb(slot->data, slot->len, adapter->user_ctx);
-                adapter->deliver_count++;
-            }
-            slot->ready = 0;
-            ring->read_idx = (idx + 1) % SDRGG_RING_SLOTS;
-            poll_empty = 0;
-
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            int64_t elapsed_ns = (int64_t)(t1.tv_sec - t0.tv_sec) * 1000000000LL
-                                + (t1.tv_nsec - t0.tv_nsec);
-
-            // Adaptive CPU throttle: after every slot, sleep for a fraction
-            // of the processing time.  This limits each sdrgg reader thread
-            // to ~80% of one core regardless of decoder weight.
-            // The ring buffer (8 slots) absorbs the brief pauses — no data
-            // is lost because the sdrgg internal thread keeps filling slots
-            // while we sleep.
-            if (elapsed_ns > 500000) {  // only throttle if callback took >0.5ms
-                int64_t sleep_ns = (int64_t)((double)elapsed_ns * IDLE_RATIO / (1.0 - IDLE_RATIO));
-                if (sleep_ns > 50000000) sleep_ns = 50000000;  // cap at 50ms
-                struct timespec ts_throttle = {
-                    .tv_sec = 0,
-                    .tv_nsec = (long)sleep_ns
-                };
-                nanosleep(&ts_throttle, nullptr);
-            }
-        } else {
-            nanosleep(&ts_poll, nullptr);
-            poll_empty++;
-            // Log every 10s of no data
-            if (poll_empty == 10000) {
-                fprintf(stderr, "sdrgg-diag: adapter[%d] NO DATA for 10s! cb_count=%u ring_full=%u deliver=%u\n",
-                        adapter->adapter_id, adapter->cb_count, adapter->ring_full, adapter->deliver_count);
-            }
+    /* Block this thread until async_running is cleared (by gg_cancel_async
+     * or gg_close). The actual data delivery happens in libsdrgg's consumer
+     * thread which calls sdrgg_stream_callback → adapter->user_cb.
+     * This matches the contract of read_async: it blocks the caller's
+     * reader thread and returns only when streaming is cancelled. */
+    struct timespec ts_wait = { .tv_sec = 0, .tv_nsec = 50000000 }; // 50ms
+    while (dev->handle && dev->async_running && !adapter->stopping) {
+        if (!sdr::is_alive(static_cast<sdrgg_dev_t *>(dev->handle))) {
+            gg::eprint("sdrgg-diag: adapter[%d] device disconnected, exiting read_async\n",
+                       adapter->adapter_id);
+            break;
         }
+        nanosleep(&ts_wait, nullptr);
     }
 
-    fprintf(stderr, "sdrgg-diag: adapter[%d] consumer loop exited — cb=%u ring_full=%u deliver=%u handle=%p async=%d\n",
-            adapter->adapter_id, adapter->cb_count, adapter->ring_full, adapter->deliver_count,
-            (void*)dev->handle, dev->async_running);
+    gg::eprint("sdrgg-diag: adapter[%d] exiting — deliver=%u\n",
+            adapter->adapter_id, adapter->deliver_count);
     adapter->stopping = 1;
 
-    // Stop the stream so callback is unregistered (allows future start_stream)
     pthread_mutex_lock(&g_stream_mutex);
     sdr::stop_stream(static_cast<sdrgg_dev_t *>(dev->handle));
     pthread_mutex_unlock(&g_stream_mutex);
 
-    // Free ring and adapter
-    delete adapter->ring;
-    adapter->ring = nullptr;
     delete adapter;
     dev->ctx = nullptr;
-
     dev->async_running = 0;
     return 0;
 }

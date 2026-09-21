@@ -2,7 +2,7 @@
 
 **dump1090-gg-light** is an all-in-one ADS-B / Mode S / FLARM / OGNTP / ADS-L /
 P3I / FANET+ / ACARS / VDL2 / Radiosonde / CPDLC / COSPAS-SARSAT / GSM / LTE /
-POCSAG / IoT 868 MHz receiver and multi-feed relay for Linux.
+POCSAG / IoT 868 MHz / CubeCell GG receiver and multi-feed relay for Linux.
 It is a fork of [dump1090-fa](https://github.com/flightaware/dump1090) by FlightAware,
 extended with native threaded feeder clients, a multi-SDR receiver architecture
 with pluggable backends (librtlsdr and libsdrgg), a C++17 message dispatcher,
