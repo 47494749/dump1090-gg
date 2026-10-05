@@ -1496,55 +1496,114 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm)
         a->sda = mm->accuracy.sda;
     }
 
-    if (mm->mrar_source_valid && accept_data(&a->mrar_source_valid, mm->source)) {
-        a->mrar_source = mm->mrar_source;
+    // Phase 2: Contextual validation of MRAR/MHAR against known aircraft state.
+    // If we know the aircraft's baro altitude, check temperature and pressure
+    // against the ISA model. Reject values that are physically impossible.
+    {
+        int mrar_altitude_known = trackDataValid(&a->altitude_baro_valid);
+        float alt_ft = (float)a->altitude_baro;
+        float isa_temp = -999;
+        float isa_pressure = -999;
+
+        if (mrar_altitude_known) {
+            isa_temp = (alt_ft <= 36089.0f)
+                ? 15.0f - 0.001981f * alt_ft
+                : -56.5f;
+            isa_pressure = 1013.25f * powf(1.0f - alt_ft / 145442.16f, 5.2558f);
+        }
+
+        int mrar_rejected = 0;
+
+        if (mm->temperature_valid && mrar_altitude_known) {
+            float deviation = fabsf(mm->temperature - isa_temp);
+            if (deviation > 40.0f)
+                mrar_rejected = 1;
+        }
+
+        if (mm->pressure_valid && mrar_altitude_known) {
+            float deviation = fabsf(mm->pressure - isa_pressure);
+            float tolerance = isa_pressure * 0.15f;
+            if (tolerance < 30.0f) tolerance = 30.0f;
+            if (deviation > tolerance)
+                mrar_rejected = 1;
+        }
+
+        if (!mrar_rejected) {
+            if (mm->mrar_source_valid && accept_data(&a->mrar_source_valid, mm->source)) {
+                a->mrar_source = mm->mrar_source;
+            }
+
+            if (mm->wind_valid && accept_data(&a->wind_valid, mm->source)) {
+                a->wind_speed = mm->wind_speed;
+                a->wind_dir = mm->wind_dir;
+            }
+
+            if (mm->temperature_valid && accept_data(&a->temperature_valid, mm->source)) {
+                a->temperature = mm->temperature;
+            }
+
+            if (mm->pressure_valid && accept_data(&a->pressure_valid, mm->source)) {
+                a->pressure = mm->pressure;
+            }
+
+            if (mm->turbulence_valid && accept_data(&a->turbulence_valid, mm->source)) {
+                a->turbulence = mm->turbulence;
+            }
+
+            if (mm->humidity_valid && accept_data(&a->humidity_valid, mm->source)) {
+                a->humidity = mm->humidity;
+            }
+        }
     }
 
-    if (mm->wind_valid && accept_data(&a->wind_valid, mm->source)) {
-        a->wind_speed = mm->wind_speed;
-        a->wind_dir = mm->wind_dir;
-    }
+    // MHAR (BDS 4,5) — same contextual validation for temperature/pressure
+    {
+        int mhar_altitude_known = trackDataValid(&a->altitude_baro_valid);
+        float alt_ft = (float)a->altitude_baro;
+        int mhar_rejected = 0;
 
-    if (mm->temperature_valid && accept_data(&a->temperature_valid, mm->source)) {
-        a->temperature = mm->temperature;
-    }
+        if (mm->mhar_sat_valid && mhar_altitude_known) {
+            float isa_temp = (alt_ft <= 36089.0f)
+                ? 15.0f - 0.001981f * alt_ft
+                : -56.5f;
+            if (fabsf(mm->mhar_sat - isa_temp) > 40.0f)
+                mhar_rejected = 1;
+        }
 
-    if (mm->pressure_valid && accept_data(&a->pressure_valid, mm->source)) {
-        a->pressure = mm->pressure;
-    }
+        if (mm->mhar_asp_valid && mhar_altitude_known) {
+            float isa_pressure = 1013.25f * powf(1.0f - alt_ft / 145442.16f, 5.2558f);
+            float tolerance = isa_pressure * 0.15f;
+            if (tolerance < 30.0f) tolerance = 30.0f;
+            if (fabsf(mm->mhar_asp - isa_pressure) > tolerance)
+                mhar_rejected = 1;
+        }
 
-    if (mm->turbulence_valid && accept_data(&a->turbulence_valid, mm->source)) {
-        a->turbulence = mm->turbulence;
-    }
-
-    if (mm->humidity_valid && accept_data(&a->humidity_valid, mm->source)) {
-        a->humidity = mm->humidity;
-    }
-
-    // MHAR (BDS 4,5)
-    if (mm->mhar_turbulence_valid && accept_data(&a->mhar_turbulence_valid, mm->source)) {
-        a->mhar_turbulence = mm->mhar_turbulence;
-    }
-    if (mm->mhar_windshear_valid && accept_data(&a->mhar_windshear_valid, mm->source)) {
-        a->mhar_windshear = mm->mhar_windshear;
-    }
-    if (mm->mhar_microburst_valid && accept_data(&a->mhar_microburst_valid, mm->source)) {
-        a->mhar_microburst = mm->mhar_microburst;
-    }
-    if (mm->mhar_icing_valid && accept_data(&a->mhar_icing_valid, mm->source)) {
-        a->mhar_icing = mm->mhar_icing;
-    }
-    if (mm->mhar_wake_valid && accept_data(&a->mhar_wake_valid, mm->source)) {
-        a->mhar_wake = mm->mhar_wake;
-    }
-    if (mm->mhar_sat_valid && accept_data(&a->mhar_sat_valid, mm->source)) {
-        a->mhar_sat = mm->mhar_sat;
-    }
-    if (mm->mhar_asp_valid && accept_data(&a->mhar_asp_valid, mm->source)) {
-        a->mhar_asp = mm->mhar_asp;
-    }
-    if (mm->mhar_rh_valid && accept_data(&a->mhar_rh_valid, mm->source)) {
-        a->mhar_rh = mm->mhar_rh;
+        if (!mhar_rejected) {
+            if (mm->mhar_turbulence_valid && accept_data(&a->mhar_turbulence_valid, mm->source)) {
+                a->mhar_turbulence = mm->mhar_turbulence;
+            }
+            if (mm->mhar_windshear_valid && accept_data(&a->mhar_windshear_valid, mm->source)) {
+                a->mhar_windshear = mm->mhar_windshear;
+            }
+            if (mm->mhar_microburst_valid && accept_data(&a->mhar_microburst_valid, mm->source)) {
+                a->mhar_microburst = mm->mhar_microburst;
+            }
+            if (mm->mhar_icing_valid && accept_data(&a->mhar_icing_valid, mm->source)) {
+                a->mhar_icing = mm->mhar_icing;
+            }
+            if (mm->mhar_wake_valid && accept_data(&a->mhar_wake_valid, mm->source)) {
+                a->mhar_wake = mm->mhar_wake;
+            }
+            if (mm->mhar_sat_valid && accept_data(&a->mhar_sat_valid, mm->source)) {
+                a->mhar_sat = mm->mhar_sat;
+            }
+            if (mm->mhar_asp_valid && accept_data(&a->mhar_asp_valid, mm->source)) {
+                a->mhar_asp = mm->mhar_asp;
+            }
+            if (mm->mhar_rh_valid && accept_data(&a->mhar_rh_valid, mm->source)) {
+                a->mhar_rh = mm->mhar_rh;
+            }
+        }
     }
 
     // Waypoints (BDS 4,1 / 4,2 / 4,3)

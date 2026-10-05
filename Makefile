@@ -1,6 +1,6 @@
 PROGNAME=dump1090
 
-DUMP1090_VERSION ?= 1.0.10
+DUMP1090_VERSION ?= 1.0.11
 DUMP1090_DIAGNOSTICS ?= no
 
 # ======================== Directory layout ========================
@@ -369,6 +369,7 @@ DUMP1090_OBJS := \
 	$(OBJDIR)/lte_tracker.o \
 	$(OBJDIR)/iot_decode.o \
 	$(OBJDIR)/iot_tracker.o \
+	$(OBJDIR)/iot_history.o \
 	$(OBJDIR)/fanet_decode.o \
 	$(OBJDIR)/sarsat_decode.o \
 	$(OBJDIR)/graves_decode.o \

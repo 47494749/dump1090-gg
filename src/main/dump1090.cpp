@@ -57,6 +57,7 @@
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
 #include "iot_tracker.h"
+#include "iot_history.h"
 #include "cubecellgg_manager.h"
 #include <cmath>
 #include "dispatcher.h"
@@ -1384,6 +1385,7 @@ int main(int argc, char **argv) {
 
     // Initialize IoT 868 MHz device tracker
     iotTrackerInit();
+    iotHistoryInit();
 
     // Initialize cubecellgg IoT receiver (auto-detect, auto-flash, serial comm)
     ccggInit(NULL);
@@ -1391,6 +1393,10 @@ int main(int argc, char **argv) {
         iot_device_msg_t iot = {};
         if (strcmp(msg->proto, "lacrosse") == 0)
             iot.protocol = IOT_PROTO_LACROSSE_TX;
+        else if (strcmp(msg->proto, "honeywell") == 0)
+            iot.protocol = IOT_PROTO_HONEYWELL_CM;
+        else if (strcmp(msg->proto, "fineoffset") == 0)
+            iot.protocol = IOT_PROTO_FINE_OFFSET_WH;
         else
             iot.protocol = IOT_PROTO_FSK_GENERIC;
         iot.modulation = IOT_MOD_FSK;
@@ -1402,32 +1408,38 @@ int main(int argc, char **argv) {
         iot.freq_hz = 868300000.0;
         iot.timestamp_ms = msg->timestamp_ms;
         iot.pressure_hpa = NAN;
-        iot.wind_speed_ms = NAN;
-        iot.wind_dir_deg = NAN;
-        iot.rain_mm = NAN;
+        iot.wind_speed_ms = (msg->wind_speed >= 0) ? msg->wind_speed : NAN;
+        iot.wind_dir_deg = (msg->wind_dir >= 0) ? (float)msg->wind_dir : NAN;
+        iot.rain_mm = (msg->rain >= 0) ? msg->rain : NAN;
         iot.power_w = NAN;
         iot.energy_kwh = NAN;
         iot.battery_v = NAN;
         iotTrackerUpdate(&iot);
 
-        char extra[128] = {0};
-        int32_t pos = 0;
-        if (!isnan(iot.temperature_c))
-            pos += snprintf(extra + pos, sizeof(extra) - pos, " %.1f°C", (double)iot.temperature_c);
-        if (!isnan(iot.humidity_pct))
-            pos += snprintf(extra + pos, sizeof(extra) - pos, " %.0f%%RH", (double)iot.humidity_pct);
-        if (iot.battery_ok == 0)
-            pos += snprintf(extra + pos, sizeof(extra) - pos, " bat=LOW");
-
-        char rssi_str[32] = "";
-        if (!isnan(iot.rssi_db))
-            snprintf(rssi_str, sizeof(rssi_str), " RSSI=%.0fdB", (double)iot.rssi_db);
-
-        panelLogMessage("[CubeCell] %s id=%u %s%s%s",
-                iotProtocolName(iot.protocol),
-                iot.device_id,
-                iotModulationName(iot.modulation),
-                rssi_str, extra);
+        if (iot.protocol == IOT_PROTO_LACROSSE_TX) {
+            iotHistoryRecord((uint16_t)msg->sensor_id, msg->temperature,
+                             iot.humidity_pct, (float)msg->rssi,
+                             iot.battery_ok, 1);
+        } else if (iot.protocol == IOT_PROTO_HONEYWELL_CM) {
+            char extra[64] = "";
+            if (!isnan(iot.temperature_c))
+                snprintf(extra, sizeof(extra), " %.1f°C", (double)iot.temperature_c);
+            panelLogMessage("[CubeCell] Honeywell CM9xx id=%06X cmd=%u RSSI=%ddB%s",
+                    iot.device_id, msg->channel, msg->rssi, extra);
+        } else if (iot.protocol == IOT_PROTO_FINE_OFFSET_WH) {
+            char extra[128] = "";
+            int p = 0;
+            if (!isnan(iot.temperature_c))
+                p += snprintf(extra + p, sizeof(extra) - p, " %.1f°C", (double)iot.temperature_c);
+            if (!isnan(iot.humidity_pct))
+                p += snprintf(extra + p, sizeof(extra) - p, " %.0f%%RH", (double)iot.humidity_pct);
+            if (!isnan(iot.wind_speed_ms))
+                p += snprintf(extra + p, sizeof(extra) - p, " wind=%.1fm/s", (double)iot.wind_speed_ms);
+            if (!isnan(iot.rain_mm))
+                p += snprintf(extra + p, sizeof(extra) - p, " rain=%.1fmm", (double)iot.rain_mm);
+            panelLogMessage("[CubeCell] Fine Offset WH id=%u RSSI=%ddB%s",
+                    iot.device_id, msg->rssi, extra);
+        }
     }, NULL);
 
     // signal handlers:
@@ -2467,6 +2479,7 @@ int main(int argc, char **argv) {
     }
 
     ccggShutdown();
+    iotHistoryShutdown();
     sdrManagerShutdown();
     fifo_destroy();
 

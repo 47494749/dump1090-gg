@@ -438,12 +438,20 @@ static void parse_serial_line(const char *line) {
             const char *e = strchr(p, '"');
             if (e) { int len = e - p; if (len > 31) len = 31; memcpy(msg.proto, p, len); }
         }
+        msg.humidity = -1;
+        msg.wind_speed = -1;
+        msg.wind_dir = -1;
+        msg.rain = -1;
         if ((p = strstr(line, "\"id\":"))) msg.sensor_id = atoi(p + 5);
         if ((p = strstr(line, "\"temp\":"))) msg.temperature = atof(p + 7);
-        if ((p = strstr(line, "\"hum\":"))) msg.humidity = atoi(p + 6); else msg.humidity = -1;
+        if ((p = strstr(line, "\"hum\":"))) msg.humidity = atoi(p + 6);
         if ((p = strstr(line, "\"rssi\":"))) msg.rssi = atoi(p + 7);
         if ((p = strstr(line, "\"batt\":"))) msg.battery_low = atoi(p + 7);
         if ((p = strstr(line, "\"new\":"))) msg.new_battery = atoi(p + 6);
+        if ((p = strstr(line, "\"cmd\":"))) msg.channel = atoi(p + 6);
+        if ((p = strstr(line, "\"wind\":"))) msg.wind_speed = atof(p + 7);
+        if ((p = strstr(line, "\"dir\":"))) msg.wind_dir = atoi(p + 6);
+        if ((p = strstr(line, "\"rain\":"))) msg.rain = atof(p + 7);
         if ((p = strstr(line, "\"pkts\":"))) msg.pkt_count = atoi(p + 7);
 
         struct timespec ts;

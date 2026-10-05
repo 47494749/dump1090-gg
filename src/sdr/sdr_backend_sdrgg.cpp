@@ -623,6 +623,18 @@ static int32_t gg_read_async(sdr_device_t *dev, sdr_async_cb_t cb, void *ctx,
     dev->async_running = 1;
     gg::eprint("sdrgg-diag: adapter[%d] streaming started (ring-engine)\n", adapter->adapter_id);
 
+    /* FC0012 demod fixup: in multi-device setups, opening R820T devices
+     * overwrites the FC0012's demod registers with Low-IF/single-ADC config.
+     * Re-assert Zero-IF dual-ADC mode now that streaming has started and
+     * all devices are initialized. */
+    if (dev->tuner_type == SDR_TUNER_FC0012 || dev->tuner_type == SDR_TUNER_FC0013) {
+        auto *gg_dev = static_cast<sdrgg_dev_t *>(dev->handle);
+        demod::write(gg_dev, 1, 0xB1, 0x1B);   /* Zero-IF + DC cancel */
+        demod::write(gg_dev, 0, 0x08, 0xCD);   /* Dual I+Q ADC */
+        demod::write(gg_dev, 1, 0x15, 0x00);   /* No spectrum inversion */
+        gg::eprint("sdrgg-diag: adapter[%d] FC0012 demod fixup applied (0xCD)\n", adapter->adapter_id);
+    }
+
     /* Block this thread until async_running is cleared (by gg_cancel_async
      * or gg_close). The actual data delivery happens in libsdrgg's consumer
      * thread which calls sdrgg_stream_callback → adapter->user_cb.

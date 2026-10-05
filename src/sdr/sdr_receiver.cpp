@@ -32,6 +32,7 @@
 #include "lte_tracker.h"
 #include "iot_decode.h"
 #include "iot_tracker.h"
+#include "iot_history.h"
 #include "airframes_feed.h"
 #include "fanet_decode.h"
 #include "sarsat_decode.h"
@@ -950,6 +951,7 @@ void rxDiagHealthCheck(void)
             bool have_dead_rx = false;
             for (int32_t i = 0; i < SdrManager.count; i++) {
                 sdr_receiver_t *r = &SdrManager.receivers[i];
+                if (r->reconfiguring) continue;
                 // Catch both ERROR state and OPEN-but-not-streaming (thread died)
                 if (r->state == RX_STATE_ERROR ||
                     (r->state == RX_STATE_OPEN && !r->thread_started && r->config.role != SDR_ROLE_NONE))
@@ -963,6 +965,7 @@ void rxDiagHealthCheck(void)
 
                 for (int32_t i = 0; i < SdrManager.count; i++) {
                     sdr_receiver_t *rx = &SdrManager.receivers[i];
+                    if (rx->reconfiguring) continue;
                     if (rx->state != RX_STATE_ERROR &&
                         !(rx->state == RX_STATE_OPEN && !rx->thread_started && rx->config.role != SDR_ROLE_NONE))
                         continue;
@@ -1751,6 +1754,8 @@ void rxClose(sdr_receiver_t *rx)
 bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
                    int32_t new_ppm, uint32_t new_freq, double new_sample_rate)
 {
+    rx->reconfiguring = true;
+
     if (rx->state == RX_STATE_RUNNING)
         rxStop(rx);
 
@@ -1765,6 +1770,7 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
     if (rx->state != RX_STATE_OPEN) {
         fprintf(stderr, "rx[%d]: rxReconfigure: unexpected state %s\n",
                 rx->id, rxStateName(rx->state));
+        rx->reconfiguring = false;
         return false;
     }
 
@@ -1816,6 +1822,7 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
         fprintf(stderr, "rx[%d]: rxReconfigure: failed to set sample rate %.0f for role %s\n",
                 rx->id, rx->config.sample_rate, sdrRoleName(rx->config.role));
         rx->state = RX_STATE_ERROR;
+        rx->reconfiguring = false;
         return false;
     }
     ops->reset_buffer(sdev);
@@ -1827,6 +1834,7 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
             fprintf(stderr, "rx[%d]: rxReconfigure: can't init decoder for role %s\n",
                     rx->id, sdrRoleName(rx->config.role));
             rx->state = RX_STATE_ERROR;
+            rx->reconfiguring = false;
             return false;
         }
         // Some decoders modify freq (e.g., GSM IF offset, POCSAG center)
@@ -1837,6 +1845,7 @@ bool rxReconfigure(sdr_receiver_t *rx, sdr_role_t new_role, double new_gain,
 
     rx->dropped = 0;
     rx->sample_counter = 0;
+    rx->reconfiguring = false;
 
     fprintf(stderr, "rx[%d]: reconfigured to role=%s freq=%d rate=%.0f\n",
             rx->id, sdrRoleName(rx->config.role), rx->config.freq, rx->config.sample_rate);
@@ -2749,9 +2758,11 @@ static bool iot868_decoder_drain(sdr_receiver_t *rx) {
         had_data = true;
         iotTrackerUpdate(&msg);
 
-        // Log to Messages page so IoT detections are visible without
-        // staying on the IoT page
-        {
+        if (msg.protocol == IOT_PROTO_LACROSSE_TX) {
+            iotHistoryRecord((uint16_t)msg.device_id, msg.temperature_c,
+                             msg.humidity_pct, msg.rssi_db,
+                             msg.battery_ok, 0);
+        } else {
             char extra[128] = {0};
             int32_t pos = 0;
             if (!isnan(msg.temperature_c))

@@ -159,6 +159,9 @@ typedef struct sdr_receiver {
     uint32_t        usb_error_count;    // consecutive set_freq failures
     uint32_t        usb_error_total;    // total set_freq failures
 
+    // Reconfigure guard: prevents hotplug recovery from interfering
+    volatile bool   reconfiguring;
+
     // Waterfall IQ tap (written by stream callback, read by panel thread)
     volatile int32_t     wf_tap_active;     // nonzero = tapping enabled
     uint8_t         *wf_tap_buf;        // IQ ring buffer (allocated by panel)

@@ -20,6 +20,7 @@ nav h1{font-size:18px;color:var(--accent);white-space:nowrap}
 .badge.ok{background:#003322;color:var(--ok)}
 .badge.warn{background:#332200;color:var(--warn)}
 .badge.err{background:#330000;color:var(--danger)}
+@keyframes emPulse{0%,100%{opacity:1}50%{opacity:0.4}}
 .badge.info{background:#002244;color:var(--link)}
 .main{padding:16px;max-width:1600px;margin:0 auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -252,6 +253,15 @@ const squawkRanges=[
 
 const emergencySquawks=['7500','7600','7700'];
 function isEmergencySquawk(sq){ return sq && emergencySquawks.includes(String(sq)); }
+const emergencyLabels={
+    'general':'🚨 EMERGENCY','lifeguard':'🏥 LIFEGUARD','minfuel':'⛽ MINFUEL',
+    'nordo':'📵 NORDO','unlawful':'⚠️ HIJACK','downed':'💥 DOWNED'
+};
+function getEmergencyBadge(a){
+    if(!a.emergency||a.emergency==='none'||a.emergency==='reserved')return '';
+    const lbl=emergencyLabels[a.emergency]||('🚨 '+a.emergency.toUpperCase());
+    return ' <span class="badge err" style="animation:emPulse 1s infinite" title="ADS-B Emergency: '+escapeHtml(a.emergency)+'">'+lbl+'</span>';
+}
 function getSquawkTitle(sq){
     if(!sq)return '';
     const s=String(sq).padStart(4,'0');
@@ -453,8 +463,9 @@ function renderAC(){
         if(a.alert)flags+=`<span class="badge err">ALERT</span> `;
         const sqStr=a.squawk||'';
         const sqEmerg=isEmergencySquawk(sqStr);
+        const adsEmerg=a.emergency&&a.emergency!=='none'&&a.emergency!=='reserved';
         const sqTitle=getSquawkTitle(sqStr);
-        const rowStyle=sqEmerg?'background:rgba(255,60,60,0.15)':'';
+        const rowStyle=(sqEmerg||adsEmerg)?'background:rgba(255,60,60,0.15)':'';
         const sqStyle=sqEmerg?'color:var(--danger);font-weight:bold':'';
         const safeHex=escapeHtml(a.hex||'');
         const safeFlight=escapeHtml((a.flight||'').trim());
@@ -465,7 +476,7 @@ function renderAC(){
         const ghostStyle=isGhost?'opacity:0.45':'';
         html+=`<tr style="${rowStyle}${ghostStyle}" data-icao="${safeHex}">
             <td class="icao-link" style="font-family:monospace;color:var(--accent)" onclick="lookupICAO('${safeHex}')">${safeHex}</td>
-            <td><strong>${safeFlight}</strong>${getFanetExtra(a)}</td>
+            <td><strong>${safeFlight}</strong>${getEmergencyBadge(a)}${getFanetExtra(a)}</td>
             <td style="${sqStyle}" title="${safeSqTitle}">${safeSqStr}</td>
             <td>${a.alt_baro!=null?a.alt_baro:''}</td>
             <td>${a.gs!=null?Math.round(a.gs):''}</td>

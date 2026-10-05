@@ -589,12 +589,14 @@ static int32_t decodeBDS50(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    // small penalty for inconsistent data
+    // Internal coherence: GS vs TAS
+    // |GS - TAS| is the wind component along track. Winds > 200kt are extremely rare.
     if (gs_valid && tas_valid) {
         int32_t delta = abs((int32_t)gs - (int32_t)tas);
-        if (delta > 150) {
-            score -= 6;
-        }
+        if (delta > 200)
+            return 0;
+        else if (delta > 150)
+            score -= 8;
     }
 
     // compute the theoretical turn rate and compare to track angle rate
@@ -745,9 +747,23 @@ static int32_t decodeBDS60(struct modesMessage *mm, bool store)
         return 0;
     }
 
-    // small penalty for inconsistent data
-
-    // Should check IAS vs Mach at given altitude, but the maths is a little involved
+    // Internal coherence: IAS vs Mach
+    // At sea level: TAS ≈ IAS, Mach = TAS / 661.47
+    // At altitude: TAS = IAS * sqrt(rho0/rho), and Mach increases for same IAS
+    // Approximate: Mach_min ≈ IAS / 661.47 (sea level, lowest possible Mach for given IAS)
+    // Mach at altitude is always higher than sea-level Mach for same IAS.
+    // If reported Mach < IAS/661.47, it's physically impossible.
+    if (ias_valid && mach_valid && ias > 0 && mach > 0) {
+        float mach_at_sea_level = (float)ias / 661.47f;
+        if (mach < mach_at_sea_level * 0.8f)
+            return 0;
+        // Also: at FL450 (max practical), IAS ~180kt gives Mach ~0.82.
+        // If IAS > 350 and Mach < 0.3, it's nonsense.
+        if (ias > 350 && mach < 0.3f)
+            return 0;
+        if (ias < 100 && mach > 0.7f)
+            return 0;
+    }
 
     if (baro_rate_valid && inertial_rate_valid) {
         int32_t delta = abs(baro_rate - inertial_rate);
@@ -902,6 +918,33 @@ static int32_t decodeBDS44(struct modesMessage *mm, bool store)
     } else {
         score += 1;
     }
+
+    // Phase 1: Internal coherence checks between fields within the same block
+
+    // Pressure vs temperature: use ISA model for internal consistency.
+    // At a given pressure altitude, temperature has a physically bounded range.
+    // ISA: T = 15 - 0.001981 * h (below tropopause), T = -56.5 (above).
+    // Pressure-altitude relation: h ≈ 145442.16 * (1 - (P/1013.25)^0.190284)
+    if (asp_valid && sat_valid) {
+        float ratio = asp / 1013.25f;
+        float palt_ft = 145442.16f * (1.0f - powf(ratio, 0.190284f));
+        float isa_temp = (palt_ft <= 36089.0f)
+            ? 15.0f - 0.001981f * palt_ft
+            : -56.5f;
+        float deviation = fabsf(sat - isa_temp);
+        if (deviation > 50.0f)
+            return 0;
+        else if (deviation > 35.0f)
+            score -= 8;
+    }
+
+    // Wind speed vs turbulence coherence
+    if (wind_valid && turbulence_valid && wind_speed > 150 && turbulence == HAZARD_NIL)
+        score -= 4;
+
+    // Humidity at high altitude is typically low
+    if (humidity_valid && asp_valid && asp < 350 && humidity > 80.0f)
+        score -= 3;
 
     if (source == MRAR_SOURCE_DMEDME && wind_valid && sat_valid && score > 0) {
         // Some GICB messages can be easily mistaken for a MRAR:
@@ -1062,6 +1105,20 @@ static int32_t decodeBDS45(struct modesMessage *mm, bool store)
     if (microburst_valid) { hazard_count++; score += 3; }
     if (icing_valid) { hazard_count++; score += 3; }
     if (wake_valid) { hazard_count++; score += 3; }
+
+    // Internal coherence: pressure vs temperature (ISA model)
+    if (asp_valid && sat_valid) {
+        float ratio = asp / 1013.25f;
+        float palt_ft = 145442.16f * (1.0f - powf(ratio, 0.190284f));
+        float isa_temp = (palt_ft <= 36089.0f)
+            ? 15.0f - 0.001981f * palt_ft
+            : -56.5f;
+        float deviation = fabsf(sat - isa_temp);
+        if (deviation > 50.0f)
+            return 0;
+        else if (deviation > 35.0f)
+            score -= 8;
+    }
 
     // Penalize if ALL reported hazards are severe (extremely unlikely in reality)
     if (hazard_count >= 2) {

@@ -26,6 +26,7 @@
 #include "gsm_tracker.h"
 #include "lte_tracker.h"
 #include "iot_tracker.h"
+#include "iot_history.h"
 #include "cubecellgg_manager.h"
 #include "fanet_decode.h"
 #include "sarsat_decode.h"
@@ -1785,25 +1786,17 @@ static bool wf_set_gain(int32_t gain_tenth_db) {
     sdr_receiver_t *rx = &SdrManager.receivers[WF.rx_id];
     if (rx->state != RX_STATE_RUNNING || !rx->backend_dev) return false;
 
-    if (WF.owned) {
-        // Owned mode: full restart with new gain
-        return wf_restart_owned_stream(rx, gain_tenth_db / 10.0,
-                                       (uint32_t)rx->config.freq,
-                                       (uint32_t)rx->config.sample_rate);
-    } else {
-        // Observe mode: live gain change without stopping decoder
-        if (!rx->rtl.gains || rx->rtl.gain_steps < 2) return false;
-        int32_t best = 0;
-        for (int32_t i = 0; i < rx->rtl.gain_steps; i++) {
-            if (abs(rx->rtl.gains[i] - gain_tenth_db) <
-                abs(rx->rtl.gains[best] - gain_tenth_db))
-                best = i;
-        }
-        int32_t result = rxSetGain(rx, best);
-        if (result < 0) return false;
-        rx->config.gain = rx->rtl.gains[result] / 10.0;
-        return true;
+    if (!rx->rtl.gains || rx->rtl.gain_steps < 2) return false;
+    int32_t best = 0;
+    for (int32_t i = 0; i < rx->rtl.gain_steps; i++) {
+        if (abs(rx->rtl.gains[i] - gain_tenth_db) <
+            abs(rx->rtl.gains[best] - gain_tenth_db))
+            best = i;
     }
+    int32_t result = rxSetGain(rx, best);
+    if (result < 0) return false;
+    rx->config.gain = rx->rtl.gains[result] / 10.0;
+    return true;
 }
 
 // Set sample rate (only in owned mode)
@@ -3121,6 +3114,33 @@ static void api_get_iot868(int32_t fd)
     http_send_json(fd, json.c_str(), (int32_t)json.size());
 }
 
+// ============================= API: GET /api/iot-history ==================
+
+static void api_get_iot_history(int32_t fd, const char *query)
+{
+    uint16_t sensor_id = 0;
+    int32_t max_points = 5000;
+
+    if (query) {
+        const char *p;
+        if ((p = strstr(query, "sensor=")))
+            sensor_id = (uint16_t)atoi(p + 7);
+        if ((p = strstr(query, "max_points=")))
+            max_points = atoi(p + 11);
+    }
+
+    std::string json = iotHistoryToJSON(sensor_id, max_points);
+    http_send_json(fd, json.c_str(), (int32_t)json.size());
+}
+
+// ============================= API: GET /api/iot-sensors ==================
+
+static void api_get_iot_sensors(int32_t fd)
+{
+    std::string json = iotHistorySensorsJSON();
+    http_send_json(fd, json.c_str(), (int32_t)json.size());
+}
+
 // ============================= API: GET /api/cubecellgg ===================
 
 static void api_get_cubecellgg(int32_t fd)
@@ -4369,12 +4389,14 @@ static void api_post_receiver_assign(int32_t fd, const char *body)
         if (backend != rx->config.backend) {
             fprintf(stderr, "panel: backend change %s -> %s, doing full close+reopen\n",
                     sdrBackendName(rx->config.backend), sdrBackendName(backend));
+            rx->reconfiguring = true;
             rxStop(rx);
             rxClose(rx);
             rx->config = tmp_cfg;
             usleep(300000);  // let USB settle
             ok = rxOpen(rx);
             if (ok) ok = rxStart(rx);
+            rx->reconfiguring = false;
         } else {
             // Same backend — reconfigure in-place (avoids USB close)
             ok = rxReconfigure(rx, role, gain, ppm,
@@ -4844,13 +4866,16 @@ static void serve_gsm_page(int32_t fd)
         "<a class='active' href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
-        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
         "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
         "<a style='margin-left:auto' href='/diagnostics.html'>&#x1f527; Diagnostics</a>"
         "</div>"
+        "<span id='ver-badge' style='font-size:11px;color:var(--dim);white-space:nowrap;padding:2px 8px;border:1px solid var(--border);border-radius:10px' title='dump1090-gg version'>v&hellip;</span>"
+        "</nav>"
+        "<div class='main'>"
+        "<h2>&#x1f4f6; GSM Cell Scanner</h2>"
         "<div class='toolbar'>"
         "<span id='cell-count' style='font-size:16px;font-weight:600;color:var(--accent)'></span>"
         "<span id='update-time' style='color:var(--dim);margin-left:16px;font-size:12px'></span>"
@@ -5027,7 +5052,6 @@ static void serve_lte_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a class='active' href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
-        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -5171,6 +5195,8 @@ static void serve_iot868_page(int32_t fd)
     const char *html =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<title>IoT 868 MHz - dump1090-gg</title>"
+        "<script src='https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js'></script>"
+        "<script src='https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js'></script>"
         "<style>"
         ":root{--bg:#0a0a1a;--card:#141428;--head:#1a1a2e;--border:#2a2a4a;--accent:#4fc3f7;--text:#d0d0d0;--dim:#888;--hover:#1e1e3a;--danger:#ff4444;--warn:#ffaa00;--link:#44aaff;--ok:#00cc44;--input-bg:#0e0e22}"
         "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;margin:0;padding:0}"
@@ -5203,7 +5229,48 @@ static void serve_iot868_page(int32_t fd)
         ".btn:hover{background:var(--accent);color:#000}"
         "code{background:var(--input-bg);padding:1px 5px;border-radius:3px;font-size:12px}"
         "@media(max-width:768px){table{font-size:12px}th,td{padding:4px 6px}}"
+        ".modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:200;justify-content:center;align-items:center}"
+        ".modal-overlay.active{display:flex}"
+        ".modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;width:90%;max-width:900px;max-height:85vh;overflow-y:auto;position:relative}"
+        ".modal h3{color:var(--accent);margin:0 0 16px 0}"
+        ".modal .close-btn{position:absolute;top:12px;right:16px;font-size:22px;color:var(--dim);cursor:pointer;background:none;border:none}"
+        ".modal .close-btn:hover{color:var(--text)}"
+        ".chart-container{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px}"
+        ".chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}"
+        ".chart-header h4{color:var(--accent);font-size:13px;text-transform:uppercase;letter-spacing:.5px;margin:0}"
+        ".chart-toolbar{display:flex;align-items:center;gap:4px}"
+        ".chart-toolbar button{background:var(--head);color:var(--accent);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;line-height:1.4}"
+        ".chart-toolbar button:hover{background:var(--hover);border-color:var(--accent)}"
+        ".chart-wrap{position:relative;height:240px}"
+        ".clickable{cursor:pointer;color:var(--link);text-decoration:underline}"
+        ".clickable:hover{color:var(--accent)}"
         "</style></head><body>"
+        "<div id='chart-modal' class='modal-overlay' onclick='if(event.target===this)closeModal()'>"
+        "<div class='modal'>"
+        "<button class='close-btn' onclick='closeModal()'>&#x2715;</button>"
+        "<h3 id='modal-title'>Sensor History</h3>"
+        "<div class='chart-container' data-chart-key='ch-temp'><div class='chart-header'><h4>Temperature</h4><div class='chart-toolbar'>"
+        "<button data-action='zoomin' title='Zoom in'>+</button>"
+        "<button data-action='zoomout' title='Zoom out'>&#x2212;</button>"
+        "<button data-action='panleft' title='Pan left'>&#x25c0;</button>"
+        "<button data-action='panright' title='Pan right'>&#x25b6;</button>"
+        "<button data-action='reset' title='Reset view'>Reset</button>"
+        "</div></div><div class='chart-wrap'><canvas id='ch-temp'></canvas></div></div>"
+        "<div class='chart-container' data-chart-key='ch-hum'><div class='chart-header'><h4>Humidity</h4><div class='chart-toolbar'>"
+        "<button data-action='zoomin' title='Zoom in'>+</button>"
+        "<button data-action='zoomout' title='Zoom out'>&#x2212;</button>"
+        "<button data-action='panleft' title='Pan left'>&#x25c0;</button>"
+        "<button data-action='panright' title='Pan right'>&#x25b6;</button>"
+        "<button data-action='reset' title='Reset view'>Reset</button>"
+        "</div></div><div class='chart-wrap'><canvas id='ch-hum'></canvas></div></div>"
+        "<div class='chart-container' data-chart-key='ch-rssi'><div class='chart-header'><h4>RSSI</h4><div class='chart-toolbar'>"
+        "<button data-action='zoomin' title='Zoom in'>+</button>"
+        "<button data-action='zoomout' title='Zoom out'>&#x2212;</button>"
+        "<button data-action='panleft' title='Pan left'>&#x25c0;</button>"
+        "<button data-action='panright' title='Pan right'>&#x25b6;</button>"
+        "<button data-action='reset' title='Reset view'>Reset</button>"
+        "</div></div><div class='chart-wrap'><canvas id='ch-rssi'></canvas></div></div>"
+        "</div></div>"
         "<nav><h1>&#x2708; dump1090-gg-light</h1><div class='tabs'>"
         "<a href='/'>&#x1f5fa;&#xfe0f; Map</a>"
         "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
@@ -5239,32 +5306,13 @@ static void serve_iot868_page(int32_t fd)
         "var sortKey='protocol',sortDir=1,devData=[];"
         ""
         "function load(){"
-        "  fetch('/api/config').then(r=>r.json()).then(cfg=>{"
-        "    var iot=cfg.sdr_iot868||{};"
-        "    if(!iot.active){"
-        "      document.getElementById('content').innerHTML="
-        "        '<div class=\"no-data\"><h3>&#x1f321;&#xfe0f; IoT 868 MHz Scanner Not Active</h3>'"
-        "        +'<p>No SDR device is configured for IoT 868 MHz reception.</p>'"
-        "        +'<p style=\"margin-top:12px\">Go to <a href=\"/devices.html\">Devices</a> and assign an RTL-SDR dongle to the <strong>IoT 868 MHz</strong> role.</p></div>';"
-        "      document.getElementById('dev-count').textContent='';"
-        "      return;"
-        "    }"
-        "    if(!iot.enabled){"
-        "      document.getElementById('content').innerHTML="
-        "        '<div class=\"no-data\"><h3>&#x1f321;&#xfe0f; IoT 868 MHz Scanner Disabled</h3>'"
-        "        +'<p>The IoT 868 MHz decoder is currently disabled.</p>'"
-        "        +'<p style=\"margin-top:12px\">Enable it from the <a href=\"/config.html\">Config</a> page.</p></div>';"
-        "      document.getElementById('dev-count').textContent='';"
-        "      return;"
-        "    }"
-        "    fetch('/api/iot868').then(r=>r.json()).then(data=>render(data)).catch(()=>{"
-        "      document.getElementById('content').innerHTML='<div class=\"no-data\"><h3>Error</h3><p>Failed to fetch IoT data.</p></div>';"
-        "    });"
-        "  }).catch(()=>{});"
+        "  fetch('/api/iot868').then(r=>r.json()).then(data=>render(data)).catch(()=>{"
+        "    document.getElementById('content').innerHTML='<div class=\"no-data\"><h3>Error</h3><p>Failed to fetch IoT data.</p></div>';"
+        "  });"
         "}"
         ""
         "function render(data){"
-        "  devData=data.devices||[];"
+        "  devData=(data.devices||[]).filter(d=>d.age<=3600);"
         "  document.getElementById('dev-count').textContent=devData.length+' device'+(devData.length!==1?'s':'');"
         "  document.getElementById('update-time').textContent='Updated: '+new Date().toLocaleTimeString();"
         "  if(!devData.length){"
@@ -5312,7 +5360,11 @@ static void serve_iot868_page(int32_t fd)
         "    html+='<tr'+(d.stale?' style=\"opacity:0.5\"':'')+'>';"
         "    html+='<td><strong>'+d.protocol+'</strong></td>';"
         "    html+='<td><span class=\"badge badge-info\">'+d.modulation+'</span></td>';"
-        "    html+='<td><code>'+d.device_id+'</code></td>';"
+        "    if(d.protocol==='LaCrosse TX'){"
+        "      html+='<td><code class=\"clickable\" onclick=\"showHistory('+parseInt(d.device_id,16)+',\\''+d.device_id+'\\')\">' +d.device_id+'</code></td>';"
+        "    }else{"
+        "      html+='<td><code>'+d.device_id+'</code></td>';"
+        "    }"
         "    html+='<td>'+(d.channel||'&mdash;')+'</td>';"
         "    html+='<td>'+(d.temperature>-900?d.temperature.toFixed(1):'&mdash;')+'</td>';"
         "    html+='<td>'+(d.humidity>=0?d.humidity.toFixed(0):'&mdash;')+'</td>';"
@@ -5346,210 +5398,146 @@ static void serve_iot868_page(int32_t fd)
         "  var v=document.getElementById('ver-badge');"
         "  if(v&&s.version) v.textContent='v'+s.version;"
         "}).catch(()=>{});"
+        ""
+        "var chartInstances={},chartViewState={},histBounds={min:null,max:null};"
+        ""
+        "function closeModal(){"
+        "  document.getElementById('chart-modal').classList.remove('active');"
+        "  Object.keys(chartInstances).forEach(k=>{if(chartInstances[k]){chartInstances[k].destroy();delete chartInstances[k];}});"
+        "  chartViewState={};"
+        "}"
+        ""
+        "function getCV(k){return chartViewState[k]||{min:null,max:null};}"
+        "function setCV(k,mn,mx){chartViewState[k]={min:mn,max:mx};}"
+        "function hasCV(k){var v=getCV(k);return v.min!==null&&v.max!==null;}"
+        ""
+        "function clampV(mn,mx){"
+        "  if(histBounds.min===null)return{min:mn,max:mx};"
+        "  var fMin=histBounds.min,fMax=histBounds.max,minSpan=60000;"
+        "  var fSpan=Math.max(fMax-fMin,minSpan),span=Math.max((mx||0)-(mn||0),minSpan);"
+        "  if(span>=fSpan)return{min:fMin,max:fMax};"
+        "  if(mn<fMin){mx+=fMin-mn;mn=fMin;}"
+        "  if(mx>fMax){mn-=mx-fMax;mx=fMax;}"
+        "  if(mn<fMin)mn=fMin;if(mx>fMax)mx=fMax;"
+        "  if(mx-mn<minSpan){mx=Math.min(fMax,mn+minSpan);mn=Math.max(fMin,mx-minSpan);}"
+        "  return{min:mn,max:mx};"
+        "}"
+        ""
+        "function applyCV(k){"
+        "  var ch=chartInstances[k];if(!ch||!ch.options||!ch.options.scales||!ch.options.scales.x)return;"
+        "  if(hasCV(k)){var v=getCV(k),c=clampV(v.min,v.max);ch.options.scales.x.min=c.min;ch.options.scales.x.max=c.max;}"
+        "  else{delete ch.options.scales.x.min;delete ch.options.scales.x.max;}"
+        "  ch.update('none');"
+        "}"
+        ""
+        "function zoomCh(k,factor,anchor){"
+        "  if(histBounds.min===null)return;"
+        "  var v=hasCV(k)?getCV(k):{min:histBounds.min,max:histBounds.max};"
+        "  var span=v.max-v.min,fSpan=histBounds.max-histBounds.min;"
+        "  var ns=Math.max(Math.min(span*factor,fSpan),60000);"
+        "  if(!isFinite(anchor))anchor=v.min+span/2;"
+        "  var ratio=span>0?(anchor-v.min)/span:0.5;"
+        "  var c=clampV(anchor-ns*ratio,anchor-ns*ratio+ns);"
+        "  setCV(k,c.min,c.max);applyCV(k);"
+        "}"
+        ""
+        "function panCh(k,frac){"
+        "  if(histBounds.min===null)return;"
+        "  var v=hasCV(k)?getCV(k):{min:histBounds.min,max:histBounds.max};"
+        "  var s=(v.max-v.min)*frac,c=clampV(v.min+s,v.max+s);"
+        "  setCV(k,c.min,c.max);applyCV(k);"
+        "}"
+        ""
+        "function resetCV(k){setCV(k,null,null);applyCV(k);}"
+        ""
+        "function attachInteractions(ch,k){"
+        "  var canvas=ch.canvas;if(!canvas||canvas.dataset.bound==='1')return;"
+        "  canvas.dataset.bound='1';canvas.style.cursor='grab';var drag=null;"
+        "  canvas.addEventListener('wheel',function(ev){"
+        "    var sc=ch.scales&&ch.scales.x;if(!sc||histBounds.min===null)return;ev.preventDefault();"
+        "    var a=sc.getValueForPixel(ev.offsetX);if(a&&a.valueOf)a=a.valueOf();"
+        "    zoomCh(k,ev.deltaY<0?0.8:1.25,a);"
+        "  },{passive:false});"
+        "  canvas.addEventListener('mousedown',function(ev){"
+        "    if(ev.button!==0||histBounds.min===null)return;"
+        "    var v=hasCV(k)?getCV(k):{min:histBounds.min,max:histBounds.max};"
+        "    drag={startX:ev.offsetX,min:v.min,max:v.max,width:(ch.chartArea&&ch.chartArea.right-ch.chartArea.left)||canvas.clientWidth||1};"
+        "    canvas.style.cursor='grabbing';ev.preventDefault();"
+        "  });"
+        "  canvas.addEventListener('mousemove',function(ev){"
+        "    if(!drag)return;var span=drag.max-drag.min;"
+        "    var shift=-(ev.offsetX-drag.startX)/drag.width*span;"
+        "    var c=clampV(drag.min+shift,drag.max+shift);setCV(k,c.min,c.max);applyCV(k);"
+        "  });"
+        "  function endDrag(){if(!drag)return;drag=null;canvas.style.cursor='grab';}"
+        "  canvas.addEventListener('mouseup',endDrag);canvas.addEventListener('mouseleave',endDrag);"
+        "  window.addEventListener('mouseup',endDrag);"
+        "  canvas.addEventListener('dblclick',function(){resetCV(k);});"
+        "}"
+        ""
+        "function bindToolbar(){"
+        "  document.querySelectorAll('.chart-toolbar button').forEach(function(btn){"
+        "    btn.addEventListener('click',function(){"
+        "      var k=btn.closest('.chart-container').dataset.chartKey,a=btn.dataset.action;"
+        "      if(a==='zoomin')zoomCh(k,0.5);else if(a==='zoomout')zoomCh(k,2);"
+        "      else if(a==='panleft')panCh(k,-0.25);else if(a==='panright')panCh(k,0.25);"
+        "      else if(a==='reset')resetCV(k);"
+        "    });"
+        "  });"
+        "}"
+        ""
+        "function makeOpts(yLabel,sugMin,sugMax){"
+        "  return {"
+        "    responsive:true,maintainAspectRatio:false,animation:{duration:0},"
+        "    interaction:{mode:'index',intersect:false},"
+        "    plugins:{legend:{labels:{color:'#aaa',font:{size:11}},position:'top'},"
+        "      tooltip:{backgroundColor:'#1a1a2e',borderColor:'#2a2a4a',borderWidth:1,titleColor:'#4fc3f7',bodyColor:'#d0d0d0'}},"
+        "    scales:{"
+        "      x:{type:'time',time:{tooltipFormat:'yyyy-MM-dd HH:mm:ss',displayFormats:{second:'HH:mm',minute:'HH:mm',hour:'HH:mm',day:'MMM d'}},"
+        "        ticks:{color:'#888',maxTicksLimit:8},grid:{color:'#1a1a2e'}},"
+        "      y:{ticks:{color:'#888'},grid:{color:'#1a1a2e'},suggestedMin:sugMin,suggestedMax:sugMax,"
+        "        title:{display:true,text:yLabel,color:'#888'}}"
+        "    },"
+        "    elements:{point:{radius:1.5,hoverRadius:4},line:{borderWidth:1.5,tension:0.3}}"
+        "  };"
+        "}"
+        ""
+        "function mkChart(id,label,data,color,bgColor,yLabel,sugMin,sugMax){"
+        "  var canvas=document.getElementById(id);if(!canvas)return null;"
+        "  var ch=new Chart(canvas,{type:'line',data:{datasets:[{label:label,data:data,borderColor:color,backgroundColor:bgColor,fill:true}]},options:makeOpts(yLabel,sugMin,sugMax)});"
+        "  chartInstances[id]=ch;attachInteractions(ch,id);return ch;"
+        "}"
+        ""
+        "function showHistory(sensorId,hexId){"
+        "  document.getElementById('modal-title').textContent='LaCrosse Sensor '+hexId+' \\u2014 History';"
+        "  document.getElementById('chart-modal').classList.add('active');"
+        "  Object.keys(chartInstances).forEach(k=>{if(chartInstances[k]){chartInstances[k].destroy();delete chartInstances[k];}});"
+        "  chartViewState={};histBounds={min:null,max:null};"
+        "  fetch('/api/iot-history?sensor='+sensorId+'&max_points=5000')"
+        "  .then(r=>r.json()).then(d=>{"
+        "    var temps=[],hums=[],rssis=[];"
+        "    (d.records||[]).forEach(r=>{"
+        "      var t=new Date(r[0]).getTime();"
+        "      if(r[1]>-900) temps.push({x:t,y:r[1]});"
+        "      if(r[2]>=0) hums.push({x:t,y:r[2]});"
+        "      if(r[3]!==0) rssis.push({x:t,y:r[3]});"
+        "    });"
+        "    var all=temps.concat(hums).concat(rssis);"
+        "    if(all.length){histBounds.min=all.reduce((m,p)=>Math.min(m,p.x),Infinity);histBounds.max=all.reduce((m,p)=>Math.max(m,p.x),-Infinity);}"
+        "    mkChart('ch-temp','Temperature \\u00b0C',temps,'#ff8a65','rgba(255,138,101,0.1)','\\u00b0C',-10,45);"
+        "    mkChart('ch-hum','Humidity %',hums,'#4fc3f7','rgba(79,195,247,0.1)','%',0,100);"
+        "    mkChart('ch-rssi','RSSI dBm',rssis,'#66bb6a','rgba(102,187,106,0.1)','dBm',-120,-40);"
+        "    bindToolbar();"
+        "  }).catch(e=>{"
+        "    document.getElementById('modal-title').textContent='Error loading history';"
+        "  });"
+        "}"
         "</script><script src='/warnings.js'></script></div></body></html>";
 
     http_send(fd, 200, "text/html", html, (int32_t)strlen(html));
 }
 
-// ============================= CubeCell GG Page ============================
-
-static void serve_cubecellgg_page(int32_t fd)
-{
-    const char *html =
-        "<!DOCTYPE html><html><head>"
-        "<meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>CubeCell GG - dump1090-gg</title>"
-        "<style>"
-        ":root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--text:#e0e0e0;--dim:#888}"
-        "body{margin:0;font-family:system-ui;background:var(--bg);color:var(--text)}"
-        ".nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px;background:#0d1117;border-bottom:1px solid #333}"
-        ".nav a{padding:6px 12px;border-radius:4px;text-decoration:none;color:var(--dim);font-size:13px}"
-        ".nav a:hover{background:#333;color:#fff} .nav a.active{background:var(--accent);color:#fff}"
-        ".container{max-width:1200px;margin:20px auto;padding:0 16px}"
-        ".card{background:var(--card);border-radius:8px;padding:16px;margin:12px 0}"
-        ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}"
-        ".label{color:var(--dim);font-size:12px}.value{font-size:18px;font-weight:600}"
-        ".btn{padding:8px 16px;border:none;border-radius:4px;background:var(--accent);color:#fff;cursor:pointer}"
-        ".btn:hover{opacity:.8} .btn.danger{background:#c0392b}"
-        "select,input{padding:6px;border-radius:4px;border:1px solid #444;background:#1a1a2e;color:#fff}"
-        "canvas{width:100%;border-radius:4px;background:#000}"
-        "</style></head><body>"
-        "<div class='nav'>"
-        "<a href='/'>&#x1f3e0; Home</a>"
-        "<a href='/config.html'>&#x2699;&#xfe0f; Config</a>"
-        "<a href='/devices.html'>&#x1f4fb; Devices</a>"
-        "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
-        "<a class='active' href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
-        "<a href='/waterfall.html'>&#x1f30a; Waterfall</a>"
-        "<a href='/stats.html'>&#x1f4ca; Stats</a>"
-        "</div>"
-        "<div class='container'>"
-        "<h2>&#x1f4e1; CubeCell GG IoT Receiver</h2>"
-
-        /* Device info card */
-        "<div class='card' id='info-card'>"
-        "<div class='grid'>"
-        "<div><span class='label'>State</span><div class='value' id='cc-state'>-</div></div>"
-        "<div><span class='label'>Firmware</span><div class='value' id='cc-fw'>-</div></div>"
-        "<div><span class='label'>TTY</span><div class='value' id='cc-tty'>-</div></div>"
-        "<div><span class='label'>IoT Packets</span><div class='value' id='cc-pkts'>0</div></div>"
-        "<div><span class='label'>Profile</span><div class='value' id='cc-profile'>-</div></div>"
-        "<div><span class='label'>Frequency</span><div class='value' id='cc-freq'>-</div></div>"
-        "</div></div>"
-
-        /* Config card */
-        "<div class='card'>"
-        "<h3>Configuration</h3>"
-        "<div style='display:flex;gap:12px;align-items:center;flex-wrap:wrap'>"
-        "<label>Profile: <select id='sel-profile'>"
-        "<option value='lacrosse'>LaCrosse 868.3 MHz</option>"
-        "<option value='scan'>Scanner</option></select></label>"
-        "<label>Frequency: <input id='inp-freq' type='number' value='868300000' step='100000' style='width:140px'> Hz</label>"
-        "<button class='btn' onclick='applyConfig()'>Apply</button>"
-        "</div></div>"
-
-        /* Waterfall card */
-        "<div class='card'>"
-        "<h3>&#x1f30a; RSSI Waterfall (858-878 MHz)</h3>"
-        "<div style='display:flex;gap:8px;margin-bottom:8px'>"
-        "<button class='btn' id='btn-wf' onclick='toggleWF()'>Start Waterfall</button>"
-        "<span id='wf-status' style='color:var(--dim);line-height:36px'>Stopped</span>"
-        "</div>"
-        "<canvas id='wf-canvas' width='700' height='200'></canvas>"
-        "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--dim)'>"
-        "<span>858</span><span>862</span><span>866</span><span>868</span><span>870</span><span>874</span><span>878 MHz</span>"
-        "</div></div>"
-
-        /* Detected frequencies card */
-        "<div class='card'>"
-        "<h3>&#x1f4e1; Detected Signals</h3>"
-        "<p style='font-size:12px;color:var(--dim)'>Frequencies with signal above noise floor. Click Listen to tune and try decoding.</p>"
-        "<div id='freq-list'><p style='color:var(--dim)'>Start waterfall to detect signals</p></div>"
-        "</div>"
-
-        /* IoT devices card */
-        "<div class='card'>"
-        "<h3>&#x1f321; Detected IoT Devices</h3>"
-        "<div id='iot-list'><p style='color:var(--dim)'>No devices detected yet</p></div>"
-        "</div>"
-
-        "</div>"
-        "<script>"
-        "var wfRunning=false,wfCanvas,wfCtx,wfLine=0;"
-        "function load(){"
-        "  fetch('/api/cubecellgg').then(r=>r.json()).then(d=>{"
-        "    document.getElementById('cc-state').textContent=d.state;"
-        "    document.getElementById('cc-fw').textContent=d.fw_version||'-';"
-        "    document.getElementById('cc-tty').textContent=d.tty||'-';"
-        "    document.getElementById('cc-pkts').textContent=d.iot_packets;"
-        "    document.getElementById('cc-profile').textContent=d.profile||'-';"
-        "    document.getElementById('cc-freq').textContent=d.frequency?(d.frequency/1e6).toFixed(3)+' MHz':'-';"
-        "    document.getElementById('cc-state').style.color=d.state=='running'?'#2ecc71':'#e74c3c';"
-        "  }).catch(()=>{});"
-        "  fetch('/api/iot868').then(r=>r.json()).then(d=>{"
-        "    var h='';d.devices.forEach(function(dev){"
-        "      h+='<div style=\"padding:8px;border-bottom:1px solid #333\">';"
-        "      h+='<b>'+dev.protocol+'</b> ID='+dev.device_id;"
-        "      if(dev.temperature_c!=null) h+=' T='+dev.temperature_c.toFixed(1)+'&deg;C';"
-        "      if(dev.humidity_pct!=null&&dev.humidity_pct>=0) h+=' H='+dev.humidity_pct.toFixed(0)+'%';"
-        "      h+=' RSSI='+dev.rssi_db.toFixed(0)+'dBm';"
-        "      h+=' <span style=\"color:var(--dim);font-size:11px\">'+new Date(dev.last_seen_ms).toLocaleTimeString()+'</span>';"
-        "      h+='</div>';});"
-        "    if(h)document.getElementById('iot-list').innerHTML=h;"
-        "  }).catch(()=>{});"
-        "}"
-        "function applyConfig(){"
-        "  var p=document.getElementById('sel-profile').value;"
-        "  var f=parseInt(document.getElementById('inp-freq').value);"
-        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({profile:p,frequency:f})});"
-        "  setTimeout(load,500);"
-        "}"
-        "function toggleWF(){"
-        "  wfRunning=!wfRunning;"
-        "  var btn=document.getElementById('btn-wf');"
-        "  if(wfRunning){"
-        "    btn.textContent='Stop Waterfall';btn.classList.add('danger');"
-        "    document.getElementById('wf-status').textContent='Running...';"
-        "    fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({waterfall:'start'})});"
-        "    pollWF();"
-        "  }else{"
-        "    btn.textContent='Start Waterfall';btn.classList.remove('danger');"
-        "    document.getElementById('wf-status').textContent='Stopped';"
-        "    fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({waterfall:'stop'})});"
-        "  }"
-        "}"
-        "function pollWF(){"
-        "  if(!wfRunning)return;"
-        "  fetch('/api/cubecellgg/waterfall').then(r=>r.json()).then(d=>{"
-        "    if(d.d&&d.d.length>0){drawWFLine(d.d);updateDetected(d.d,d.s,d.t);}"
-        "  }).catch(()=>{});"
-        "  setTimeout(pollWF,300);"
-        "}"
-        "var detectedFreqs={};"
-        "var WF_THRESHOLD=-98;"
-        "var wfStart=858000000,wfStep=100000;"
-        "function updateDetected(data,s,t){"
-        "  if(s)wfStart=s;if(t)wfStep=t;"
-        "  for(var i=0;i<data.length;i++){"
-        "    if(data[i]>WF_THRESHOLD){"
-        "      var f=wfStart+i*wfStep;"
-        "      var key=Math.round(f/100000)*100000;"
-        "      if(!detectedFreqs[key]||data[i]>detectedFreqs[key].peak){"
-        "        detectedFreqs[key]={freq:key,peak:data[i],last:Date.now(),count:(detectedFreqs[key]?detectedFreqs[key].count:0)+1};"
-        "      }"
-        "    }"
-        "  }"
-        "  var now=Date.now();"
-        "  var list=Object.values(detectedFreqs).filter(f=>now-f.last<30000).sort((a,b)=>b.peak-a.peak);"
-        "  var el=document.getElementById('freq-list');"
-        "  if(!el)return;"
-        "  if(list.length==0){el.innerHTML='<p style=color:var(--dim)>No signals detected yet</p>';return;}"
-        "  var h='<table style=width:100%><tr><th>Frequency</th><th>Peak RSSI</th><th>Hits</th><th>Action</th></tr>';"
-        "  list.forEach(function(f){"
-        "    h+='<tr><td>'+(f.freq/1e6).toFixed(3)+' MHz</td>';"
-        "    h+='<td style=color:'+(f.peak>-90?'#2ecc71':f.peak>-100?'#f39c12':'#e74c3c')+'>'+f.peak+' dBm</td>';"
-        "    h+='<td>'+f.count+'</td>';"
-        "    h+='<td><button class=btn onclick=\"tuneToFreq('+f.freq+')\">&#x1f50d; Listen</button></td></tr>';});"
-        "  h+='</table>';el.innerHTML=h;"
-        "}"
-        "function tuneToFreq(freq){"
-        "  wfRunning=false;"
-        "  document.getElementById('btn-wf').textContent='Start Waterfall';"
-        "  document.getElementById('btn-wf').classList.remove('danger');"
-        "  document.getElementById('wf-status').textContent='Stopped - tuned to '+(freq/1e6).toFixed(3)+' MHz';"
-        "  fetch('/api/cubecellgg/config',{method:'POST',body:JSON.stringify({waterfall:'stop',profile:'lacrosse',frequency:freq})});"
-        "  document.getElementById('inp-freq').value=freq;"
-        "  setTimeout(load,1000);"
-        "}"
-        "function drawWFLine(data){"
-        "  if(!wfCtx)return;"
-        "  var w=wfCanvas.width,h=wfCanvas.height;"
-        "  var img=wfCtx.getImageData(0,0,w,h-1);"
-        "  wfCtx.putImageData(img,0,1);"
-        "  var binW=w/data.length;"
-        "  for(var i=0;i<data.length;i++){"
-        "    var v=data[i];"
-        "    var n=(v+120)/50;"
-        "    if(n<0)n=0;if(n>1)n=1;"
-        "    var r=Math.floor(n*n*255),g=Math.floor(n*180),b=Math.floor((1-n)*255);"
-        "    if(n>0.6){r=255;g=200+Math.floor((n-0.6)*137);b=Math.floor((n-0.6)*2.5*255);}"
-        "    wfCtx.fillStyle='rgb('+r+','+g+','+b+')';"
-        "    wfCtx.fillRect(Math.floor(i*binW),0,Math.ceil(binW),1);"
-        "  }"
-        "}"
-        "function initWF(){"
-        "  wfCanvas=document.getElementById('wf-canvas');"
-        "  wfCtx=wfCanvas.getContext('2d');"
-        "  wfCanvas.width=700;wfCanvas.height=200;"
-        "  wfCtx.fillStyle='#000';wfCtx.fillRect(0,0,700,200);"
-        "}"
-        "load();setInterval(load,5000);initWF();"
-        "</script></body></html>";
-
-    http_send(fd, 200, "text/html", html, strlen(html));
-}
-
+// (CubeCell GG Page removed)
 static void serve_fanet_page(int32_t fd)
 {
     const char *html =
@@ -5596,7 +5584,6 @@ static void serve_fanet_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
-        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a class='active' href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -5861,7 +5848,6 @@ static void serve_devices_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
-        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -6167,24 +6153,15 @@ static void serve_devices_page(int32_t fd)
         "  if(ccSeen[c.name])return;ccSeen[c.name]=1;"
         "  ccOpts+='<option value=\"'+c.name+'\"'+(cc.profile==c.name?' selected':'')+'>&#x1f4e1; '+c.desc+'</option>';});"
         "}else{ccOpts='<option value=lacrosse>&#x1f4e1; IoT 868</option>';}"
-        // Rx column
         "h+='<tr>';"
         "h+='<td>&#x1f4e1;</td>';"
-        // Device column
         "h+='<td>CubeCell GG<br><small style=color:#888>Heltec</small></td>';"
-        // Serial column
         "h+='<td><code>'+(cc.tty||'-')+'</code></td>';"
-        // Tuner column
         "h+='<td>SX1262<br><small class=freq>858-878 MHz</small></td>';"
-        // Library column
         "h+='<td><span style=color:var(--dim)>fw '+cc.fw_version+'</span></td>';"
-        // Role dropdown column
         "h+='<td><select id=sel_cubecellgg style=\"min-width:340px\">'+ccOpts+'</select></td>';"
-        // Gain column (disabled)
         "h+='<td style=\"white-space:nowrap\"><select class=gain disabled style=opacity:0.3><option>—</option></select></td>';"
-        // PPM column (disabled)
         "h+='<td style=\"white-space:nowrap\"><input type=number disabled value=0 style=\"width:60px;opacity:0.3\"></td>';"
-        // Action column — same buttons as SDR
         "h+='<td style=\"white-space:nowrap\">';"
         "h+='<button class=\"btn btn-apply\" onclick=\"applyCubeCell()\">&#x2714; Apply</button> ';"
         "if(cc.state=='running'){"
@@ -6193,7 +6170,6 @@ static void serve_devices_page(int32_t fd)
         "h+='<button class=\"btn btn-run\" onclick=\"ccggRun()\">&#x25b6; Run</button>';"
         "}"
         "h+='</td>';"
-        // Status column
         "h+='<td>'+ccSt+'</td>';"
         "h+='</tr>';}"
         ""
@@ -6333,7 +6309,6 @@ static void serve_diagnostics_page(int32_t fd)
         "<a href='/gsm.html'>&#x1f4f6; GSM</a>"
         "<a href='/lte.html'>&#x1f4f6; LTE</a>"
         "<a href='/iot868.html'>&#x1f321;&#xfe0f; IoT 868</a>"
-        "<a href='/cubecellgg.html'>&#x1f4e1; CubeCell</a>"
         "<a href='/fanet.html'>&#x1f6a9; FANET</a>"
         "<a href='/graves.html'>&#x1f4e1; GRAVES</a>"
         "<a href='/stats.html'>&#x1f4ca; Stats</a>"
@@ -7294,6 +7269,11 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             api_get_lte(fd);
         } else if (path_sv == "/api/iot868") {
             api_get_iot868(fd);
+        } else if (path_sv == "/api/iot-history" || (path_sv.length() > 16 && path_sv.substr(0, 17) == "/api/iot-history?")) {
+            const char *q = strchr(path, '?');
+            api_get_iot_history(fd, q ? q + 1 : nullptr);
+        } else if (path_sv == "/api/iot-sensors") {
+            api_get_iot_sensors(fd);
         } else if (path_sv == "/api/cubecellgg/waterfall") {
             char *line = ccggWaterfallGetLine();
             if (line) {
@@ -7330,8 +7310,6 @@ static void handle_request(int32_t fd, const char *request, int32_t reqlen)
             serve_lte_page(fd);
         } else if (path_sv == "/iot868.html" || path_sv == "/iot868") {
             serve_iot868_page(fd);
-        } else if (path_sv == "/cubecellgg.html" || path_sv == "/cubecellgg") {
-            serve_cubecellgg_page(fd);
         } else if (path_sv == "/fanet.html" || path_sv == "/fanet") {
             serve_fanet_page(fd);
         } else if (path_sv == "/diagnostics.html" || path_sv == "/diagnostics") {

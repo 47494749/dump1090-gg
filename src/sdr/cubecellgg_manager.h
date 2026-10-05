@@ -21,13 +21,17 @@ typedef enum {
 
 // IoT decoded message from cubecellgg
 typedef struct {
-    char     proto[32];     // "lacrosse", etc.
+    char     proto[32];     // "lacrosse", "honeywell", "fineoffset", etc.
     int32_t  sensor_id;
     float    temperature;
     int32_t  humidity;      // -1 = no sensor
     int32_t  rssi;
     int32_t  battery_low;
     int32_t  new_battery;
+    int32_t  channel;       // Honeywell: cmd byte; LaCrosse: 0
+    float    wind_speed;    // m/s, -1 = not available
+    int32_t  wind_dir;      // degrees, -1 = not available
+    float    rain;          // mm, -1 = not available
     uint32_t pkt_count;
     uint64_t timestamp_ms;
 } ccgg_iot_msg_t;
