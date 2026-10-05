@@ -121,7 +121,7 @@ compiling, and deploying code — proved highly effective for this project.
 | COSPAS-SARSAT 406 MHz | not supported | **native** (ELT/EPIRB/PLB beacon decoder, BCH FEC) |
 | GSM cell scanning | not supported | **native** (GMSK demod, FCCH/SCH sync, SI decode, cell tracking) |
 | POCSAG pager decoding | not supported | **native** (FSK demod, BCH ECC, alpha/numeric, multi-baud) |
-| IoT 868 MHz | not supported | **native** (OOK/FSK: Bresser, LaCrosse, Honeywell, wMBus C/T) |
+| IoT 868 MHz | not supported | **native** (OOK/FSK: Bresser, LaCrosse, Honeywell, Fine Offset WH, wMBus C/T) |
 | Multi-SDR management | single dongle | **dynamic role assignment** (up to 8 RTL-SDR, 11 roles) |
 | SDR backend | librtlsdr only | **pluggable** (librtlsdr + libsdrgg optimized USB driver) |
 | Web control panel | not supported | **native** (HTTP REST API, live configuration) |
@@ -1040,8 +1040,9 @@ FSK/GFSK paths in a single 2 MSPS receiver centered on 868.3 MHz.
 - **Dual demodulation path**: AM-envelope pulse analysis for OOK devices and
   FM-discriminator bit recovery for FSK / GFSK signals
 - **Protocol-specific decoders currently implemented**: LaCrosse TX weather
-  sensors, Bresser 5-in-1, Honeywell CM9xx thermostats, and wireless M-Bus
-  Mode C / Mode T traffic
+  sensors, Bresser 5-in-1, Honeywell CM9xx thermostats, Fine Offset WH
+  weather stations (wind/rain/temp/humidity), and wireless M-Bus Mode C /
+  Mode T traffic
 - **Fallback classification**: unsupported traffic can still be surfaced as
   generic OOK or generic FSK messages instead of being silently discarded
 - **Tracker/API integration**: `/api/iot868` exports protocol name, modulation,
@@ -1106,6 +1107,7 @@ restarts for most settings.
   | `/api/gsm` | GET | GSM cell tracker (MCC/MNC/LAC/CellID/ARFCN) |
   | `/api/lte` | GET | LTE cell tracker and alert state (PCI/EARFCN/MIB/SIB/alerts) |
   | `/api/iot868` | GET | IoT 868 MHz device tracker (protocol, measurements, payload) |
+  | `/api/iot-history` | GET | IoT persistent sensor history (LaCrosse temperature/humidity time-series) |
   | `/api/fanet` | GET | FANET decoder statistics (preambles, packets, CRC) |
   | `/api/system-stats` | GET | System-level statistics (CPU, memory, uptime) |
   | `/api/decoder-stats` | GET | Per-decoder message counters and error rates |
@@ -1231,7 +1233,7 @@ which is listed in the protocol source column.
 | `gsm_tracker.c/.h` | GSM cell tracker and JSON API | Original implementation | GPL-3.0-or-later |
 | `gsm_calibrate.c/.h` | RTL-SDR PPM calibration via GSM carriers | Approach from [ogn-rf](https://github.com/glidernet/ogn-rf) (GPL-3.0) | GPL-3.0-or-later |
 | `lte_decode.cpp/.h`, `lte_sib.cpp/.h`, `lte_tracker.cpp/.h` | LTE cell scanner, SIB decoder and tracker | 3GPP TS 36.211/36.212/36.331; implementation notes inspired by [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) (AGPL-3.0) | GPL-2.0-or-later |
-| `iot_decode.cpp/.h`, `iot_tracker.cpp/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell, wMBus C/T) | Published sensor protocols, wireless M-Bus public framing, [rtl_433](https://github.com/merbanan/rtl_433) protocol reference (GPL-2.0) | GPL-2.0-or-later |
+| `iot_decode.cpp/.h`, `iot_tracker.cpp/.h`, `iot_history.cpp/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell, Fine Offset WH, wMBus C/T) and persistent sensor history | Published sensor protocols, wireless M-Bus public framing, [rtl_433](https://github.com/merbanan/rtl_433) protocol reference (GPL-2.0) | GPL-2.0-or-later |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (FSK, BCH, multi-baud) | ITU-R M.584, ETSI ETS 300 133-2 (public standards) | GPL-3.0-or-later |
 | `elm.c/.h` | Comm-D ELM reassembly | ICAO Annex 10 Vol IV (Comm-D framing) | GPL-3.0-or-later |
 | `cpdlc_decode.c/.h` | FANS-1/A CPDLC message decoder | ICAO Doc 9705, RTCA DO-258A, ASN.1 constraints from [libacars](https://github.com/szpajder/libacars) | GPL-3.0-or-later |
@@ -1637,8 +1639,9 @@ These are included in the source tree and compiled directly into the binary.
 | `lte_decode.c/.h` | LTE PSS/SSS synchronization, PBCH/SIB1 decode | Approach from [LTE-Cell-Scanner](https://github.com/JiaoXianjun/LTE-Cell-Scanner) by James Peroulas (AGPL-3.0); 3GPP TS 36.211, 36.212, 36.331 standards |
 | `lte_sib.cpp/.h` | LTE SIB1 plus SIB2/3/4/5/6/7/10/11/12/14 decode, PDCCH/PDSCH, ETWS/CMAS alerts | 3GPP TS 36.212, 36.331 standards |
 | `lte_tracker.cpp/.h` | LTE cell tracker with cell database | Original |
-| `iot_decode.cpp/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell CM9xx, wMBus C/T) | Published sensor protocols, wireless M-Bus public framing, [rtl_433](https://github.com/merbanan/rtl_433) (GPL-2.0) |
+| `iot_decode.cpp/.h` | IoT 868 MHz ISM decoder (OOK/FSK: Bresser, LaCrosse, Honeywell CM9xx, Fine Offset WH, wMBus C/T) | Published sensor protocols, wireless M-Bus public framing, [rtl_433](https://github.com/merbanan/rtl_433) (GPL-2.0) |
 | `iot_tracker.cpp/.h` | IoT device state tracker | Original |
+| `iot_history.cpp/.h` | IoT persistent history ring buffer (LaCrosse sensor data) | Original |
 | `pocsag_demod.c/.h` | POCSAG pager decoder (512/1200/2400 baud, BCH ECC) | ITU-R M.584, ETSI ETS 300 133-2 standards |
 | `sdr_receiver.c/.h` | Multi-SDR receiver manager (dynamic role assignment) | Original (sdr_backend abstraction layer) |
 | `sdr_backend.c/.h` | SDR hardware abstraction layer (vtable dispatch, rtlsdr wrapper) | Original |

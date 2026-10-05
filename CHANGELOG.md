@@ -10,6 +10,67 @@ actually present here.
 
 ---
 
+### v1.0.11 (2026-10-05)
+
+**Comm-B (Mode S EHS) decoder hardening:**
+- BDS 5.0: reject messages where `|GS - TAS| > 200 kts` (was only penalized);
+  tighten penalty threshold to 150 kts with heavier score impact
+- BDS 6.0: add IAS vs Mach physical cross-check — compute sea-level Mach floor
+  (`IAS / 661.47`), reject if reported Mach < 80% of that floor, reject
+  impossible combinations (`IAS > 350 && Mach < 0.3`, `IAS < 100 && Mach > 0.7`)
+- BDS 4.4 (MRAR): add ISA model internal cross-check — derive pressure altitude
+  from reported pressure, compute expected ISA temperature, reject if deviation
+  > 50°C, penalize if > 35°C; add wind/turbulence coherence penalty (wind > 150 kts
+  with NIL turbulence); add high-altitude humidity penalty (> 80% RH at < 350 hPa)
+- BDS 4.5 (MHAR): add ISA model pressure/temperature cross-check matching BDS 4.4
+
+**Comm-B contextual validation (Phase 2):**
+- MRAR/MHAR data now validated against known aircraft barometric altitude before
+  being stored in per-aircraft state. If the aircraft's baro altitude is known,
+  temperature and pressure values are checked against the ISA (International
+  Standard Atmosphere) model. Temperature deviations > 40°C or pressure
+  deviations > 15% (minimum 30 hPa) cause the entire MRAR or MHAR to be rejected.
+  This prevents mis-identified Comm-B messages from polluting aircraft state with
+  physically impossible meteorological values.
+
+**IoT persistent history (new):**
+- New `iot_history.cpp/.h`: persistent ring buffer for LaCrosse temperature/humidity
+  sensor data, backed by binary file (`/etc/dump1090-gg/iot_history.dat`)
+- 500,000 record capacity (~12 MB), 24 bytes per record, saves to disk every 50 records
+- Thread-safe recording from both SDR decoder and CubeCell paths
+- JSON API endpoints: `iotHistoryToJSON()` with server-side downsampling,
+  `iotHistorySensorsJSON()` for sensor inventory with last values
+
+**CubeCell GG multi-protocol support:**
+- Added Honeywell CM9xx thermostat protocol parsing: device ID, command byte,
+  temperature extraction
+- Added Fine Offset WH weather station protocol parsing: temperature, humidity,
+  wind speed (m/s), wind direction, rain accumulation (mm)
+- `ccgg_iot_msg_t` struct extended with `channel`, `wind_speed`, `wind_dir`, `rain` fields
+- Per-protocol panel log formatting (distinct messages for LaCrosse, Honeywell, Fine Offset)
+- CubeCell firmware updated to v1.0.4
+
+**SDR multi-device fix:**
+- FC0012 demod fixup: in multi-device setups, opening an R820T device can overwrite
+  the FC0012's demod registers with Low-IF/single-ADC config (0x4D instead of 0xCD).
+  After streaming starts, the code now re-asserts Zero-IF dual-ADC mode
+  (`page0:0x08=0xCD`, `page1:0xB1=0x1B`, `page1:0x15=0x00`) for FC0012/FC0013 devices.
+
+**SDR receiver robustness:**
+- New `reconfiguring` guard flag on `sdr_receiver_t`: prevents the hotplug health
+  monitor from triggering recovery actions while a receiver is in the middle of
+  a role reconfiguration (stop → configure → restart). Flag is set at entry and
+  cleared on all exit paths (success and error).
+
+**Panel:**
+- Emergency squawk badges with ADS-B emergency type labels: the aircraft table now
+  shows pulsing badges for ADS-B emergency states (LIFEGUARD, MINFUEL, NORDO,
+  HIJACK, DOWNED, GENERAL EMERGENCY) decoded from the `emergency` field, in addition
+  to the existing squawk-based detection (7500/7600/7700)
+- Removed stale waterfall debug line
+
+---
+
 ### v1.0.10 (2026-09-21)
 
 **CubeCell GG IoT receiver integration (new):**
